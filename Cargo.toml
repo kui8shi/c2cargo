@@ -1,0 +1,7 @@
+[package]
+name = "c2cargo"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+autoconf-parser = { git = "https://github.com/kui8shi/autoconf-parser.git" }
