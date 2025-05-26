@@ -14,41 +14,20 @@ use autoconf_parser::{
 };
 use std::collections::{HashMap, HashSet};
 
-use flatten::Flattener;
-use variable::VariableAnalyzer;
 use case::{CaseAnalyzer, CaseMatch};
 use eval::{EvalAnalyzer, EvalMatch};
+use flatten::Flattener;
+use variable::VariableAnalyzer;
 
-mod flatten;
-mod variable;
 mod case;
 mod eval;
+mod flatten;
+mod variable;
 
 type TopLevelCommand = CommandWrapper<String>;
 type TopLevelWord = Word<String, TopLevelCommand>;
 type MinimalParameterSubstitution =
     ParameterSubstitution<Parameter<String>, TopLevelWord, TopLevelCommand, Arithmetic<String>>;
-
-/// Find case statements matching the given variables in the top-level commands.
-pub fn find_case_matches(
-    commands: &[TopLevelCommand],
-    var_names: Vec<String>,
-) -> Vec<CaseMatch> {
-    let mut finder = CaseAnalyzer::new(var_names);
-    for cw in commands {
-        finder.visit_command_wrapper(cw);
-    }
-    finder.matches
-}
-
-/// Find `eval` commands that generate dynamic variable references.
-pub fn find_eval_dynamic_refs(commands: &[TopLevelCommand]) -> Vec<EvalMatch> {
-    let mut finder = EvalAnalyzer::new();
-    for cw in commands {
-        finder.visit_command_wrapper(cw);
-    }
-    finder.matches
-}
 
 /// Visitor trait for walking over the AST nodes.
 pub trait AstVisitor: Sized {
@@ -601,5 +580,28 @@ impl Analyzer {
                 })
                 .collect()
         })
+    }
+
+    /// Find case statements matching the given variables in the top-level commands.
+    pub fn find_case_matches(&self, var_names: &[String]) -> Vec<CaseMatch> {
+        let mut finder = CaseAnalyzer::new(var_names.to_vec());
+        for node in &self.nodes {
+            let old = finder.matches.len();
+            finder.visit_command(&node.cmd);
+            let found = old < finder.matches.len();
+            if found {
+                finder.ids.push(node.id);
+            }
+        }
+        finder.matches
+    }
+
+    /// Find `eval` commands that generate dynamic variable references.
+    pub fn find_eval_dynamic_refs(&self) -> Vec<EvalMatch> {
+        let mut finder = EvalAnalyzer::new();
+        for node in &self.nodes {
+            finder.visit_command(&node.cmd);
+        }
+        finder.matches
     }
 }

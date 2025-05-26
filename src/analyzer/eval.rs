@@ -23,7 +23,9 @@ pub struct EvalAnalyzer {
 impl EvalAnalyzer {
     /// Create a new EvalFinder.
     pub fn new() -> Self {
-        Self { matches: Vec::new() }
+        Self {
+            matches: Vec::new(),
+        }
     }
 }
 
@@ -34,7 +36,8 @@ impl AstVisitor for EvalAnalyzer {
                 let is_eval = match first {
                     Word::Single(f) => matches!(f, WordFragment::Literal(t) if t == "eval"),
                     Word::Concat(frags) => {
-                        frags.len() == 1 && matches!(&frags[0], WordFragment::Literal(t) if t == "eval")
+                        frags.len() == 1
+                            && matches!(&frags[0], WordFragment::Literal(t) if t == "eval")
                     }
                     _ => false,
                 };
@@ -47,7 +50,9 @@ impl AstVisitor for EvalAnalyzer {
                                     for frag in frags.iter().skip(1) {
                                         if let WordFragment::DoubleQuoted(inner) = frag {
                                             for inner_frag in inner {
-                                                if let WordFragment::Param(Parameter::Var(n)) = inner_frag {
+                                                if let WordFragment::Param(Parameter::Var(n)) =
+                                                    inner_frag
+                                                {
                                                     params.push(n.clone());
                                                 }
                                             }

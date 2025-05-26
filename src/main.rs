@@ -1,6 +1,4 @@
 use analyzer::Analyzer;
-use autoconf_parser::ast::minimal::{Command, Word, WordFragment};
-use autoconf_parser::ast::Parameter;
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -38,7 +36,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     stdin().read_to_string(&mut input)?;
     // Create and run the dependency analyzer
     let analyzer = Analyzer::new(input, Some(200));
-    migrate(&analyzer)?;
+    dbg!(analyzer.find_case_matches(&["host".into(), "host_cpu".into()]));
+    // migrate(&analyzer)?;
     Ok(())
 }
 

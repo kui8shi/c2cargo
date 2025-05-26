@@ -19,12 +19,17 @@ pub(super) struct CaseAnalyzer {
     var_names: Vec<String>,
     /// Collected case matches where the variable matches one of `var_names`.
     pub matches: Vec<CaseMatch>,
+    pub ids: Vec<usize>,
 }
 
 impl CaseAnalyzer {
     /// Create a new MatchFinder for the given variable names.
     pub fn new(var_names: Vec<String>) -> Self {
-        Self { var_names, matches: Vec::new() }
+        Self {
+            var_names,
+            matches: Vec::new(),
+            ids: Vec::new(),
+        }
     }
 }
 
