@@ -6,6 +6,7 @@ use std::{
     io::{stdin, Read},
 };
 mod analyzer;
+mod analysis;
 
 #[derive(Serialize)]
 struct ClaudeRequest {
@@ -34,13 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read input from stdin
     let mut input = String::new();
     stdin().read_to_string(&mut input)?;
-    // Create and run the dependency analyzer
-    let analyzer = Analyzer::new(input, Some(200));
-    dbg!(analyzer.find_case_matches(&["host".into(), "host_cpu".into()]));
+    analysis::analysis(input)?;
+    // dbg!(analyzer.find_case_matches(&["host".into(), "host_cpu".into()]));
     // migrate(&analyzer)?;
     Ok(())
 }
 
+/*
 fn migrate(analyzer: &Analyzer) -> Result<(), Box<dyn std::error::Error>> {
     let mut fragments = Vec::new();
     for id in topological_sort(analyzer) {
@@ -135,3 +136,4 @@ fn req(prompt: &str) -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
+*/
