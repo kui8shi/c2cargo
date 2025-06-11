@@ -2,7 +2,7 @@
 use autoconf_parser::{
     ast::{
         node::{
-            Condition, GuardBodyPair, M4Argument, M4Macro, NodeId, NodeKind, Operator,
+            Condition, GuardBodyPair, M4Argument, M4Macro, NodeId, NodeKind, NodePool, Operator,
             ParameterSubstitution, PatternBodyPair, Redirect, Word, WordFragment,
         },
         Arithmetic, Parameter,
@@ -480,24 +480,22 @@ impl Analyzer {
 
         let nodes = nodes
             .into_iter()
-            .map(
-                |(node_id, n)| {
-                    let node = Node {
-                        node_id,
-                        chunk_id: None,
-                        comment: n.comment,
-                        ranges: n.range.map_or(Vec::new(), |r| vec![r]),
-                        kind: n.kind,
-                        parent: None,
-                        children: None,
-                        defines: HashMap::new(),
-                        uses: HashMap::new(),
-                        var_dependents: HashSet::new(),
-                        var_dependencies: HashSet::new(),
-                    };
-                    (node_id, node)
-                },
-            )
+            .map(|(node_id, n)| {
+                let node = Node {
+                    node_id,
+                    chunk_id: None,
+                    comment: n.comment,
+                    ranges: n.range.map_or(Vec::new(), |r| vec![r]),
+                    kind: n.kind,
+                    parent: None,
+                    children: None,
+                    defines: HashMap::new(),
+                    uses: HashMap::new(),
+                    var_dependents: HashSet::new(),
+                    var_dependencies: HashSet::new(),
+                };
+                (node_id, node)
+            })
             .collect::<Slab<Node>>();
 
         let (top_ids, mut nodes) =
@@ -646,8 +644,8 @@ impl Analyzer {
     }
 
     /// Get node representation by id
-    pub fn get_node(&self, node_id: NodeId) -> Option<&Node> {
-        self.nodes.get(node_id)
+    pub fn get_node(&self, node_id: NodeId) -> &Node {
+        &self.nodes[node_id]
     }
 
     /// Get original content of commands in specified node
@@ -658,7 +656,7 @@ impl Analyzer {
                 .map(|&(a, b)| {
                     // FIXME: Poorly working with this lines extraction logic.
                     // Will fix it later.
-                    self.lines[a-1..b-1]
+                    self.lines[a - 1..b - 1]
                         .iter()
                         .filter(|s| !s.is_empty())
                         .map(|s| s.as_str())
@@ -667,6 +665,11 @@ impl Analyzer {
                 })
                 .collect()
         })
+    }
+
+    /// Recover the content of commands from the AST structure
+    pub fn recover_content(&self, node_id: NodeId) -> String {
+        self.node_to_string(node_id, 0)
     }
 
     /// Find case statements matching the given variables in the top-level commands.
@@ -680,5 +683,11 @@ impl Analyzer {
     pub fn find_eval_dynamic_refs(&self) -> Vec<EvalMatch> {
         let finder = EvalAnalyzer::find_eval_dynamic_refs(&self.nodes, &self.top_ids);
         finder.matches
+    }
+}
+
+impl NodePool<String> for Analyzer {
+    fn get_node_kind(&self, node_id: NodeId) -> &NodeKind<String> {
+        &self.nodes[node_id].kind
     }
 }
