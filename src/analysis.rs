@@ -22,10 +22,10 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
 
     // Display dependency information for each command
     println!("\nCommand dependencies:");
-    for &i in &analyzer.get_ids() {
-        if analyzer.get_node(i).unwrap().ranges.first().is_none_or(|(s, e)| s == e) {
-            continue;
-        }
+    for &i in &analyzer.get_top_ids() {
+        // if analyzer.get_node(i).ranges.first().is_none_or(|(s, e)| s == e) {
+        //     continue;
+        // }
         print!("\x1b[33mCommand {}: ", i);
 
         // Print the command (simplified)
@@ -33,9 +33,10 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
             print!("{:?}\x1b[m\n{}", analyzer.get_ranges(i).unwrap(), cmd.join("\n"));
             // print!("{:?}\n{:?}", analyzer.get_ranges(i).unwrap(), cmd);
         }
-        println!("");
 
-        println!("  Is Top Node: {}", analyzer.get_node(i).unwrap().is_top_node());
+        println!("\n===========when recovering==========");
+
+        println!("{}", analyzer.recover_content(i));
 
         // Print defined variables
         if let Some(defines) = analyzer.get_defined_variables(i) {

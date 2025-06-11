@@ -4,7 +4,11 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-autoconf-parser = { git = "https://github.com/kui8shi/autoconf-parser.git" }
+# autoconf-parser = { git = "https://github.com/kui8shi/autoconf-parser.git" }
 owned_chars = "0.3.2"
 reqwest = { version = "0.12.15", features = ["json", "blocking"] }
 serde = { version = "1.0.219", features = ["derive"] }
+slab = "0.4.9"
+
+[dependencies.autoconf-parser]
+path="../autoconf-parser"

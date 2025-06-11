@@ -22,3 +22,4 @@ target/
 
 # dotenv
 .env
+CLAUDE.md
