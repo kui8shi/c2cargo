@@ -2,8 +2,8 @@
 use autoconf_parser::{
     ast::{
         node::{
-            Condition, GuardBodyPair, M4Argument, M4Macro, NodeId, NodeKind, NodePool, Operator,
-            ParameterSubstitution, PatternBodyPair, Redirect, Word, WordFragment,
+            self, Condition, GuardBodyPair, M4Argument, M4Macro, NodeId, NodeKind, NodePool,
+            Operator, ParameterSubstitution, PatternBodyPair, Redirect, Word, WordFragment,
         },
         Arithmetic, Parameter,
     },
@@ -53,23 +53,33 @@ pub trait AstVisitor: Sized {
         self.walk_assignment(name, word);
     }
 
+    /// Intermediate function for visiting a brace statement
+    fn visit_brace(&mut self, body: &[NodeId]) {
+        self.walk_brace(body);
+    }
+
     /// Intermediate function for visiting a guard-body pair (e.g., in while/until/if).
     fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<String>) {
         self.walk_guard_body_pair(pair);
     }
 
+    /// Intermediate function for visiting a pattern-body pair (an arm in case).
+    fn visit_pattern_body_pair(&mut self, arm: &PatternBodyPair<String>) {
+        self.walk_pattern_body_pair(arm);
+    }
+
     /// Intermediate function for visiting an `if` statement
-    fn visit_if(&mut self, conditionals: &Vec<GuardBodyPair<String>>, else_branch: &Vec<NodeId>) {
+    fn visit_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
         self.walk_if(conditionals, else_branch);
     }
 
     /// Intermediate function for visiting a `for` statement
-    fn visit_for(&mut self, var: &str, words: &Vec<Word<String>>, body: &Vec<NodeId>) {
+    fn visit_for(&mut self, var: &str, words: &[Word<String>], body: &[NodeId]) {
         self.walk_for(var, words, body);
     }
 
     /// Intermediate function for visiting a `case` statement
-    fn visit_case(&mut self, word: &Word<String>, arms: &Vec<PatternBodyPair<String>>) {
+    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
         self.walk_case(word, arms);
     }
 
@@ -84,7 +94,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Intermediate function for visiting a pipe
-    fn visit_pipe(&mut self, bang: bool, cmds: &Vec<NodeId>) {
+    fn visit_pipe(&mut self, bang: bool, cmds: &[NodeId]) {
         self.walk_pipe(bang, cmds);
     }
 
@@ -134,11 +144,7 @@ pub trait AstVisitor: Sized {
         match &node.kind.clone() {
             NodeKind::Assignment(name, word) => self.visit_assignment(name, word),
             NodeKind::Cmd(words) => self.visit_command(words),
-            NodeKind::Brace(body) => {
-                for n in body {
-                    self.visit_node(*n);
-                }
-            }
+            NodeKind::Brace(body) => self.visit_brace(body),
             NodeKind::Subshell(body) => {
                 for n in body {
                     self.visit_node(*n);
@@ -165,8 +171,15 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk an assignment statement.
-    fn walk_assignment(&mut self, name: &str, word: &Word<String>) {
+    fn walk_assignment(&mut self, _name: &str, word: &Word<String>) {
         self.visit_word(word);
+    }
+
+    /// Walk a brace statement.
+    fn walk_brace(&mut self, body: &[NodeId]) {
+        for n in body {
+            self.visit_node(*n);
+        }
     }
 
     /// Walk a command.
@@ -177,7 +190,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk an `if` statement
-    fn walk_if(&mut self, conditionals: &Vec<GuardBodyPair<String>>, else_branch: &Vec<NodeId>) {
+    fn walk_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
         for pair in conditionals {
             self.visit_guard_body_pair(pair);
         }
@@ -187,7 +200,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a `for` statement
-    fn walk_for(&mut self, var: &str, words: &Vec<Word<String>>, body: &Vec<NodeId>) {
+    fn walk_for(&mut self, _var: &str, words: &[Word<String>], body: &[NodeId]) {
         for word in words {
             self.visit_word(word);
         }
@@ -197,15 +210,10 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a `case` statement
-    fn walk_case(&mut self, word: &Word<String>, arms: &Vec<PatternBodyPair<String>>) {
+    fn walk_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
         self.visit_word(word);
         for arm in arms {
-            for w in &arm.patterns {
-                self.visit_word(w);
-            }
-            for c in &arm.body {
-                self.visit_node(*c);
-            }
+            self.visit_pattern_body_pair(arm);
         }
     }
 
@@ -217,15 +225,25 @@ pub trait AstVisitor: Sized {
         }
     }
 
+    /// Walk a pattern-body pair node.
+    fn walk_pattern_body_pair(&mut self, arm: &PatternBodyPair<String>) {
+        for w in &arm.patterns {
+            self.visit_word(w);
+        }
+        for c in &arm.body {
+            self.visit_node(*c);
+        }
+    }
+
     /// Walk a pipe
-    fn walk_pipe(&mut self, bang: bool, cmds: &Vec<NodeId>) {
+    fn walk_pipe(&mut self, _bang: bool, cmds: &[NodeId]) {
         for cmd in cmds {
             self.visit_node(*cmd);
         }
     }
 
     /// Walk a command chain.
-    fn walk_chain(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
+    fn walk_chain(&mut self, _negated: bool, condition: &Condition<String>, cmd: NodeId) {
         self.visit_condition(condition);
         self.visit_node(cmd);
     }
@@ -410,7 +428,7 @@ pub(crate) struct Node {
     /// Index of the node in the original list
     pub node_id: NodeId,
     /// ID of the top-most parent node
-    pub chunk_id: Option<NodeId>,
+    pub top_id: Option<NodeId>,
     /// trailing comments
     pub comment: Option<String>,
     /// Range of line numbers where the body is effectively referenced.
@@ -441,7 +459,11 @@ impl Node {
     }
 
     pub fn is_top_node(&self) -> bool {
-        self.chunk_id.is_some_and(|id| id == self.node_id)
+        self.top_id.is_some_and(|id| id == self.node_id)
+    }
+
+    pub fn is_child_node(&self) -> bool {
+        self.parent.is_some()
     }
 }
 
@@ -470,6 +492,8 @@ pub struct Analyzer {
     top_ids: Vec<NodeId>,
     /// Map of variable names to indices of commands that define them
     var_definitions: HashMap<String, Vec<(usize, Vec<Guard>)>>,
+    /// State field used for printing a node
+    focus: Option<NodeId>,
 }
 
 impl Analyzer {
@@ -483,7 +507,7 @@ impl Analyzer {
             .map(|(node_id, n)| {
                 let node = Node {
                     node_id,
-                    chunk_id: None,
+                    top_id: None,
                     comment: n.comment,
                     ranges: n.range.map_or(Vec::new(), |r| vec![r]),
                     kind: n.kind,
@@ -499,7 +523,7 @@ impl Analyzer {
             .collect::<Slab<Node>>();
 
         let (top_ids, mut nodes) =
-            Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(100));
+            Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
 
         let mut var_definitions = HashMap::new();
 
@@ -523,6 +547,7 @@ impl Analyzer {
             nodes,
             top_ids,
             var_definitions: HashMap::new(),
+            focus: None,
         };
 
         let mut updates = Vec::new();
@@ -668,8 +693,11 @@ impl Analyzer {
     }
 
     /// Recover the content of commands from the AST structure
-    pub fn recover_content(&self, node_id: NodeId) -> String {
-        self.node_to_string(node_id, 0)
+    pub fn recover_content(&mut self, node_id: NodeId) -> String {
+        self.focus = Some(node_id);
+        let ret = self.node_to_string(node_id, 0);
+        self.focus = None;
+        ret
     }
 
     /// Find case statements matching the given variables in the top-level commands.
@@ -687,7 +715,14 @@ impl Analyzer {
 }
 
 impl NodePool<String> for Analyzer {
-    fn get_node_kind(&self, node_id: NodeId) -> &NodeKind<String> {
-        &self.nodes[node_id].kind
+    fn get_node_for_display(
+        &self,
+        node_id: NodeId,
+    ) -> Option<(&NodeKind<String>, Option<&String>)> {
+        let is_child = self.focus.unwrap() != node_id;
+        self.nodes
+            .get(node_id)
+            .filter(|n| n.is_top_node() ^ is_child)
+            .map(|n| (&n.kind, n.comment.as_ref()))
     }
 }

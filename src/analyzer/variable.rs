@@ -65,7 +65,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         self.denied = self.conds.pop();
     }
 
-    fn visit_if(&mut self, conditionals: &Vec<GuardBodyPair<String>>, else_branch: &Vec<NodeId>) {
+    fn visit_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
         for pair in conditionals {
             self.visit_guard_body_pair(pair);
         }
@@ -79,12 +79,12 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         }
     }
 
-    fn visit_for(&mut self, var: &str, words: &Vec<Word<String>>, body: &Vec<NodeId>) {
+    fn visit_for(&mut self, var: &str, words: &[Word<String>], body: &[NodeId]) {
         self.defines.insert(var.to_string(), self.conds.clone());
         self.walk_for(var, words, body);
     }
 
-    fn visit_case(&mut self, word: &Word<String>, arms: &Vec<PatternBodyPair<String>>) {
+    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
         self.visit_word(word);
         for arm in arms {
             for w in &arm.patterns {

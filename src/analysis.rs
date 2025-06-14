@@ -6,7 +6,7 @@ use std::{fs::File, io::Write};
 
 pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the lexer and parser
-    let analyzer = Analyzer::new(&input, None);
+    let mut analyzer = Analyzer::new(&input, None);
     let top_ids = analyzer.get_top_ids();
 
     // Print information about the analyzed script

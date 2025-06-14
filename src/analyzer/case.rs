@@ -50,13 +50,13 @@ impl<'a> AstVisitor for CaseAnalyzer<'a> {
         &self.nodes[node_id]
     }
 
-    fn visit_case(&mut self, word: &Word<String>, arms: &Vec<PatternBodyPair<String>>) {
+    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
         if let Word::Single(fragment) = word {
             if let WordFragment::Param(Parameter::Var(name)) = fragment {
                 if self.var_names.contains(name) {
                     self.matches.push(CaseMatch {
                         var: word.clone(),
-                        arms: arms.clone(),
+                        arms: arms.to_vec(),
                     });
                 }
             }
