@@ -132,7 +132,14 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
 
     fn visit_parameter(&mut self, param: &Parameter<String>) {
         if let Parameter::Var(name) = param {
-            self.uses.insert(name.clone(), self.conds.clone());
+            self.uses
+                .entry(name.clone())
+                .and_modify(|old_conds| {
+                    if old_conds.len() > self.conds.len() {
+                        *old_conds = self.conds.clone()
+                    }
+                })
+                .or_insert(self.conds.clone());
         }
         self.walk_parameter(param);
     }

@@ -22,79 +22,107 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
 
     // Display dependency information for each command
     println!("\nCommand dependencies:");
-    for &i in &analyzer.get_top_ids() {
-        // if analyzer.get_node(i).ranges.first().is_none_or(|(s, e)| s == e) {
-        //     continue;
-        // }
-        print!("\x1b[33mCommand {}: ", i);
-
-        // Print the command (simplified)
-        if let Some(cmd) = analyzer.get_content(i) {
-            print!("{:?}\x1b[m\n{}", analyzer.get_ranges(i).unwrap(), cmd.join("\n"));
-            // print!("{:?}\n{:?}", analyzer.get_ranges(i).unwrap(), cmd);
+    let mut chunk_file = File::create("/tmp/chunks.sh")?;
+    for chunk in &analyzer.fuse_chunks(Some(3), true) {
+        for &i in chunk {
+            writeln!(chunk_file, "Command {}: {:?}", i, analyzer.get_ranges(i).unwrap())?;
         }
 
-        println!("\n===========when recovering==========");
+        for &i in chunk {
+            writeln!(chunk_file, "{}", analyzer.recover_content(i))?;
+        }
 
-        println!("{}", analyzer.recover_content(i));
+        for &i in chunk {
+            // if analyzer.get_node(i).ranges.first().is_none_or(|(s, e)| s == e) {
+            //     continue;
+            // }
+            println!(
+                "\x1b[33mCommand {}: {:?}\x1b[m",
+                i,
+                analyzer.get_ranges(i).unwrap()
+            );
+        }
 
-        // Print defined variables
-        if let Some(defines) = analyzer.get_defined_variables(i) {
-            if !defines.is_empty() {
-                print!("  Defines: ");
-                for (idx, var) in defines.iter().enumerate() {
-                    if idx > 0 {
-                        print!(", ");
+        for &i in chunk {
+            // Print the command (simplified)
+            // if let Some(cmd) = analyzer.get_content(i) {
+            //     print!(
+            //         "{:?}\x1b[m\n{}",
+            //         analyzer.get_ranges(i).unwrap(),
+            //         cmd.join("\n")
+            //     );
+            //     // print!("{:?}\n{:?}", analyzer.get_ranges(i).unwrap(), cmd);
+            // }
+
+            // println!("\n===========when recovering==========");
+
+            println!("{}", analyzer.recover_content(i));
+
+            // Print defined variables
+            if let Some(defines) = analyzer.get_defined_variables(i) {
+                if !defines.is_empty() {
+                    print!("  Defines: ");
+                    for (idx, var) in defines.iter().enumerate() {
+                        if idx > 0 {
+                            print!(", ");
+                        }
+                        print!("{}", var);
                     }
-                    print!("{}", var);
+                    println!();
+                }
+            }
+
+            // Print used variables
+            if let Some(uses) = analyzer.get_used_variables(i) {
+                if !uses.is_empty() {
+                    print!("  Uses: ");
+                    for (idx, var) in uses.iter().enumerate() {
+                        if idx > 0 {
+                            print!(", ");
+                        }
+                        print!("{}", var);
+                    }
+                    println!();
+                }
+            }
+
+            // Print dependencies
+            if let Some(deps) = analyzer.get_dependencies(i) {
+                if !deps.is_empty() {
+                    print!("  Depends on commands: ");
+                    for (idx, &dep) in deps.iter().enumerate() {
+                        if idx > 0 {
+                            print!(", ");
+                        }
+                        print!("{}", dep);
+                    }
+                    println!();
+                }
+            }
+            if let Some((parent, branch_idx)) = analyzer.get_parent(i) {
+                print!("  Parent : {}", parent);
+                if let Some(b) = branch_idx {
+                    print!(":{}", b);
                 }
                 println!();
             }
-        }
 
-        // Print used variables
-        if let Some(uses) = analyzer.get_used_variables(i) {
-            if !uses.is_empty() {
-                print!("  Uses: ");
-                for (idx, var) in uses.iter().enumerate() {
-                    if idx > 0 {
-                        print!(", ");
+            // Print dependents
+            if let Some(deps) = analyzer.get_dependents(i) {
+                if !deps.is_empty() {
+                    print!("  Commands that depend on this: ");
+                    for (idx, &dep) in deps.iter().enumerate() {
+                        if idx > 0 {
+                            print!(", ");
+                        }
+                        print!("{}", dep);
                     }
-                    print!("{}", var);
+                    println!();
                 }
-                println!();
             }
-        }
 
-        // Print dependencies
-        if let Some(deps) = analyzer.get_dependencies(i) {
-            if !deps.is_empty() {
-                print!("  Depends on commands: ");
-                for (idx, &dep) in deps.iter().enumerate() {
-                    if idx > 0 {
-                        print!(", ");
-                    }
-                    print!("{}", dep);
-                }
-                println!();
-            }
+            println!();
         }
-
-        // Print dependents
-        if let Some(deps) = analyzer.get_dependents(i) {
-            if !deps.is_empty() {
-                print!("  Commands that depend on this: ");
-                for (idx, &dep) in deps.iter().enumerate() {
-                    if idx > 0 {
-                        print!(", ");
-                    }
-                    print!("{}", dep);
-                }
-                println!();
-            }
-        }
-
-        println!();
     }
 
     // Example of finding all commands related to a specific variable

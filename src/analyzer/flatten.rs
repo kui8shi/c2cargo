@@ -17,10 +17,17 @@ pub(super) struct Flattener {
     /// IDs of top-level nodes after flattening
     top_ids: Vec<NodeId>,
     /// Stack tracking parent nodes and whether they should be flattened
-    parent_stack: Vec<(NodeId, bool)>,
+    parent_stack: Vec<ParentInfo>,
     #[cfg(debug_assertions)]
     /// For debugging: tracks the last range start to ensure proper ordering
     last_range_start: Option<usize>,
+}
+
+#[derive(Debug)]
+struct ParentInfo {
+    node_id: NodeId,
+    branch: Option<usize>,
+    flatten: bool,
 }
 
 impl Flattener {
@@ -67,8 +74,8 @@ impl Flattener {
     fn will_flatten(&self) -> Option<NodeId> {
         self.parent_stack
             .last()
-            .filter(|(_, flatten)| *flatten)
-            .map(|(id, _)| *id)
+            .filter(|p| p.flatten)
+            .map(|p| p.node_id)
     }
 
     /// Creates a synthetic "brace" node to group children under a flattened parent
@@ -76,7 +83,7 @@ impl Flattener {
     /// When flattening a large command, smaller child commands are grouped under
     /// a brace node to maintain the hierarchical structure while keeping the
     /// parent command at the top level
-    fn insert_brace(&mut self, parent: NodeId, children: &[NodeId]) -> NodeId {
+    fn insert_brace(&mut self, parent: (NodeId, Option<usize>), children: &[NodeId]) -> NodeId {
         let brace_id = self.nodes.insert(Node {
             node_id: 0,
             top_id: None,
@@ -138,7 +145,7 @@ impl AstVisitor for Flattener {
             let top_most = self
                 .parent_stack
                 .first()
-                .map(|(id, _)| *id)
+                .map(|p| p.node_id)
                 .unwrap_or(node_id);
 
             // Now we need to find the correct top-level node for this small node.
@@ -152,13 +159,13 @@ impl AstVisitor for Flattener {
             // Then C should belong to B's top-level group, not A's.
             self.parent_stack
                 .iter()
-                .rposition(|&(_, flatten)| flatten) // Find rightmost flattened ancestor
+                .rposition(|p| p.flatten) // Find rightmost flattened ancestor
                 .and_then(|i| {
                     // If we found a flattened ancestor, look at what comes after it
                     Some(if i + 1 < self.parent_stack.len() {
                         // There's a node after the flattened ancestor - use that as top_id
                         // This node represents the "container" for children of the flattened ancestor
-                        self.parent_stack[i + 1].0
+                        self.parent_stack[i + 1].node_id
                     } else {
                         // No node after the flattened ancestor - this node becomes its own top
                         // This happens when we're directly under a flattened node
@@ -167,10 +174,10 @@ impl AstVisitor for Flattener {
                 })
                 .unwrap_or(top_most) // Fallback: if no flattened ancestors, use topmost
         });
-        if let Some((parent, _)) = self.parent_stack.last().copied() {
+        if let Some(parent) = self.parent_stack.last() {
             // Set up parent-child relationships
-            self.nodes[node_id].parent = Some(parent);
-            self.nodes[parent]
+            self.nodes[node_id].parent = Some((parent.node_id, parent.branch));
+            self.nodes[parent.node_id]
                 .children
                 .get_or_insert_default()
                 .push(node_id);
@@ -185,7 +192,11 @@ impl AstVisitor for Flattener {
         // 1. Track the current path from root to this node (for parent-child relationships)
         // 2. Track which ancestors are being flattened (the boolean flag)
         //    This helps determine top_id assignment for descendant nodes
-        self.parent_stack.push((node_id, is_large));
+        self.parent_stack.push(ParentInfo {
+            node_id,
+            branch: None,
+            flatten: is_large,
+        });
 
         // Recursively process this node's children
         self.walk_node(node_id);
@@ -221,11 +232,15 @@ impl AstVisitor for Flattener {
                 self.walk_for(var, words, body);
             } else {
                 // For small bodies, group children under a brace node
-                let brace_id = self.insert_brace(cur, body);
+                let brace_id = self.insert_brace((cur, None), body);
                 for word in words {
                     self.visit_word(word);
                 }
-                self.parent_stack.push((brace_id, false));
+                self.parent_stack.push(ParentInfo {
+                    node_id: brace_id,
+                    branch: None,
+                    flatten: false,
+                });
                 self.visit_brace(body);
                 self.parent_stack.pop();
                 // Update the for loop to use the new structure
@@ -268,13 +283,14 @@ impl AstVisitor for Flattener {
                 .collect::<Vec<_>>();
             self.nodes[cur].ranges = gap_range(self.nodes[cur].ranges.pop().unwrap(), &gaps);
             let mut new_arms = Vec::new();
-            for (arm, (body_start, body_end)) in arms.iter().zip(ranges.iter()) {
+            for (i, (arm, (body_start, body_end))) in arms.iter().zip(ranges.iter()).enumerate() {
                 if (body_end - body_start) > self.threshold {
                     new_arms.push(arm.clone());
                     self.top_ids.extend(&arm.body);
+                    self.parent_stack.last_mut().unwrap().branch = Some(i);
                     self.walk_pattern_body_pair(arm);
                 } else {
-                    let brace_id = self.insert_brace(cur, &arm.body);
+                    let brace_id = self.insert_brace((cur, Some(i)), &arm.body);
                     new_arms.push(PatternBodyPair {
                         patterns: arm.patterns.to_owned(),
                         body: vec![brace_id],
@@ -282,7 +298,11 @@ impl AstVisitor for Flattener {
                     for w in &arm.patterns {
                         self.visit_word(w);
                     }
-                    self.parent_stack.push((brace_id, false));
+                    self.parent_stack.push(ParentInfo {
+                        node_id: brace_id,
+                        branch: None,
+                        flatten: false,
+                    });
                     self.walk_brace(&arm.body);
                     self.parent_stack.pop();
                 }
@@ -324,19 +344,23 @@ impl AstVisitor for Flattener {
             self.nodes[cur].ranges = gap_range(self.nodes[cur].ranges.pop().unwrap(), &gaps);
             let mut new_conditionals = Vec::new();
             let mut new_else_branch = Vec::new();
-            for pair in conditionals {
+            for (i, pair) in conditionals.iter().enumerate() {
                 let (body_start, body_end) = self.body_range(&pair.body);
                 if body_end - body_start > self.threshold {
                     new_conditionals.push(pair.clone());
                     self.top_ids.extend(&pair.body);
                     self.walk_guard_body_pair(pair);
                 } else {
-                    let brace_id = self.insert_brace(cur, &pair.body);
+                    let brace_id = self.insert_brace((cur, Some(i)), &pair.body);
                     new_conditionals.push(GuardBodyPair {
                         condition: pair.condition.to_owned(),
                         body: vec![brace_id],
                     });
-                    self.parent_stack.push((brace_id, false));
+                    self.parent_stack.push(ParentInfo {
+                        node_id: brace_id,
+                        branch: None,
+                        flatten: false,
+                    });
                     self.walk_guard_body_pair(pair);
                     self.parent_stack.pop();
                 }
@@ -348,9 +372,13 @@ impl AstVisitor for Flattener {
                     self.top_ids.extend(else_branch);
                     self.walk_brace(else_branch);
                 } else {
-                    let brace_id = self.insert_brace(cur, &else_branch);
+                    let brace_id = self.insert_brace((cur, Some(conditionals.len())), &else_branch);
                     new_else_branch.push(brace_id);
-                    self.parent_stack.push((brace_id, true));
+                    self.parent_stack.push(ParentInfo {
+                        node_id: brace_id,
+                        branch: None,
+                        flatten: false,
+                    });
                     self.walk_brace(else_branch);
                     self.parent_stack.pop();
                 }
