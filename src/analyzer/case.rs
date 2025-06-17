@@ -12,7 +12,7 @@ pub struct CaseMatch {
 
 /// Visitor to find case statements matching given variables.
 #[derive(Debug)]
-pub(super) struct CaseAnalyzer<'a> {
+pub(super) struct CaseMatchFinder<'a> {
     nodes: &'a Slab<Node>,
     var_names: Vec<String>,
     /// Collected case matches where the variable matches one of `var_names`.
@@ -20,7 +20,7 @@ pub(super) struct CaseAnalyzer<'a> {
     pub ids: Vec<usize>,
 }
 
-impl<'a> CaseAnalyzer<'a> {
+impl<'a> CaseMatchFinder<'a> {
     /// Create a new MatchFinder for the given variable names.
     pub fn find_case_matches(
         nodes: &'a Slab<Node>,
@@ -45,7 +45,7 @@ impl<'a> CaseAnalyzer<'a> {
     }
 }
 
-impl<'a> AstVisitor for CaseAnalyzer<'a> {
+impl<'a> AstVisitor for CaseMatchFinder<'a> {
     fn get_node(&self, node_id: NodeId) -> &Node {
         &self.nodes[node_id]
     }

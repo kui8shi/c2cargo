@@ -7,13 +7,33 @@ use super::{
 
 use slab::Slab;
 
+#[derive(Debug, Clone, PartialEq, Eq, Ord)]
+pub(crate) struct VariableLocation {
+    pub node_id: NodeId,
+    pub line: usize,
+    pub is_defined: bool,
+}
+
+impl PartialOrd for VariableLocation {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some((self.line, self.is_defined).cmp(&(other.line, other.is_defined)))
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct VariableSpec {
+    pub loc: VariableLocation,
+    pub guard: Vec<Guard>,
+}
+
 #[derive(Debug)]
 pub(super) struct VariableAnalyzer<'a> {
     nodes: &'a mut Slab<Node>,
-    pub defines: HashMap<String, Vec<Guard>>,
-    pub uses: HashMap<String, Vec<Guard>>,
+    pub defines: HashMap<String, Vec<VariableSpec>>,
+    pub uses: HashMap<String, Vec<VariableSpec>>,
     conds: Vec<Guard>,
     denied: Option<Guard>,
+    cursor: Option<NodeId>,
 }
 
 impl<'a> VariableAnalyzer<'a> {
@@ -25,27 +45,45 @@ impl<'a> VariableAnalyzer<'a> {
             uses: HashMap::new(),
             conds: Vec::new(),
             denied: None,
+            cursor: None,
         }
     }
 }
 
 impl<'a> VariableAnalyzer<'a> {
     pub fn analyze(&mut self, node_id: NodeId) {
-        self.clear();
-
         self.visit_top(node_id);
-
-        // Get defined variables
-        self.nodes[node_id].defines = self.defines.clone();
-
-        // Get used variables
-        self.nodes[node_id].uses = self.uses.drain().collect();
+        self.conds.clear();
     }
 
-    fn clear(&mut self) {
-        self.defines.clear();
-        self.uses.clear();
-        self.conds.clear();
+    fn record_variable_definition(&mut self, name: &str) {
+        let var_info = VariableSpec {
+            loc: VariableLocation {
+                node_id: self.cursor.unwrap(),
+                line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
+                is_defined: true,
+            },
+            guard: self.conds.clone(),
+        };
+        self.defines
+            .entry(name.to_owned())
+            .or_insert(Vec::new())
+            .push(var_info);
+    }
+
+    fn record_variable_usage(&mut self, name: &str) {
+        let var_info = VariableSpec {
+            loc: VariableLocation {
+                node_id: self.cursor.unwrap(),
+                line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
+                is_defined: false,
+            },
+            guard: self.conds.clone(),
+        };
+        self.uses
+            .entry(name.to_owned())
+            .or_insert(Vec::new())
+            .push(var_info);
     }
 }
 
@@ -54,8 +92,32 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         &self.nodes[node_id]
     }
 
+    fn visit_top(&mut self, node_id: NodeId) {
+        let saved = self.cursor.replace(node_id);
+        self.walk_node(node_id);
+        self.cursor = saved;
+    }
+
+    fn visit_node(&mut self, node_id: NodeId) {
+        // Save
+        let saved_cursor = self.cursor.replace(node_id);
+        let saved_defs = self.defines.drain().collect();
+        let saved_uses = self.uses.drain().collect();
+        // Walk
+        if !self.get_node(node_id).is_top_node() {
+            self.walk_node(node_id);
+        }
+        // Assign collected variable to the node
+        self.nodes[node_id].defines = self.defines.drain().collect();
+        self.nodes[node_id].uses = self.uses.drain().collect();
+        // Recover
+        self.cursor = saved_cursor;
+        self.defines = saved_defs;
+        self.defines = saved_uses;
+    }
+
     fn visit_assignment(&mut self, name: &str, word: &Word<String>) {
-        self.defines.insert(name.to_string(), self.conds.clone());
+        self.record_variable_definition(name);
         self.walk_assignment(name, word);
     }
 
@@ -80,7 +142,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     }
 
     fn visit_for(&mut self, var: &str, words: &[Word<String>], body: &[NodeId]) {
-        self.defines.insert(var.to_string(), self.conds.clone());
+        self.record_variable_definition(var);
         self.walk_for(var, words, body);
     }
 
@@ -111,7 +173,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
 
     fn visit_word_fragment(&mut self, f: &WordFragment<String>) {
         if let WordFragment::Param(Parameter::Var(name)) = f {
-            self.uses.insert(name.clone(), self.conds.clone());
+            self.record_variable_usage(name);
         }
         self.walk_word_fragment(f);
     }
@@ -123,7 +185,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
             | Arithmetic::PostDecr(name)
             | Arithmetic::PreIncr(name)
             | Arithmetic::PreDecr(name) => {
-                self.uses.insert(name.clone(), self.conds.clone());
+                self.record_variable_usage(name);
             }
             _ => (),
         }
@@ -132,14 +194,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
 
     fn visit_parameter(&mut self, param: &Parameter<String>) {
         if let Parameter::Var(name) = param {
-            self.uses
-                .entry(name.clone())
-                .and_modify(|old_conds| {
-                    if old_conds.len() > self.conds.len() {
-                        *old_conds = self.conds.clone()
-                    }
-                })
-                .or_insert(self.conds.clone());
+            self.record_variable_usage(name);
         }
         self.walk_parameter(param);
     }
@@ -149,10 +204,10 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
             if let Some(shell_vars) = &effects.shell_vars {
                 for var in shell_vars {
                     if var.is_used() {
-                        self.uses.insert(var.0.clone(), self.conds.clone());
+                        self.record_variable_usage(&var.name);
                     }
                     if var.is_defined() {
-                        self.defines.insert(var.0.clone(), self.conds.clone());
+                        self.record_variable_definition(&var.name);
                     }
                 }
             }

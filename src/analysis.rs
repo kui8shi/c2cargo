@@ -236,6 +236,15 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
         }
     }
 
+    // === Backward Taint Analysis for Eval ===
+    println!("\n=== Backward Taint Analysis for Eval ===");
+    let eval_results = analyzer.find_eval_assignments();
+    for eval_match in eval_results {
+        println!("Eval expression @{}: {:?} = {:?}", eval_match.node_id, eval_match.lhs, eval_match.rhs);
+        println!("  Used Vars: {:?}", eval_match.used_vars());
+        println!("  Related Commands: {:?}", analyzer.get_all_definition(eval_match.used_vars().first().unwrap(), eval_match.node_id))
+    }
+
     // === Variable dependency edge profiling ===
     use std::collections::HashMap;
 

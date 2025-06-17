@@ -10,21 +10,24 @@ use autoconf_parser::{
     lexer::Lexer,
     parse::NodeParser,
 };
+use lazy_init::LazyInitializer;
 use std::collections::{HashMap, HashSet};
 
-use case::{CaseAnalyzer, CaseMatch};
-use eval::{EvalAnalyzer, EvalMatch};
+use case::{CaseMatch, CaseMatchFinder};
+use eval::{EvalAssignment, EvalAssignmentFinder};
 use flatten::Flattener;
-use variable::VariableAnalyzer;
+use variable::{VariableAnalyzer, VariableSpec};
 
 use slab::Slab;
 
 mod case;
 mod eval;
 mod flatten;
+mod lazy_init;
 mod variable;
 
 type Command = NodeKind<String>;
+type VariableMap = HashMap<String, Vec<VariableSpec>>;
 
 /// Visitor trait for walking over the AST nodes.
 pub trait AstVisitor: Sized {
@@ -440,9 +443,9 @@ pub(crate) struct Node {
     /// IDs of the children
     pub children: Option<Vec<NodeId>>,
     /// Variables defined by this command
-    pub defines: HashMap<String, Vec<Guard>>,
+    pub defines: VariableMap,
     /// Variables used by this command
-    pub uses: HashMap<String, Vec<Guard>>,
+    pub uses: VariableMap,
     /// Dependencies (indices of nodes this command depends on by variables)
     pub var_dependencies: HashSet<NodeId>,
     /// Commands that depend on this node
@@ -490,8 +493,12 @@ pub struct Analyzer {
     nodes: Slab<Node>,
     /// Ids of top-level commands
     top_ids: Vec<NodeId>,
-    /// Map of variable names to indices of commands that define them
-    var_definitions: HashMap<String, Vec<(usize, Vec<Guard>)>>,
+    /// Map of variable names to information of commands that define them
+    var_definitions: VariableMap,
+    /// Map of top node (chunk) ids to information of variables defined in the chunk
+    defines: HashMap<NodeId, VariableMap>,
+    /// Map of top node (chunk) ids to information of variables used in the chunk
+    uses: HashMap<NodeId, VariableMap>,
     /// Set of variable names of which are repeatedly used across the entire script
     global_vars: HashSet<String>,
     /// State field used for printing a node
@@ -524,8 +531,7 @@ impl Analyzer {
             })
             .collect::<Slab<Node>>();
 
-        let (top_ids, mut nodes) =
-            Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
+        let mut nodes = LazyInitializer::lazy_init(nodes, &top_ids);
 
         let mut var_definitions = HashMap::new();
 
@@ -536,36 +542,45 @@ impl Analyzer {
             va.analyze(id);
 
             // Update var_definitions map
-            for (var, guards) in &va.defines {
+            for (var, spec) in &va.defines {
                 var_definitions
                     .entry(var.clone())
                     .or_insert_with(Vec::new)
-                    .push((id, guards.clone()));
+                    .push(spec.clone());
             }
         }
+
+        let (top_ids, nodes) = Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
 
         let mut s = Self {
             lines: contents.as_ref().lines().map(|s| s.to_string()).collect(),
             nodes,
             top_ids,
             var_definitions: HashMap::new(),
+            defines: HashMap::new(),
+            uses: HashMap::new(),
             global_vars: HashSet::new(),
             focus: None,
         };
 
-        let mut updates = Vec::new();
+        // Collect
+        for id in &s.top_ids {
+            let (defs, uses) = s.collect_variables_in_chunk(*id);
+            s.defines.insert(*id, defs);
+            s.uses.insert(*id, uses);
+        }
 
-        // Create dependency edges based on variable usage
+        let mut def_use_edges = Vec::new();
+        // Calculate dependency edges
         for (id, node) in &s.nodes {
             for var in node.uses.keys() {
                 if let Some(def_id) = s.get_definition(var, id) {
-                    updates.push((def_id, id));
+                    def_use_edges.push((def_id, id));
                 }
             }
         }
-
-        // Apply updates to nodes
-        for (def_id, user_id) in updates {
+        // Apply initialization of depdencies to nodes
+        for (def_id, user_id) in def_use_edges {
             s.nodes[user_id].var_dependencies.insert(def_id);
             s.nodes[def_id].var_dependents.insert(user_id);
         }
@@ -578,23 +593,37 @@ impl Analyzer {
         self.nodes.len()
     }
 
-    /// Get command that define a variable before
-    pub fn get_definition(&self, var_name: &str, node_id: NodeId) -> Option<usize> {
+    /// Get command that defines a variable before
+    pub fn get_definition(&self, var_name: &str, node_id: NodeId) -> Option<NodeId> {
         if let Some(node) = self.nodes.get(node_id) {
-            if let Some(user_guards) = node.uses.get(var_name) {
+            if let Some(user_spec) = node.uses.get(var_name).map(|v| v.first()).flatten() {
                 return self.var_definitions.get(var_name).and_then(|v| {
                     v.iter()
                         .rev()
-                        .filter_map(|(i, guards)| {
+                        .filter_map(|spec| {
                             // dumb heulistic to compare two guard conditions
-                            (*i < node_id && guards.len() <= user_guards.len()).then_some(i)
+                            (spec.guard.len() <= user_spec.guard.len() && spec.loc < user_spec.loc)
+                                .then_some(spec.loc.node_id)
                         })
                         .next()
-                        .cloned()
                 });
             }
         }
         None
+    }
+
+    /// Get all commands that define a variable before
+    pub fn get_all_definition(&self, var_name: &str, node_id: NodeId) -> Option<Vec<NodeId>> {
+        self.nodes.get(node_id).and_then(|node| {
+            let usage = node.uses.get(var_name).unwrap().first().unwrap();
+            self.var_definitions.get(var_name).and_then(|v| {
+                Some(
+                    v.iter()
+                        .filter_map(|spec| (spec.loc < usage.loc).then_some(spec.loc.node_id))
+                        .collect::<Vec<_>>(),
+                )
+            })
+        })
     }
 
     /// Get all variables defined by a command
@@ -618,7 +647,7 @@ impl Analyzer {
             .map(|node| node.var_dependencies.clone())
     }
 
-    pub fn get_parent(&self, node_id: NodeId) -> Option<(usize, Option<NodeId>)> {
+    pub fn get_parent(&self, node_id: NodeId) -> Option<(NodeId, Option<NodeId>)> {
         self.nodes[node_id].parent
     }
 
@@ -634,12 +663,12 @@ impl Analyzer {
     }
 
     /// Get vector of all node ids
-    pub fn get_ids(&self) -> Vec<usize> {
+    pub fn get_ids(&self) -> Vec<NodeId> {
         self.nodes.iter().map(|(id, _)| id).collect()
     }
 
     /// Get vector of all ids of top-level nodes
-    pub fn get_top_ids(&self) -> Vec<usize> {
+    pub fn get_top_ids(&self) -> Vec<NodeId> {
         self.top_ids.clone()
     }
 
@@ -653,12 +682,12 @@ impl Analyzer {
     }
 
     /// Get all commands that define or use a variable
-    pub fn find_commands_with_variable(&self, var_name: &str) -> HashSet<usize> {
+    pub fn find_commands_with_variable(&self, var_name: &str) -> HashSet<NodeId> {
         let mut result = HashSet::new();
 
         // Add commands that define the variable
-        if let Some(def_indices) = self.var_definitions.get(var_name) {
-            result.extend(def_indices.iter().map(|(i, _)| i));
+        if let Some(defs) = self.var_definitions.get(var_name) {
+            result.extend(defs.iter().map(|spec| spec.loc.node_id));
         }
 
         // Add commands that use the variable
@@ -703,18 +732,55 @@ impl Analyzer {
         ret
     }
 
+    fn collect_variables_in_chunk(&self, top_id: NodeId) -> (VariableMap, VariableMap) {
+        let mut defines = HashMap::new();
+        let mut uses = HashMap::new();
+        let mut stack = vec![top_id];
+        let mut visited = HashSet::new();
+        while let Some(id) = stack.pop() {
+            assert!(!visited.contains(&id));
+            visited.insert(id);
+            if let Some(children) = &self.nodes[id].children {
+                stack.extend(
+                    children
+                        .iter()
+                        .filter(|&&child| !self.nodes[child].is_top_node()),
+                );
+            }
+            defines.extend(
+                self.nodes[id]
+                    .defines
+                    .iter()
+                    .map(|(s, v)| (s.clone(), v.clone())),
+            );
+            uses.extend(
+                self.nodes[id]
+                    .uses
+                    .iter()
+                    .map(|(s, v)| (s.clone(), v.clone())),
+            );
+        }
+        (defines, uses)
+    }
+
     /// Find case statements matching the given variables in the top-level commands.
     pub fn find_case_matches(&self, var_names: &[String]) -> Vec<CaseMatch> {
         let finder =
-            CaseAnalyzer::find_case_matches(&self.nodes, &self.top_ids, var_names.to_vec());
+            CaseMatchFinder::find_case_matches(&self.nodes, &self.top_ids, var_names.to_vec());
         finder.matches
     }
 
     /// Find `eval` commands that generate dynamic variable references.
-    pub fn find_eval_dynamic_refs(&self) -> Vec<EvalMatch> {
-        let finder = EvalAnalyzer::find_eval_dynamic_refs(&self.nodes, &self.top_ids);
+    pub fn find_eval_assignments(&self) -> Vec<EvalAssignment> {
+        let finder = EvalAssignmentFinder::find_eval(&self.nodes, &self.top_ids);
         finder.matches
     }
+
+    /// Analyze eval expressions using backward taint analysis to enumerate possible variable names
+    // pub fn analyze_eval_with_taint_analysis(&self) -> Vec<(EvalAssignment, Vec<String>)> {
+    //     let finder = EvalAnalyzer::find_eval(&self.nodes, &self.top_ids);
+    //     finder.analyze_eval_with_taint_analysis(&self.top_ids)
+    // }
 
     /// Check if any node in a chunk is related to any node within a window of nodes.
     /// With window=1, this is equivalent to the original pairwise relation check.
@@ -741,13 +807,7 @@ impl Analyzer {
                     .filter(|key| !self.global_vars.contains(key.as_str()))
                     .cloned()
                     .collect::<HashSet<_>>())
-                .is_disjoint(
-                    &node2
-                        .uses
-                        .keys()
-                        .cloned()
-                        .collect::<HashSet<_>>(),
-                )
+                .is_disjoint(&node2.uses.keys().cloned().collect::<HashSet<_>>())
         } else {
             false
         }

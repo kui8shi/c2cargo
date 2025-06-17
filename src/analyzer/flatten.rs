@@ -174,14 +174,6 @@ impl AstVisitor for Flattener {
                 })
                 .unwrap_or(top_most) // Fallback: if no flattened ancestors, use topmost
         });
-        if let Some(parent) = self.parent_stack.last() {
-            // Set up parent-child relationships
-            self.nodes[node_id].parent = Some((parent.node_id, parent.branch));
-            self.nodes[parent.node_id]
-                .children
-                .get_or_insert_default()
-                .push(node_id);
-        }
         #[cfg(debug_assertions)]
         {
             self.last_range_start = self.nodes[node_id].ranges.first().map(|r| r.0);
