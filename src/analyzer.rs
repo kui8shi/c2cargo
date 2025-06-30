@@ -11,12 +11,14 @@ use autoconf_parser::{
     parse::NodeParser,
 };
 use lazy_init::LazyInitializer;
-use std::collections::{HashMap, HashSet};
+use std::{
+    cell::Cell,
+    collections::{HashMap, HashSet},
+};
 
 use case::{CaseMatch, CaseMatchFinder};
-use eval::{EvalAssignment, EvalAssignmentFinder};
 use flatten::Flattener;
-use variable::{VariableAnalyzer, VariableSpec};
+use variable::{LValue, Location, RValue, VariableAnalyzer};
 
 use slab::Slab;
 
@@ -27,7 +29,7 @@ mod lazy_init;
 mod variable;
 
 type Command = NodeKind<String>;
-type VariableMap = HashMap<String, Vec<VariableSpec>>;
+type VariableMap = HashMap<String, Vec<Location>>;
 
 /// Visitor trait for walking over the AST nodes.
 pub trait AstVisitor: Sized {
@@ -102,8 +104,8 @@ pub trait AstVisitor: Sized {
     }
 
     /// Intermediate function for visiting a command chain
-    fn visit_chain(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
-        self.walk_chain(negated, condition, cmd);
+    fn visit_and_or(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
+        self.walk_and_or(negated, condition, cmd);
     }
 
     /// Intermediate function for visiting a conditional expression.
@@ -163,8 +165,8 @@ pub trait AstVisitor: Sized {
             }
             NodeKind::For { var, words, body } => self.visit_for(var, words, body),
             NodeKind::Case { word, arms } => self.visit_case(word, arms),
-            NodeKind::And(condition, cmd) => self.visit_chain(true, condition, *cmd),
-            NodeKind::Or(condition, cmd) => self.visit_chain(false, condition, *cmd),
+            NodeKind::And(condition, cmd) => self.visit_and_or(true, condition, *cmd),
+            NodeKind::Or(condition, cmd) => self.visit_and_or(false, condition, *cmd),
             NodeKind::Pipe(bang, cmds) => self.visit_pipe(*bang, cmds),
             NodeKind::Redirect(cmd, redirects) => self.visit_redirect(*cmd, redirects),
             NodeKind::Background(cmd) => self.visit_node(*cmd),
@@ -245,8 +247,8 @@ pub trait AstVisitor: Sized {
         }
     }
 
-    /// Walk a command chain.
-    fn walk_chain(&mut self, _negated: bool, condition: &Condition<String>, cmd: NodeId) {
+    /// Walk commands concatenated via and/or.
+    fn walk_and_or(&mut self, _negated: bool, condition: &Condition<String>, cmd: NodeId) {
         self.visit_condition(condition);
         self.visit_node(cmd);
     }
@@ -481,6 +483,19 @@ pub enum Guard {
     Match(Word<String>, Vec<Word<String>>),
 }
 
+/// Compare two conditions.
+pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp::Ordering> {
+    for (l, r) in lhs.iter().rev().zip(rhs.iter().rev()) {
+        if l != r {
+            // not comparable.
+            return None;
+        }
+    }
+    // Here, we know that either condition is a subset of the other.
+    // we can decide the order simply by the lengths.
+    Some(lhs.len().cmp(&rhs.len()))
+}
+
 /// Analyzer which conducts various kinds of analyses:
 /// 1. construction of a dependency graph by tracking variable usages
 /// 2. flattening of large commands
@@ -496,13 +511,19 @@ pub struct Analyzer {
     /// Map of variable names to information of commands that define them
     var_definitions: VariableMap,
     /// Map of top node (chunk) ids to information of variables defined in the chunk
-    defines: HashMap<NodeId, VariableMap>,
+    defines_per_top: HashMap<NodeId, VariableMap>,
     /// Map of top node (chunk) ids to information of variables used in the chunk
-    uses: HashMap<NodeId, VariableMap>,
+    uses_per_top: HashMap<NodeId, VariableMap>,
+    /// Map of variable location to guard conditions
+    guards: HashMap<Location, Vec<Guard>>,
     /// Set of variable names of which are repeatedly used across the entire script
     global_vars: HashSet<String>,
     /// State field used for printing a node
-    focus: Option<NodeId>,
+    focus: Cell<Option<NodeId>>,
+    /// Set of variables which are used in eval statements
+    evals: HashMap<LValue, Vec<(Option<RValue>, Location)>>,
+    /// State filed used for recording resolved rvalues of variables
+    resolved_values: HashMap<LValue, HashSet<String>>,
 }
 
 impl Analyzer {
@@ -533,41 +554,47 @@ impl Analyzer {
 
         let mut nodes = LazyInitializer::lazy_init(nodes, &top_ids);
 
-        let mut var_definitions = HashMap::new();
-
         // Create a VariableAnalyzer to extract both defined and used variables
         let mut va = VariableAnalyzer::new(&mut nodes);
-        for &id in &top_ids {
+        for id in &top_ids {
             // collect all defined and used variables in a command
-            va.analyze(id);
-
-            // Update var_definitions map
-            for (var, spec) in &va.defines {
-                var_definitions
-                    .entry(var.clone())
-                    .or_insert_with(Vec::new)
-                    .push(spec.clone());
-            }
+            va.analyze(*id);
         }
 
-        let (top_ids, nodes) = Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
+        dbg!(&va.guards);
+        let evals = va.evals;
+        let guards = va.guards;
+        // collect recorded definitions
+        let var_definitions: VariableMap = va.defines.into_iter().flat_map(|(_, map)| map).fold(
+            HashMap::new(),
+            |mut acc, (name, mut locs)| {
+                acc.entry(name).or_default().append(&mut locs);
+                acc
+            },
+        );
+
+        let (top_ids, nodes) =
+            Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
 
         let mut s = Self {
             lines: contents.as_ref().lines().map(|s| s.to_string()).collect(),
             nodes,
+            guards,
+            evals,
             top_ids,
-            var_definitions: HashMap::new(),
-            defines: HashMap::new(),
-            uses: HashMap::new(),
+            var_definitions,
+            defines_per_top: HashMap::new(),
+            uses_per_top: HashMap::new(),
             global_vars: HashSet::new(),
-            focus: None,
+            focus: Cell::new(None),
+            resolved_values: HashMap::new(),
         };
 
         // Collect
         for id in &s.top_ids {
-            let (defs, uses) = s.collect_variables_in_chunk(*id);
-            s.defines.insert(*id, defs);
-            s.uses.insert(*id, uses);
+            let (defs, uses) = s.collect_variables_per_top(*id);
+            s.defines_per_top.insert(*id, defs);
+            s.uses_per_top.insert(*id, uses);
         }
 
         let mut def_use_edges = Vec::new();
@@ -593,17 +620,24 @@ impl Analyzer {
         self.nodes.len()
     }
 
+    /// Get guard conditions of given variable location
+    fn guard_of_location(&self, location: &Location) -> &Vec<Guard> {
+        &self.guards[location]
+    }
+
     /// Get command that defines a variable before
     pub fn get_definition(&self, var_name: &str, node_id: NodeId) -> Option<NodeId> {
         if let Some(node) = self.nodes.get(node_id) {
-            if let Some(user_spec) = node.uses.get(var_name).map(|v| v.first()).flatten() {
+            if let Some(user_loc) = node.uses.get(var_name).map(|v| v.first()).flatten() {
                 return self.var_definitions.get(var_name).and_then(|v| {
                     v.iter()
                         .rev()
-                        .filter_map(|spec| {
+                        .filter_map(|loc| {
                             // dumb heulistic to compare two guard conditions
-                            (spec.guard.len() <= user_spec.guard.len() && spec.loc < user_spec.loc)
-                                .then_some(spec.loc.node_id)
+                            (self.guard_of_location(loc).len()
+                                <= self.guard_of_location(user_loc).len()
+                                && loc < user_loc)
+                                .then_some(loc.node_id)
                         })
                         .next()
                 });
@@ -613,16 +647,12 @@ impl Analyzer {
     }
 
     /// Get all commands that define a variable before
-    pub fn get_all_definition(&self, var_name: &str, node_id: NodeId) -> Option<Vec<NodeId>> {
-        self.nodes.get(node_id).and_then(|node| {
-            let usage = node.uses.get(var_name).unwrap().first().unwrap();
-            self.var_definitions.get(var_name).and_then(|v| {
-                Some(
-                    v.iter()
-                        .filter_map(|spec| (spec.loc < usage.loc).then_some(spec.loc.node_id))
-                        .collect::<Vec<_>>(),
-                )
-            })
+    pub fn get_all_definition(&self, var_name: &str, used_loc: &Location) -> Option<Vec<Location>> {
+        self.var_definitions.get(var_name).map(|v| {
+            v.iter()
+                .filter(|loc| *loc < used_loc)
+                .cloned()
+                .collect::<Vec<_>>()
         })
     }
 
@@ -687,7 +717,7 @@ impl Analyzer {
 
         // Add commands that define the variable
         if let Some(defs) = self.var_definitions.get(var_name) {
-            result.extend(defs.iter().map(|spec| spec.loc.node_id));
+            result.extend(defs.iter().map(|loc| loc.node_id));
         }
 
         // Add commands that use the variable
@@ -725,17 +755,18 @@ impl Analyzer {
     }
 
     /// Recover the content of commands from the AST structure
-    pub fn recover_content(&mut self, node_id: NodeId) -> String {
-        self.focus = Some(node_id);
+    pub fn recover_content(&self, node_id: NodeId) -> String {
+        // FIXME: the strategy mutating self is too dumb.
+        self.focus.set(Some(node_id));
         let ret = self.node_to_string(node_id, 0);
-        self.focus = None;
+        self.focus.set(None);
         ret
     }
 
-    fn collect_variables_in_chunk(&self, top_id: NodeId) -> (VariableMap, VariableMap) {
+    fn collect_variables_per_top(&self, node_id: NodeId) -> (VariableMap, VariableMap) {
         let mut defines = HashMap::new();
         let mut uses = HashMap::new();
-        let mut stack = vec![top_id];
+        let mut stack = vec![node_id];
         let mut visited = HashSet::new();
         while let Some(id) = stack.pop() {
             assert!(!visited.contains(&id));
@@ -770,12 +801,6 @@ impl Analyzer {
         finder.matches
     }
 
-    /// Find `eval` commands that generate dynamic variable references.
-    pub fn find_eval_assignments(&self) -> Vec<EvalAssignment> {
-        let finder = EvalAssignmentFinder::find_eval(&self.nodes, &self.top_ids);
-        finder.matches
-    }
-
     /// Analyze eval expressions using backward taint analysis to enumerate possible variable names
     // pub fn analyze_eval_with_taint_analysis(&self) -> Vec<(EvalAssignment, Vec<String>)> {
     //     let finder = EvalAnalyzer::find_eval(&self.nodes, &self.top_ids);
@@ -783,16 +808,20 @@ impl Analyzer {
     // }
 
     /// Check if any node in a chunk is related to any node within a window of nodes.
-    /// With window=1, this is equivalent to the original pairwise relation check.
-    fn are_nodes_related_with_window(&self, chunk: &[NodeId], window_nodes: &[NodeId]) -> bool {
+    /// Return the index (not NodeId) of the last related window node.
+    fn are_nodes_related_with_window(
+        &self,
+        chunk: &[NodeId],
+        window_nodes: &[NodeId],
+    ) -> Option<usize> {
         for &chunk_node in chunk {
-            for &window_node in window_nodes {
+            for (i, &window_node) in window_nodes.iter().enumerate().rev() {
                 if self.are_nodes_related(chunk_node, window_node) {
-                    return true;
+                    return Some(i);
                 }
             }
         }
-        false
+        None
     }
 
     /// Check if two nodes are related for chunk fusing.
@@ -842,19 +871,10 @@ impl Analyzer {
                 // Start a new chunk
                 current_chunk.push(current_id);
             } else {
-                // Check if current node has the same parent as nodes in current chunk
-                let chunk_parent = self
-                    .nodes
-                    .get(*current_chunk.first().unwrap())
-                    .map(|n| n.parent);
-                let current_parent = self.nodes.get(current_id).map(|n| n.parent);
-                let same_parent = chunk_parent == current_parent;
-
                 // Check if current node is related to any node in the current chunk
-                let is_related_to_chunk = same_parent
-                    && current_chunk
-                        .iter()
-                        .any(|&chunk_node_id| self.are_nodes_related(chunk_node_id, current_id));
+                let is_related_to_chunk = current_chunk
+                    .iter()
+                    .any(|&chunk_node_id| self.are_nodes_related(chunk_node_id, current_id));
 
                 if is_related_to_chunk {
                     // Fuse with current chunk
@@ -864,6 +884,10 @@ impl Analyzer {
                     let mut lookahead_nodes = Vec::new();
                     let mut j = i;
                     let mut remaining_window = window;
+                    let chunk_parent = self
+                        .nodes
+                        .get(*current_chunk.first().unwrap())
+                        .map(|n| n.parent);
 
                     // Collect lookahead nodes, skipping assignments if disrespect_assignment is true
                     while j < self.top_ids.len()
@@ -881,7 +905,7 @@ impl Analyzer {
                         lookahead_nodes.push(node_id);
 
                         // Only consume window depth for non-assignments or when not disrespecting assignments
-                        if !disrespect_assignment || !self.is_assignment(node_id) {
+                        if !(disrespect_assignment && self.is_assignment(node_id)) {
                             if remaining_window > 0 {
                                 remaining_window -= 1;
                             } else {
@@ -892,10 +916,12 @@ impl Analyzer {
                         j += 1;
                     }
 
-                    if self.are_nodes_related_with_window(&current_chunk, &lookahead_nodes) {
+                    if let Some(last_related_idx) =
+                        self.are_nodes_related_with_window(&current_chunk, &lookahead_nodes)
+                    {
                         // Found relation within lookahead - add all lookahead nodes to chunk
-                        current_chunk.extend(lookahead_nodes);
-                        i = j - 1; // Skip ahead (will be incremented at loop end)
+                        current_chunk.extend(lookahead_nodes[..=last_related_idx].iter());
+                        i = i + last_related_idx; // Skip ahead (will be incremented at loop end)
                     } else {
                         // No relation found in lookahead - cut here and start new chunk
                         if !current_chunk.is_empty() {
@@ -930,10 +956,10 @@ impl NodePool<String> for Analyzer {
         &self,
         node_id: NodeId,
     ) -> Option<(&NodeKind<String>, Option<&String>)> {
-        let is_child = self.focus.unwrap() != node_id;
+        let is_child = self.focus.get().unwrap() != node_id;
         self.nodes
             .get(node_id)
-            .filter(|n| n.is_top_node() ^ is_child)
+            .filter(|n| !(n.is_top_node() && is_child))
             .map(|n| (&n.kind, n.comment.as_ref()))
     }
 }

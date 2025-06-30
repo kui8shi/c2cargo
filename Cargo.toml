@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+itertools = "0.14.0"
 # autoconf-parser = { git = "https://github.com/kui8shi/autoconf-parser.git" }
 owned_chars = "0.3.2"
 reqwest = { version = "0.12.15", features = ["json", "blocking"] }

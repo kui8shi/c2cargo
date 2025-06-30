@@ -5,8 +5,8 @@ use std::{
     env,
     io::{stdin, Read},
 };
-mod analyzer;
 mod analysis;
+mod analyzer;
 
 #[derive(Serialize)]
 struct ClaudeRequest {

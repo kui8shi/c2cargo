@@ -8,7 +8,7 @@ use slab::Slab;
 pub(super) struct LazyInitializer {
     /// Collection of all nodes in the AST
     nodes: Slab<Node>,
-    /// Stack tracking parent nodes 
+    /// Stack tracking parent nodes
     parent_stack: Vec<ParentInfo>,
 }
 
@@ -20,10 +20,7 @@ struct ParentInfo {
 }
 
 impl LazyInitializer {
-    pub fn lazy_init(
-        nodes: Slab<Node>,
-        top_ids: &[NodeId],
-    ) -> Slab<Node> {
+    pub fn lazy_init(nodes: Slab<Node>, top_ids: &[NodeId]) -> Slab<Node> {
         let mut s = Self {
             nodes,
             parent_stack: vec![],
@@ -44,6 +41,7 @@ impl AstVisitor for LazyInitializer {
 
     /// Visits a top-level node and adds it to the top-level ID list
     fn visit_top(&mut self, node_id: NodeId) {
+        self.nodes[node_id].top_id = Some(node_id);
         self.visit_node(node_id);
     }
 

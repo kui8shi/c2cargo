@@ -9,6 +9,8 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     let mut analyzer = Analyzer::new(&input, None);
     let top_ids = analyzer.get_top_ids();
 
+    /*
+    
     // Print information about the analyzed script
     println!("Total commands: {}", top_ids.len());
 
@@ -25,7 +27,12 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     let mut chunk_file = File::create("/tmp/chunks.sh")?;
     for chunk in &analyzer.fuse_chunks(Some(3), true) {
         for &i in chunk {
-            writeln!(chunk_file, "Command {}: {:?}", i, analyzer.get_ranges(i).unwrap())?;
+            writeln!(
+                chunk_file,
+                "Command {}: {:?}",
+                i,
+                analyzer.get_ranges(i).unwrap()
+            )?;
         }
 
         for &i in chunk {
@@ -235,15 +242,19 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
             println!("  {}: Command {}", i, cmd_idx);
         }
     }
+    */
 
-    // === Backward Taint Analysis for Eval ===
-    println!("\n=== Backward Taint Analysis for Eval ===");
-    let eval_results = analyzer.find_eval_assignments();
-    for eval_match in eval_results {
-        println!("Eval expression @{}: {:?} = {:?}", eval_match.node_id, eval_match.lhs, eval_match.rhs);
-        println!("  Used Vars: {:?}", eval_match.used_vars());
-        println!("  Related Commands: {:?}", analyzer.get_all_definition(eval_match.used_vars().first().unwrap(), eval_match.node_id))
-    }
+    // === Value Set Analysis for Eval ===
+    println!("\n=== Value Set Analysis for Eval ===");
+    analyzer.run_value_set_analysis();
+    // for (node_id, eval_match) in analyzer.evals {
+    //     println!("Eval expression {:?}", eval_match);
+    //     println!("  Used Vars: {:?}", eval_match.used_vars());
+    //     println!(
+    //         "  Related Commands: {:?}",
+    //         analyzer.get_all_definition(eval_match.used_vars().first().unwrap(), node_id)
+    //     )
+    // }
 
     // === Variable dependency edge profiling ===
     use std::collections::HashMap;
@@ -282,15 +293,15 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     edge_stats.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count (descending)
 
     // Print the top 50 variables with the most dependency edges
-    println!("\n=== Variable Edge Count Ranking ===");
-    for (var, count) in edge_stats.iter().take(50) {
-        println!(
-            "{:20} ({}): {:?}",
-            var,
-            count,
-            edge_counter.get(var).unwrap()
-        );
-    }
+    // println!("\n=== Variable Edge Count Ranking ===");
+    // for (var, count) in edge_stats.iter().take(1) {
+    //     println!(
+    //         "{:20} ({}): {:?}",
+    //         var,
+    //         count,
+    //         edge_counter.get(var).unwrap()
+    //     );
+    // }
 
     Ok(())
 }

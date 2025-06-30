@@ -1,36 +1,97 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, hash::Hash};
 
 use super::{
-    Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro, Node, NodeId, Parameter,
-    PatternBodyPair, Word, WordFragment,
+    Analyzer, Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro, Node, NodeId,
+    Parameter, PatternBodyPair, Word, WordFragment,
 };
 
 use slab::Slab;
 
-#[derive(Debug, Clone, PartialEq, Eq, Ord)]
-pub(crate) struct VariableLocation {
+#[derive(Debug, Clone, PartialEq, Eq, Ord, Hash)]
+pub(crate) struct Location {
     pub node_id: NodeId,
     pub line: usize,
-    pub is_defined: bool,
+    pub is_left: bool,
 }
 
-impl PartialOrd for VariableLocation {
+impl PartialOrd for Location {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((self.line, self.is_defined).cmp(&(other.line, other.is_defined)))
+        Some((self.line, self.is_left).cmp(&(other.line, other.is_left)))
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct VariableSpec {
-    pub loc: VariableLocation,
-    pub guard: Vec<Guard>,
+/// Struct represents various types of variable names used in assignments.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum LValue {
+    /// String literal. Direct variable reference.
+    Lit(String),
+    /// Variable name. Indirect variable reference.
+    Var(String, Location),
+    /// Dynamically constructed variable name. Indirect variable reference.
+    Concat(Vec<LValue>),
+}
+
+/// Struct represents various types of values assigned to variables.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) enum RValue {
+    /// String literal. It could be used in lhs or rhs.
+    Lit(String),
+    /// Variable referenece. It could used in lhs or rhs.
+    Var(String, Location),
+    /// String literal represented as a concatenation of rvalues
+    Concat(Vec<RValue>),
+    /// Dynamically constructed variable name.
+    /// e.g. \"\$${var1}_${var2}_suffix\" becomes Ref([Var(var1), Lit(_), Var(var2), Lit(_suffix)])
+    Ref(Vec<RValue>),
+    /// Arbitrary shell commands applied to emit values
+    /// (shell_string, depending_variables)
+    Shell(String, Vec<RValue>),
+}
+
+impl RValue {
+    pub(crate) fn vars(&self) -> Option<Vec<(String, Location)>> {
+        match self {
+            RValue::Lit(_) => None,
+            RValue::Var(s, loc) => Some(vec![(s.to_owned(), loc.clone())]),
+            RValue::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            RValue::Ref(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            RValue::Shell(_, v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+        }
+    }
+}
+
+impl Into<Option<LValue>> for &RValue {
+    fn into(self) -> Option<LValue> {
+        match self {
+            RValue::Lit(_) => None,
+            RValue::Var(name, _loc) => Some(LValue::Lit(name.to_owned())),
+            RValue::Ref(rvalues) => Some(LValue::Concat({
+                let mut lvalues = Vec::new();
+                for rvalue in rvalues {
+                    match rvalue {
+                        RValue::Lit(lit) => {
+                            lvalues.push(LValue::Lit(lit.to_owned()));
+                        }
+                        RValue::Var(name, loc) => {
+                            lvalues.push(LValue::Var(name.to_owned(), loc.clone()));
+                        }
+                        _ => return None,
+                    }
+                }
+                lvalues
+            })),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub(super) struct VariableAnalyzer<'a> {
     nodes: &'a mut Slab<Node>,
-    pub defines: HashMap<String, Vec<VariableSpec>>,
-    pub uses: HashMap<String, Vec<VariableSpec>>,
+    pub guards: HashMap<Location, Vec<Guard>>,
+    pub evals: HashMap<LValue, Vec<(Option<RValue>, Location)>>,
+    pub defines: HashMap<NodeId, HashMap<String, Vec<Location>>>,
+    pub uses: HashMap<NodeId, HashMap<String, Vec<Location>>>,
     conds: Vec<Guard>,
     denied: Option<Guard>,
     cursor: Option<NodeId>,
@@ -41,6 +102,8 @@ impl<'a> VariableAnalyzer<'a> {
     pub fn new(nodes: &'a mut Slab<Node>) -> Self {
         Self {
             nodes,
+            guards: HashMap::new(),
+            evals: HashMap::new(),
             defines: HashMap::new(),
             uses: HashMap::new(),
             conds: Vec::new(),
@@ -53,37 +116,120 @@ impl<'a> VariableAnalyzer<'a> {
 impl<'a> VariableAnalyzer<'a> {
     pub fn analyze(&mut self, node_id: NodeId) {
         self.visit_top(node_id);
+    }
+
+    fn current_location(&self) -> Location {
+        Location {
+            node_id: self.cursor.unwrap(),
+            line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
+            is_left: true,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.defines.clear();
+        self.uses.clear();
         self.conds.clear();
     }
 
     fn record_variable_definition(&mut self, name: &str) {
-        let var_info = VariableSpec {
-            loc: VariableLocation {
-                node_id: self.cursor.unwrap(),
-                line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
-                is_defined: true,
-            },
-            guard: self.conds.clone(),
-        };
+        let id = self.cursor.unwrap();
+        let loc = self.current_location();
         self.defines
+            .entry(id)
+            .or_default()
             .entry(name.to_owned())
             .or_insert(Vec::new())
-            .push(var_info);
+            .push(loc.clone());
+        self.guards.insert(loc, self.conds.clone());
     }
 
     fn record_variable_usage(&mut self, name: &str) {
-        let var_info = VariableSpec {
-            loc: VariableLocation {
-                node_id: self.cursor.unwrap(),
-                line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
-                is_defined: false,
-            },
-            guard: self.conds.clone(),
-        };
+        let id = self.cursor.unwrap();
+        let loc = self.current_location();
         self.uses
+            .entry(id)
+            .or_default()
             .entry(name.to_owned())
             .or_insert(Vec::new())
-            .push(var_info);
+            .push(loc.clone());
+        self.guards.insert(loc, self.conds.clone());
+    }
+
+    /// parse a body of eval assignment. It is expected to take `word` as a concatenated word fragments
+    /// currently we don't support mixed lhs value (eigther single literal or single variable)
+    fn parse_eval_assignment(&self, frags: &[WordFragment<String>]) -> (LValue, Option<RValue>) {
+        let mut lhs = Vec::new();
+        let mut rhs = Vec::new();
+        let mut is_lhs = true;
+        let mut is_ref = false;
+        let loc = self.current_location();
+        for frag in frags.iter() {
+            match frag {
+                WordFragment::Escaped(s) if s == "\"" => (),
+                WordFragment::Escaped(s) if s == "$" => {
+                    is_ref = true;
+                }
+                WordFragment::Param(Parameter::Var(s)) if is_lhs => {
+                    lhs.push(LValue::Var(s.to_owned(), loc.clone()));
+                }
+                WordFragment::Param(Parameter::Var(s)) if !is_lhs => {
+                    rhs.push(RValue::Var(s.to_owned(), loc.clone()));
+                }
+                WordFragment::Literal(s) if is_lhs => {
+                    if s.contains("=") {
+                        let mut split = s.split("=");
+                        if let Some(lit) = split.next() {
+                            if !lit.is_empty() {
+                                lhs.push(LValue::Lit(lit.to_owned()));
+                            }
+                        }
+                        if let Some(lit) = split.next() {
+                            if !lit.is_empty() {
+                                rhs.push(RValue::Lit(lit.to_owned()));
+                            }
+                        }
+                        is_lhs = false;
+                    } else {
+                        lhs.push(LValue::Lit(s.to_owned()));
+                    }
+                }
+                WordFragment::Literal(s) if !is_lhs => {
+                    let s = s.strip_prefix("=").unwrap_or(s).to_owned();
+                    rhs.push(RValue::Lit(s));
+                }
+                WordFragment::DoubleQuoted(inner_frags) if !is_lhs => {
+                    for inner_frag in inner_frags {
+                        match inner_frag {
+                            WordFragment::Escaped(s) if s == "$" => {
+                                is_ref = true;
+                            }
+                            WordFragment::Literal(s) => {
+                                rhs.push(RValue::Lit(s.to_owned()));
+                            }
+                            WordFragment::Param(Parameter::Var(s)) => {
+                                rhs.push(RValue::Var(s.to_owned(), loc.clone()));
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+                _ => (),
+            }
+        }
+        let lhs = if lhs.len() <= 1 {
+            lhs.pop().unwrap()
+        } else {
+            LValue::Concat(lhs)
+        };
+        if is_ref {
+            rhs = vec![RValue::Ref(rhs)];
+        }
+        if rhs.len() <= 1 {
+            (lhs, rhs.pop())
+        } else {
+            (lhs, Some(RValue::Concat(rhs)))
+        }
     }
 }
 
@@ -93,27 +239,25 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     }
 
     fn visit_top(&mut self, node_id: NodeId) {
-        let saved = self.cursor.replace(node_id);
+        self.cursor.replace(node_id);
         self.walk_node(node_id);
-        self.cursor = saved;
+        self.nodes[node_id].defines = self.defines.get(&node_id).cloned().unwrap_or_default();
+        self.nodes[node_id].uses = self.uses.get(&node_id).cloned().unwrap_or_default();
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
         // Save
         let saved_cursor = self.cursor.replace(node_id);
-        let saved_defs = self.defines.drain().collect();
-        let saved_uses = self.uses.drain().collect();
+        dbg!(&self.get_node(node_id));
         // Walk
         if !self.get_node(node_id).is_top_node() {
             self.walk_node(node_id);
+            // Assign collected variable to the node
+            self.nodes[node_id].defines = self.defines.get(&node_id).cloned().unwrap_or_default();
+            self.nodes[node_id].uses = self.uses.get(&node_id).cloned().unwrap_or_default();
         }
-        // Assign collected variable to the node
-        self.nodes[node_id].defines = self.defines.drain().collect();
-        self.nodes[node_id].uses = self.uses.drain().collect();
         // Recover
         self.cursor = saved_cursor;
-        self.defines = saved_defs;
-        self.defines = saved_uses;
     }
 
     fn visit_assignment(&mut self, name: &str, word: &Word<String>) {
@@ -161,13 +305,13 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         }
     }
 
-    fn visit_chain(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
+    fn visit_and_or(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
         self.conds.push(if negated {
             Guard::Not(Box::new(Guard::Cond(condition.clone())))
         } else {
             Guard::Cond(condition.clone())
         });
-        self.walk_chain(negated, condition, cmd);
+        self.walk_and_or(negated, condition, cmd);
         self.conds.pop();
     }
 
@@ -213,5 +357,33 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
             }
         }
         self.walk_m4_macro(m4_macro);
+    }
+
+    fn visit_command(&mut self, cmd_words: &[Word<String>]) {
+        if let Some(first) = cmd_words.get(0) {
+            if is_eval(first) {
+                if let Some(Word::Concat(frags)) = cmd_words.get(1) {
+                    let (lhs, rhs) = self.parse_eval_assignment(frags);
+                    let loc = Location {
+                        node_id: self.cursor.unwrap(),
+                        line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
+                        is_left: true,
+                    };
+                    self.evals.entry(lhs).or_default().push((rhs, loc.clone()));
+                    self.guards.insert(loc, self.conds.clone());
+                }
+            }
+        }
+        self.walk_command(cmd_words);
+    }
+}
+
+fn is_eval(word: &Word<String>) -> bool {
+    match word {
+        Word::Single(f) => matches!(f, WordFragment::Literal(t) if t == "eval"),
+        Word::Concat(frags) => {
+            frags.len() == 1 && matches!(&frags[0], WordFragment::Literal(t) if t == "eval")
+        }
+        _ => false,
     }
 }
