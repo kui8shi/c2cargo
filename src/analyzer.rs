@@ -1,14 +1,16 @@
 //! Provides the higher level on-time analyses to improve parsing
 use autoconf_parser::{
     ast::{
+        minimal::Word,
         node::{
-            Condition, GuardBodyPair, M4Argument, M4Macro, NodeId, NodeKind, NodePool, Operator,
-            ParameterSubstitution, PatternBodyPair, Redirect, Word, WordFragment,
+            AcCommand, AcWord, AcWordFragment, AutoconfPool, Condition, DisplayNode, GuardBodyPair,
+            M4Argument, M4Macro, NodeId, Operator, ParameterSubstitution, PatternBodyPair,
+            ShellCommand, WordFragment,
         },
-        Arithmetic, Parameter,
+        Arithmetic, MayM4, Parameter, Redirect,
     },
     lexer::Lexer,
-    parse::NodeParser,
+    parse::autoconf::NodeParser,
 };
 use lazy_init::LazyInitializer;
 use std::{
@@ -28,8 +30,9 @@ mod flatten;
 mod lazy_init;
 mod variable;
 
-type Command = NodeKind<String>;
+type Command = ShellCommand<AcWord>;
 type VariableMap = HashMap<String, Vec<Location>>;
+type Node = autoconf_parser::ast::node::Node<AcCommand, NodeInfo>;
 
 /// Visitor trait for walking over the AST nodes.
 pub trait AstVisitor: Sized {
@@ -43,18 +46,18 @@ pub trait AstVisitor: Sized {
 
     /// Intermediate function for visiting an AST node.
     fn visit_node(&mut self, node_id: NodeId) {
-        if !self.get_node(node_id).is_top_node() {
+        if !self.get_node(node_id).info.is_top_node() {
             self.walk_node(node_id);
         }
     }
 
     /// Intermediate function for visiting a command.
-    fn visit_command(&mut self, cmd_words: &[Word<String>]) {
+    fn visit_command(&mut self, cmd_words: &[AcWord]) {
         self.walk_command(cmd_words);
     }
 
     /// Intermediate function for visiting an assignment statement.
-    fn visit_assignment(&mut self, name: &str, word: &Word<String>) {
+    fn visit_assignment(&mut self, name: &str, word: &AcWord) {
         self.walk_assignment(name, word);
     }
 
@@ -64,37 +67,37 @@ pub trait AstVisitor: Sized {
     }
 
     /// Intermediate function for visiting a guard-body pair (e.g., in while/until/if).
-    fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<String>) {
+    fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
         self.walk_guard_body_pair(pair);
     }
 
     /// Intermediate function for visiting a pattern-body pair (an arm in case).
-    fn visit_pattern_body_pair(&mut self, arm: &PatternBodyPair<String>) {
+    fn visit_pattern_body_pair(&mut self, arm: &PatternBodyPair<AcWord>) {
         self.walk_pattern_body_pair(arm);
     }
 
     /// Intermediate function for visiting an `if` statement
-    fn visit_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
+    fn visit_if(&mut self, conditionals: &[GuardBodyPair<AcWord>], else_branch: &[NodeId]) {
         self.walk_if(conditionals, else_branch);
     }
 
     /// Intermediate function for visiting a `for` statement
-    fn visit_for(&mut self, var: &str, words: &[Word<String>], body: &[NodeId]) {
+    fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
         self.walk_for(var, words, body);
     }
 
     /// Intermediate function for visiting a `case` statement
-    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
+    fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         self.walk_case(word, arms);
     }
 
     /// Intermediate function for visiting a word
-    fn visit_word(&mut self, w: &Word<String>) {
+    fn visit_word(&mut self, w: &AcWord) {
         self.walk_word(w);
     }
 
     /// Intermediate function for visiting a word fragment
-    fn visit_word_fragment(&mut self, f: &WordFragment<String>) {
+    fn visit_word_fragment(&mut self, f: &AcWordFragment) {
         self.walk_word_fragment(f);
     }
 
@@ -104,12 +107,12 @@ pub trait AstVisitor: Sized {
     }
 
     /// Intermediate function for visiting a command chain
-    fn visit_and_or(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
+    fn visit_and_or(&mut self, negated: bool, condition: &Condition<AcWord>, cmd: NodeId) {
         self.walk_and_or(negated, condition, cmd);
     }
 
     /// Intermediate function for visiting a conditional expression.
-    fn visit_condition(&mut self, cond: &Condition<String>) {
+    fn visit_condition(&mut self, cond: &Condition<AcWord>) {
         self.walk_condition(cond);
     }
 
@@ -124,17 +127,17 @@ pub trait AstVisitor: Sized {
     }
 
     /// Intermediate function for visiting a parameter substitution.
-    fn visit_parameter_substitution(&mut self, subs: &ParameterSubstitution<String>) {
+    fn visit_parameter_substitution(&mut self, subs: &ParameterSubstitution<AcWord>) {
         self.walk_parameter_substitution(subs);
     }
 
     /// Intermediate function for visiting an IO redirect.
-    fn visit_redirect(&mut self, cmd: NodeId, redirects: &[Redirect<String>]) {
+    fn visit_redirect(&mut self, cmd: NodeId, redirects: &[Redirect<AcWord>]) {
         self.walk_redirect(cmd, redirects);
     }
 
     /// Intermediate function for visiting a M4 macro invocation.
-    fn visit_m4_macro(&mut self, m4_macro: &M4Macro<String>) {
+    fn visit_m4_macro(&mut self, m4_macro: &M4Macro) {
         self.walk_m4_macro(m4_macro);
     }
 
@@ -146,37 +149,39 @@ pub trait AstVisitor: Sized {
     /// Walk a node: wrappper of arbitrary command.
     fn walk_node(&mut self, node_id: NodeId) {
         let node = self.get_node(node_id);
-        match &node.kind.clone() {
-            NodeKind::Assignment(name, word) => self.visit_assignment(name, word),
-            NodeKind::Cmd(words) => self.visit_command(words),
-            NodeKind::Brace(body) => self.visit_brace(body),
-            NodeKind::Subshell(body) => {
+        use autoconf_parser::ast::node::ShellCommand::*;
+        use MayM4::*;
+        match &node.cmd.0.clone() {
+            Shell(Assignment(name, word)) => self.visit_assignment(name, word),
+            Shell(Cmd(words)) => self.visit_command(words),
+            Shell(Brace(body)) => self.visit_brace(body),
+            Shell(Subshell(body)) => {
                 for n in body {
                     self.visit_node(*n);
                 }
             }
-            NodeKind::While(pair) => self.visit_guard_body_pair(pair),
-            NodeKind::Until(pair) => self.visit_guard_body_pair(pair),
-            NodeKind::If {
+            Shell(While(pair)) => self.visit_guard_body_pair(pair),
+            Shell(Until(pair)) => self.visit_guard_body_pair(pair),
+            Shell(If {
                 conditionals,
                 else_branch,
-            } => {
+            }) => {
                 self.visit_if(conditionals, else_branch);
             }
-            NodeKind::For { var, words, body } => self.visit_for(var, words, body),
-            NodeKind::Case { word, arms } => self.visit_case(word, arms),
-            NodeKind::And(condition, cmd) => self.visit_and_or(true, condition, *cmd),
-            NodeKind::Or(condition, cmd) => self.visit_and_or(false, condition, *cmd),
-            NodeKind::Pipe(bang, cmds) => self.visit_pipe(*bang, cmds),
-            NodeKind::Redirect(cmd, redirects) => self.visit_redirect(*cmd, redirects),
-            NodeKind::Background(cmd) => self.visit_node(*cmd),
-            NodeKind::FunctionDef { name, body } => self.visit_function_definition(name, *body),
-            NodeKind::Macro(m4_macro) => self.visit_m4_macro(m4_macro),
+            Shell(For { var, words, body }) => self.visit_for(var, words, body),
+            Shell(Case { word, arms }) => self.visit_case(word, arms),
+            Shell(And(condition, cmd)) => self.visit_and_or(true, condition, *cmd),
+            Shell(Or(condition, cmd)) => self.visit_and_or(false, condition, *cmd),
+            Shell(Pipe(bang, cmds)) => self.visit_pipe(*bang, cmds),
+            Shell(Redirect(cmd, redirects)) => self.visit_redirect(*cmd, redirects),
+            Shell(Background(cmd)) => self.visit_node(*cmd),
+            Shell(FunctionDef { name, body }) => self.visit_function_definition(name, *body),
+            Macro(m4_macro) => self.visit_m4_macro(m4_macro),
         };
     }
 
     /// Walk an assignment statement.
-    fn walk_assignment(&mut self, _name: &str, word: &Word<String>) {
+    fn walk_assignment(&mut self, _name: &str, word: &AcWord) {
         self.visit_word(word);
     }
 
@@ -188,14 +193,14 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a command.
-    fn walk_command(&mut self, cmd_words: &[Word<String>]) {
+    fn walk_command(&mut self, cmd_words: &[AcWord]) {
         for word in cmd_words {
             self.visit_word(word);
         }
     }
 
     /// Walk an `if` statement
-    fn walk_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
+    fn walk_if(&mut self, conditionals: &[GuardBodyPair<AcWord>], else_branch: &[NodeId]) {
         for pair in conditionals {
             self.visit_guard_body_pair(pair);
         }
@@ -205,7 +210,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a `for` statement
-    fn walk_for(&mut self, _var: &str, words: &[Word<String>], body: &[NodeId]) {
+    fn walk_for(&mut self, _var: &str, words: &[AcWord], body: &[NodeId]) {
         for word in words {
             self.visit_word(word);
         }
@@ -215,7 +220,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a `case` statement
-    fn walk_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
+    fn walk_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         self.visit_word(word);
         for arm in arms {
             self.visit_pattern_body_pair(arm);
@@ -223,7 +228,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a guard-body pair node.
-    fn walk_guard_body_pair(&mut self, pair: &GuardBodyPair<String>) {
+    fn walk_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
         self.visit_condition(&pair.condition);
         for c in &pair.body {
             self.visit_node(*c);
@@ -231,7 +236,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a pattern-body pair node.
-    fn walk_pattern_body_pair(&mut self, arm: &PatternBodyPair<String>) {
+    fn walk_pattern_body_pair(&mut self, arm: &PatternBodyPair<AcWord>) {
         for w in &arm.patterns {
             self.visit_word(w);
         }
@@ -248,13 +253,13 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk commands concatenated via and/or.
-    fn walk_and_or(&mut self, _negated: bool, condition: &Condition<String>, cmd: NodeId) {
+    fn walk_and_or(&mut self, _negated: bool, condition: &Condition<AcWord>, cmd: NodeId) {
         self.visit_condition(condition);
         self.visit_node(cmd);
     }
 
     /// Walk an IO redirect.
-    fn walk_redirect(&mut self, cmd: NodeId, redirects: &[Redirect<String>]) {
+    fn walk_redirect(&mut self, cmd: NodeId, redirects: &[Redirect<AcWord>]) {
         self.visit_node(cmd);
         for redirect in redirects {
             match redirect {
@@ -271,35 +276,38 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a word node.
-    fn walk_word(&mut self, w: &Word<String>) {
-        match w {
-            Word::Concat(frags) => {
+    fn walk_word(&mut self, w: &AcWord) {
+        use Word::*;
+        match &w.0 {
+            Concat(frags) => {
                 for f in frags {
                     self.visit_word_fragment(f);
                 }
             }
-            Word::Single(f) => self.visit_word_fragment(f),
-            Word::Empty => {}
+            Single(f) => self.visit_word_fragment(f),
+            Empty => {}
         }
     }
 
     /// Walk a word fragment node.
-    fn walk_word_fragment(&mut self, f: &WordFragment<String>) {
+    fn walk_word_fragment(&mut self, f: &AcWordFragment) {
+        use autoconf_parser::ast::minimal::WordFragment::*;
+        use MayM4::*;
         match f {
-            WordFragment::Param(param) => self.visit_parameter(param),
-            WordFragment::DoubleQuoted(frags) => {
+            Shell(Param(param)) => self.visit_parameter(param),
+            Shell(DoubleQuoted(frags)) => {
                 for f in frags {
-                    self.visit_word_fragment(f);
+                    self.visit_word_fragment(&Shell(f.clone()));
                 }
             }
-            WordFragment::Macro(m4) => self.visit_m4_macro(m4),
-            WordFragment::Subst(subst) => self.visit_parameter_substitution(subst.as_ref()),
+            Shell(Subst(subst)) => self.visit_parameter_substitution(subst.as_ref()),
+            Macro(m4) => self.visit_m4_macro(m4),
             _ => {}
         }
     }
 
     /// Walk a conditional expression.
-    fn walk_condition(&mut self, cond: &Condition<String>) {
+    fn walk_condition(&mut self, cond: &Condition<AcWord>) {
         match cond {
             Condition::Cond(op) => match op {
                 Operator::Eq(w1, w2)
@@ -332,39 +340,39 @@ pub trait AstVisitor: Sized {
 
     /// Walk an arithmetic expression node.
     fn walk_arithmetic(&mut self, arith: &Arithmetic<String>) {
+        use autoconf_parser::ast::Arithmetic::*;
         match arith {
-            Arithmetic::UnaryPlus(x)
-            | Arithmetic::UnaryMinus(x)
-            | Arithmetic::LogicalNot(x)
-            | Arithmetic::BitwiseNot(x) => self.visit_arithmetic(x),
-            Arithmetic::Pow(x, y)
-            | Arithmetic::Mult(x, y)
-            | Arithmetic::Div(x, y)
-            | Arithmetic::Modulo(x, y)
-            | Arithmetic::Add(x, y)
-            | Arithmetic::Sub(x, y)
-            | Arithmetic::ShiftLeft(x, y)
-            | Arithmetic::ShiftRight(x, y)
-            | Arithmetic::Less(x, y)
-            | Arithmetic::LessEq(x, y)
-            | Arithmetic::Great(x, y)
-            | Arithmetic::GreatEq(x, y)
-            | Arithmetic::Eq(x, y)
-            | Arithmetic::NotEq(x, y)
-            | Arithmetic::BitwiseAnd(x, y)
-            | Arithmetic::BitwiseXor(x, y)
-            | Arithmetic::BitwiseOr(x, y)
-            | Arithmetic::LogicalAnd(x, y)
-            | Arithmetic::LogicalOr(x, y) => {
+            UnaryPlus(x) | UnaryMinus(x) | LogicalNot(x) | BitwiseNot(x) => {
+                self.visit_arithmetic(x)
+            }
+            Pow(x, y)
+            | Mult(x, y)
+            | Div(x, y)
+            | Modulo(x, y)
+            | Add(x, y)
+            | Sub(x, y)
+            | ShiftLeft(x, y)
+            | ShiftRight(x, y)
+            | Less(x, y)
+            | LessEq(x, y)
+            | Great(x, y)
+            | GreatEq(x, y)
+            | Eq(x, y)
+            | NotEq(x, y)
+            | BitwiseAnd(x, y)
+            | BitwiseXor(x, y)
+            | BitwiseOr(x, y)
+            | LogicalAnd(x, y)
+            | LogicalOr(x, y) => {
                 self.visit_arithmetic(x);
                 self.visit_arithmetic(y);
             }
-            Arithmetic::Ternary(x, y, z) => {
+            Ternary(x, y, z) => {
                 self.visit_arithmetic(x);
                 self.visit_arithmetic(y);
                 self.visit_arithmetic(z);
             }
-            Arithmetic::Sequence(seq) => {
+            Sequence(seq) => {
                 for a in seq {
                     self.visit_arithmetic(a);
                 }
@@ -377,23 +385,24 @@ pub trait AstVisitor: Sized {
     fn walk_parameter(&mut self, param: &Parameter<String>) {}
 
     /// Walk a parameter substitution node.
-    fn walk_parameter_substitution(&mut self, subs: &ParameterSubstitution<String>) {
+    fn walk_parameter_substitution(&mut self, subs: &ParameterSubstitution<AcWord>) {
+        use autoconf_parser::ast::ParameterSubstitution::*;
         match subs {
-            ParameterSubstitution::Command(cmds) => {
+            Command(cmds) => {
                 for c in cmds {
                     self.visit_node(*c);
                 }
             }
-            ParameterSubstitution::Arith(Some(arith)) => self.visit_arithmetic(arith),
-            ParameterSubstitution::Len(param) => self.visit_parameter(param),
-            ParameterSubstitution::Default(_, param, word)
-            | ParameterSubstitution::Assign(_, param, word)
-            | ParameterSubstitution::Error(_, param, word)
-            | ParameterSubstitution::Alternative(_, param, word)
-            | ParameterSubstitution::RemoveSmallestSuffix(param, word)
-            | ParameterSubstitution::RemoveLargestSuffix(param, word)
-            | ParameterSubstitution::RemoveSmallestPrefix(param, word)
-            | ParameterSubstitution::RemoveLargestPrefix(param, word) => {
+            Arith(Some(arith)) => self.visit_arithmetic(arith),
+            Len(param) => self.visit_parameter(param),
+            Default(_, param, word)
+            | Assign(_, param, word)
+            | Error(_, param, word)
+            | Alternative(_, param, word)
+            | RemoveSmallestSuffix(param, word)
+            | RemoveLargestSuffix(param, word)
+            | RemoveSmallestPrefix(param, word)
+            | RemoveLargestPrefix(param, word) => {
                 self.visit_parameter(param);
                 if let Some(w) = word {
                     self.visit_word(w);
@@ -407,7 +416,7 @@ pub trait AstVisitor: Sized {
     fn walk_function_definition(&mut self, name: &str, body: NodeId) {}
 
     /// Walk an M4 macro node (walks arguments only).
-    fn walk_m4_macro(&mut self, m4_macro: &M4Macro<String>) {
+    fn walk_m4_macro(&mut self, m4_macro: &M4Macro) {
         for arg in &m4_macro.args {
             match arg {
                 M4Argument::Word(w) => self.visit_word(w),
@@ -428,18 +437,18 @@ pub trait AstVisitor: Sized {
 }
 
 /// Represents a node in the dependency graph
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Node {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct NodeInfo {
     /// Index of the node in the original list
     pub node_id: NodeId,
     /// ID of the top-most parent node
     pub top_id: Option<NodeId>,
     /// trailing comments
-    pub comment: Option<String>,
+    // pub comment: Option<AcWord>,
     /// Range of line numbers where the body is effectively referenced.
-    pub ranges: Vec<(usize, usize)>,
+    // pub ranges: Vec<(usize, usize)>,
     /// Body of commands referenced by this node.
-    pub kind: NodeKind<String>,
+    // pub cmd: AcCommand,
     /// ID of the parent node and the branch index itself hangs on
     pub parent: Option<(NodeId, Option<usize>)>,
     /// IDs of the children
@@ -454,15 +463,7 @@ pub(crate) struct Node {
     pub var_dependents: HashSet<NodeId>,
 }
 
-impl Node {
-    pub fn range_start(&self) -> Option<usize> {
-        self.ranges.first().map(|(start, _)| start).copied()
-    }
-
-    pub fn range_end(&self) -> Option<usize> {
-        self.ranges.last().map(|(_, end)| end).copied()
-    }
-
+impl NodeInfo {
     pub fn is_top_node(&self) -> bool {
         self.top_id.is_some_and(|id| id == self.node_id)
     }
@@ -478,9 +479,9 @@ pub enum Guard {
     /// doc
     Not(Box<Self>),
     /// doc
-    Cond(Condition<String>),
+    Cond(Condition<AcWord>),
     /// doc
-    Match(Word<String>, Vec<Word<String>>),
+    Match(AcWord, Vec<AcWord>),
 }
 
 /// Compare two conditions.
@@ -505,7 +506,7 @@ pub struct Analyzer {
     /// Original contents of analyzed script
     lines: Vec<String>,
     /// Nodes in the dependency graph
-    nodes: Slab<Node>,
+    pool: AutoconfPool<NodeInfo>,
     /// Ids of top-level commands
     top_ids: Vec<NodeId>,
     /// Map of variable names to information of commands that define them
@@ -530,25 +531,12 @@ impl Analyzer {
     /// Analyze commands and build the dependency graph
     pub fn new<S: AsRef<str>>(contents: S, flatten_threshold: Option<usize>) -> Self {
         let lexer = Lexer::new(contents.as_ref().chars());
-        let (nodes, top_ids) = NodeParser::new(lexer).parse_all();
-
+        let (nodes, top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
         let nodes = nodes
             .into_iter()
-            .map(|(node_id, n)| {
-                let node = Node {
-                    node_id,
-                    top_id: None,
-                    comment: n.comment,
-                    ranges: n.range.map_or(Vec::new(), |r| vec![r]),
-                    kind: n.kind,
-                    parent: None,
-                    children: None,
-                    defines: HashMap::new(),
-                    uses: HashMap::new(),
-                    var_dependents: HashSet::new(),
-                    var_dependencies: HashSet::new(),
-                };
-                (node_id, node)
+            .map(|(node_id, mut n)| {
+                n.info.node_id = node_id;
+                (node_id, n)
             })
             .collect::<Slab<Node>>();
 
@@ -573,12 +561,11 @@ impl Analyzer {
             },
         );
 
-        let (top_ids, nodes) =
-            Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
+        let (top_ids, nodes) = Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
 
         let mut s = Self {
             lines: contents.as_ref().lines().map(|s| s.to_string()).collect(),
-            nodes,
+            pool: AutoconfPool::new(nodes),
             guards,
             evals,
             top_ids,
@@ -599,8 +586,8 @@ impl Analyzer {
 
         let mut def_use_edges = Vec::new();
         // Calculate dependency edges
-        for (id, node) in &s.nodes {
-            for var in node.uses.keys() {
+        for (id, node) in &s.pool.nodes {
+            for var in node.info.uses.keys() {
                 if let Some(def_id) = s.get_definition(var, id) {
                     def_use_edges.push((def_id, id));
                 }
@@ -608,8 +595,8 @@ impl Analyzer {
         }
         // Apply initialization of depdencies to nodes
         for (def_id, user_id) in def_use_edges {
-            s.nodes[user_id].var_dependencies.insert(def_id);
-            s.nodes[def_id].var_dependents.insert(user_id);
+            s.pool.nodes[user_id].info.var_dependencies.insert(def_id);
+            s.pool.nodes[def_id].info.var_dependents.insert(user_id);
         }
 
         s
@@ -617,7 +604,7 @@ impl Analyzer {
 
     /// Get the number of nodes (commands)
     pub fn num_nodes(&self) -> usize {
-        self.nodes.len()
+        self.pool.nodes.len()
     }
 
     /// Get guard conditions of given variable location
@@ -627,8 +614,8 @@ impl Analyzer {
 
     /// Get command that defines a variable before
     pub fn get_definition(&self, var_name: &str, node_id: NodeId) -> Option<NodeId> {
-        if let Some(node) = self.nodes.get(node_id) {
-            if let Some(user_loc) = node.uses.get(var_name).map(|v| v.first()).flatten() {
+        if let Some(node) = self.pool.get(node_id) {
+            if let Some(user_loc) = node.info.uses.get(var_name).map(|v| v.first()).flatten() {
                 return self.var_definitions.get(var_name).and_then(|v| {
                     v.iter()
                         .rev()
@@ -658,34 +645,34 @@ impl Analyzer {
 
     /// Get all variables defined by a command
     pub fn get_defined_variables(&self, node_id: NodeId) -> Option<HashSet<String>> {
-        self.nodes
+        self.pool
             .get(node_id)
-            .map(|node| node.defines.keys().cloned().collect())
+            .map(|node| node.info.defines.keys().cloned().collect())
     }
 
     /// Get all variables used by a command
     pub fn get_used_variables(&self, node_id: NodeId) -> Option<HashSet<String>> {
-        self.nodes
+        self.pool
             .get(node_id)
-            .map(|node| node.uses.keys().cloned().collect())
+            .map(|node| node.info.uses.keys().cloned().collect())
     }
 
     /// Get all commands this command depends on
     pub fn get_dependencies(&self, node_id: NodeId) -> Option<HashSet<NodeId>> {
-        self.nodes
+        self.pool
             .get(node_id)
-            .map(|node| node.var_dependencies.clone())
+            .map(|node| node.info.var_dependencies.clone())
     }
 
     pub fn get_parent(&self, node_id: NodeId) -> Option<(NodeId, Option<NodeId>)> {
-        self.nodes[node_id].parent
+        self.pool.nodes[node_id].info.parent
     }
 
     /// Get all commands that depend on this command
     pub fn get_dependents(&self, node_id: NodeId) -> Option<HashSet<NodeId>> {
-        self.nodes.get(node_id).map(|node| {
-            let mut deps = node.var_dependencies.clone();
-            if let Some(children) = &node.children {
+        self.pool.get(node_id).map(|node| {
+            let mut deps = node.info.var_dependencies.clone();
+            if let Some(children) = &node.info.children {
                 deps.extend(children.iter().copied());
             }
             deps
@@ -694,7 +681,7 @@ impl Analyzer {
 
     /// Get vector of all node ids
     pub fn get_ids(&self) -> Vec<NodeId> {
-        self.nodes.iter().map(|(id, _)| id).collect()
+        self.pool.nodes.iter().map(|(id, _)| id).collect()
     }
 
     /// Get vector of all ids of top-level nodes
@@ -704,11 +691,11 @@ impl Analyzer {
 
     /// Get a range of the command at the specified index
     pub fn get_ranges(&self, id: NodeId) -> Option<&[(usize, usize)]> {
-        self.nodes.get(id).map(|n| n.ranges.as_ref())
+        self.pool.get(id).map(|n| n.range.as_ref())
     }
     /// Get a reference to the command at the specified index
-    pub fn get_command(&self, id: NodeId) -> Option<&Command> {
-        self.nodes.get(id).map(|n| &n.kind)
+    pub fn get_command(&self, id: NodeId) -> Option<&AcCommand> {
+        self.pool.nodes.get(id).map(|n| &n.cmd)
     }
 
     /// Get all commands that define or use a variable
@@ -721,8 +708,8 @@ impl Analyzer {
         }
 
         // Add commands that use the variable
-        for (id, node) in &self.nodes {
-            if node.uses.contains_key(var_name) {
+        for (id, node) in &self.pool.nodes {
+            if node.info.uses.contains_key(var_name) {
                 result.insert(id);
             }
         }
@@ -732,13 +719,13 @@ impl Analyzer {
 
     /// Get node representation by id
     pub fn get_node(&self, node_id: NodeId) -> &Node {
-        &self.nodes[node_id]
+        &self.pool.nodes[node_id]
     }
 
     /// Get original content of commands in specified node
     pub fn get_content(&self, node_id: NodeId) -> Option<Vec<String>> {
-        self.nodes.get(node_id).map(|node| {
-            node.ranges
+        self.pool.get(node_id).map(|node| {
+            node.range
                 .iter()
                 .map(|&(a, b)| {
                     // FIXME: Poorly working with this lines extraction logic.
@@ -758,7 +745,7 @@ impl Analyzer {
     pub fn recover_content(&self, node_id: NodeId) -> String {
         // FIXME: the strategy mutating self is too dumb.
         self.focus.set(Some(node_id));
-        let ret = self.node_to_string(node_id, 0);
+        let ret = self.pool.display_node(node_id, 0);
         self.focus.set(None);
         ret
     }
@@ -771,21 +758,23 @@ impl Analyzer {
         while let Some(id) = stack.pop() {
             assert!(!visited.contains(&id));
             visited.insert(id);
-            if let Some(children) = &self.nodes[id].children {
+            if let Some(children) = &self.pool.nodes[id].info.children {
                 stack.extend(
                     children
                         .iter()
-                        .filter(|&&child| !self.nodes[child].is_top_node()),
+                        .filter(|&&child| !self.pool.nodes[child].info.is_top_node()),
                 );
             }
             defines.extend(
-                self.nodes[id]
+                self.pool.nodes[id]
+                    .info
                     .defines
                     .iter()
                     .map(|(s, v)| (s.clone(), v.clone())),
             );
             uses.extend(
-                self.nodes[id]
+                self.pool.nodes[id]
+                    .info
                     .uses
                     .iter()
                     .map(|(s, v)| (s.clone(), v.clone())),
@@ -797,12 +786,12 @@ impl Analyzer {
     /// Find case statements matching the given variables in the top-level commands.
     pub fn find_case_matches(&self, var_names: &[String]) -> Vec<CaseMatch> {
         let finder =
-            CaseMatchFinder::find_case_matches(&self.nodes, &self.top_ids, var_names.to_vec());
+            CaseMatchFinder::find_case_matches(&self.pool.nodes, &self.top_ids, var_names.to_vec());
         finder.matches
     }
 
     /// Analyze eval expressions using backward taint analysis to enumerate possible variable names
-    // pub fn analyze_eval_with_taint_analysis(&self) -> Vec<(EvalAssignment, Vec<String>)> {
+    // pub fn analyze_eval_with_taint_analysis(&self) -> Vec<(EvalAssignment, Vec<AcWord>)> {
     //     let finder = EvalAnalyzer::find_eval(&self.nodes, &self.top_ids);
     //     finder.analyze_eval_with_taint_analysis(&self.top_ids)
     // }
@@ -827,16 +816,17 @@ impl Analyzer {
     /// Check if two nodes are related for chunk fusing.
     /// Nodes are related if one depends on the other through variable dependencies.
     fn are_nodes_related(&self, node1_id: NodeId, node2_id: NodeId) -> bool {
-        if let (Some(node1), Some(node2)) = (self.nodes.get(node1_id), self.nodes.get(node2_id)) {
+        if let (Some(node1), Some(node2)) = (self.pool.get(node1_id), self.pool.get(node2_id)) {
             // Check if node2 depends on node1 or vice versa
-            (node1.parent == node2.parent)
+            (node1.info.parent == node2.info.parent)
                 && !(node1
+                    .info
                     .defines
                     .keys()
                     .filter(|key| !self.global_vars.contains(key.as_str()))
                     .cloned()
                     .collect::<HashSet<_>>())
-                .is_disjoint(&node2.uses.keys().cloned().collect::<HashSet<_>>())
+                .is_disjoint(&node2.info.uses.keys().cloned().collect::<HashSet<_>>())
         } else {
             false
         }
@@ -844,8 +834,8 @@ impl Analyzer {
 
     /// Check if a node is an assignment statement.
     fn is_assignment(&self, node_id: NodeId) -> bool {
-        if let Some(node) = self.nodes.get(node_id) {
-            matches!(node.kind, NodeKind::Assignment(_, _))
+        if let Some(node) = self.pool.get(node_id) {
+            matches!(node.cmd.0, MayM4::Shell(ShellCommand::Assignment(_, _)))
         } else {
             false
         }
@@ -885,9 +875,9 @@ impl Analyzer {
                     let mut j = i;
                     let mut remaining_window = window;
                     let chunk_parent = self
-                        .nodes
+                        .pool
                         .get(*current_chunk.first().unwrap())
-                        .map(|n| n.parent);
+                        .map(|n| n.info.parent);
 
                     // Collect lookahead nodes, skipping assignments if disrespect_assignment is true
                     while j < self.top_ids.len()
@@ -897,7 +887,7 @@ impl Analyzer {
                         let node_id = self.top_ids[j];
 
                         // Check if this node has the same parent as the chunk
-                        let node_parent = self.nodes.get(node_id).map(|n| n.parent);
+                        let node_parent = self.pool.get(node_id).map(|n| n.info.parent);
                         if chunk_parent != node_parent {
                             break; // Different parent, stop lookahead
                         }
@@ -948,18 +938,5 @@ impl Analyzer {
         }
 
         chunks
-    }
-}
-
-impl NodePool<String> for Analyzer {
-    fn get_node_for_display(
-        &self,
-        node_id: NodeId,
-    ) -> Option<(&NodeKind<String>, Option<&String>)> {
-        let is_child = self.focus.get().unwrap() != node_id;
-        self.nodes
-            .get(node_id)
-            .filter(|n| !(n.is_top_node() && is_child))
-            .map(|n| (&n.kind, n.comment.as_ref()))
     }
 }

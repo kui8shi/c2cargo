@@ -1,7 +1,7 @@
 use super::{
     cmp_guards,
     variable::{LValue, Location, RValue},
-    Analyzer, NodeKind, Parameter, ParameterSubstitution, Word, WordFragment,
+    AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
 };
 use itertools::Itertools;
 use std::{cmp::Ordering, collections::HashSet};
@@ -264,13 +264,13 @@ impl Analyzer {
         };
         for def_loc in def_locs {
             let nid = def_loc.node_id;
-            let node_kind = &self.get_node(nid).kind;
+            let cmd = &self.get_node(nid).cmd.0;
             println!(
                 "Processing definition at {:?} \n  node kind: {:?}",
-                &def_loc, node_kind
+                &def_loc, cmd
             );
-            match node_kind.clone() {
-                NodeKind::Assignment(lhs, rhs) if lhs == name => {
+            match cmd.clone() {
+                MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) if lhs == name => {
                     let vals = self.inspect_word(&rhs, &def_loc);
                     println!(
                         "Collected right values in assignment of {} ... {:?}",
@@ -297,11 +297,11 @@ impl Analyzer {
                         break;
                     }
                 }
-                NodeKind::For {
+                MayM4::Shell(ShellCommand::For {
                     var,
                     words,
                     body: _,
-                } if var == name => {
+                }) if var == name => {
                     println!(
                         "Processing FOR loop for variable {:?}, words: {:?}",
                         name, &words
@@ -333,16 +333,17 @@ impl Analyzer {
         Some(chain)
     }
 
-    fn inspect_word(&self, word: &Word<String>, loc: &Location) -> Vec<RValue> {
+    fn inspect_word(&self, word: &AcWord, loc: &Location) -> Vec<RValue> {
         let mut values = Vec::new();
-        match word {
-            Word::Single(WordFragment::Literal(lit)) => {
+        use MayM4::*;
+        match &word.0 {
+            Word::Single(Shell(WordFragment::Literal(lit))) => {
                 values.extend(
                     lit.split_whitespace()
                         .filter_map(|s| (!s.is_empty()).then_some(RValue::Lit(s.to_owned()))),
                 );
             }
-            Word::Single(WordFragment::DoubleQuoted(frags)) => {
+            Word::Single(Shell(WordFragment::DoubleQuoted(frags))) => {
                 for f in frags {
                     match f {
                         WordFragment::Literal(lit) => {
@@ -357,10 +358,10 @@ impl Analyzer {
                     }
                 }
             }
-            Word::Single(WordFragment::Param(Parameter::Var(var))) => {
+            Word::Single(Shell(WordFragment::Param(Parameter::Var(var)))) => {
                 values.push(RValue::Var(var.to_owned(), loc.clone()));
             }
-            Word::Single(WordFragment::Subst(subst)) => match &**subst {
+            Word::Single(Shell(WordFragment::Subst(subst))) => match &**subst {
                 ParameterSubstitution::Command(cmds) => {
                     let node_id = cmds.first().unwrap().clone();
                     let shell_string = self.recover_content(node_id);

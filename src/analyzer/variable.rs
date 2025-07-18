@@ -1,8 +1,8 @@
 use std::{collections::HashMap, hash::Hash};
 
 use super::{
-    Analyzer, Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro, Node, NodeId,
-    Parameter, PatternBodyPair, Word, WordFragment,
+    Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro, Node, NodeId,
+    Parameter, PatternBodyPair, AcWord, WordFragment, AcWordFragment, MayM4, Word,
 };
 
 use slab::Slab;
@@ -158,25 +158,26 @@ impl<'a> VariableAnalyzer<'a> {
 
     /// parse a body of eval assignment. It is expected to take `word` as a concatenated word fragments
     /// currently we don't support mixed lhs value (eigther single literal or single variable)
-    fn parse_eval_assignment(&self, frags: &[WordFragment<String>]) -> (LValue, Option<RValue>) {
+    fn parse_eval_assignment(&self, frags: &[AcWordFragment]) -> (LValue, Option<RValue>) {
         let mut lhs = Vec::new();
         let mut rhs = Vec::new();
         let mut is_lhs = true;
         let mut is_ref = false;
         let loc = self.current_location();
         for frag in frags.iter() {
+            use MayM4::*;
             match frag {
-                WordFragment::Escaped(s) if s == "\"" => (),
-                WordFragment::Escaped(s) if s == "$" => {
+                Shell(WordFragment::Escaped(s)) if s == "\"" => (),
+                Shell(WordFragment::Escaped(s)) if s == "$" => {
                     is_ref = true;
                 }
-                WordFragment::Param(Parameter::Var(s)) if is_lhs => {
+                Shell(WordFragment::Param(Parameter::Var(s))) if is_lhs => {
                     lhs.push(LValue::Var(s.to_owned(), loc.clone()));
                 }
-                WordFragment::Param(Parameter::Var(s)) if !is_lhs => {
+                Shell(WordFragment::Param(Parameter::Var(s))) if !is_lhs => {
                     rhs.push(RValue::Var(s.to_owned(), loc.clone()));
                 }
-                WordFragment::Literal(s) if is_lhs => {
+                Shell(WordFragment::Literal(s)) if is_lhs => {
                     if s.contains("=") {
                         let mut split = s.split("=");
                         if let Some(lit) = split.next() {
@@ -194,11 +195,11 @@ impl<'a> VariableAnalyzer<'a> {
                         lhs.push(LValue::Lit(s.to_owned()));
                     }
                 }
-                WordFragment::Literal(s) if !is_lhs => {
+                Shell(WordFragment::Literal(s)) if !is_lhs => {
                     let s = s.strip_prefix("=").unwrap_or(s).to_owned();
                     rhs.push(RValue::Lit(s));
                 }
-                WordFragment::DoubleQuoted(inner_frags) if !is_lhs => {
+                Shell(WordFragment::DoubleQuoted(inner_frags)) if !is_lhs => {
                     for inner_frag in inner_frags {
                         match inner_frag {
                             WordFragment::Escaped(s) if s == "$" => {
@@ -241,8 +242,8 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     fn visit_top(&mut self, node_id: NodeId) {
         self.cursor.replace(node_id);
         self.walk_node(node_id);
-        self.nodes[node_id].defines = self.defines.get(&node_id).cloned().unwrap_or_default();
-        self.nodes[node_id].uses = self.uses.get(&node_id).cloned().unwrap_or_default();
+        self.nodes[node_id].info.defines = self.defines.get(&node_id).cloned().unwrap_or_default();
+        self.nodes[node_id].info.uses = self.uses.get(&node_id).cloned().unwrap_or_default();
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
@@ -250,28 +251,28 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         let saved_cursor = self.cursor.replace(node_id);
         dbg!(&self.get_node(node_id));
         // Walk
-        if !self.get_node(node_id).is_top_node() {
+        if !self.get_node(node_id).info.is_top_node() {
             self.walk_node(node_id);
             // Assign collected variable to the node
-            self.nodes[node_id].defines = self.defines.get(&node_id).cloned().unwrap_or_default();
-            self.nodes[node_id].uses = self.uses.get(&node_id).cloned().unwrap_or_default();
+            self.nodes[node_id].info.defines = self.defines.get(&node_id).cloned().unwrap_or_default();
+            self.nodes[node_id].info.uses = self.uses.get(&node_id).cloned().unwrap_or_default();
         }
         // Recover
         self.cursor = saved_cursor;
     }
 
-    fn visit_assignment(&mut self, name: &str, word: &Word<String>) {
+    fn visit_assignment(&mut self, name: &str, word: &AcWord) {
         self.record_variable_definition(name);
         self.walk_assignment(name, word);
     }
 
-    fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<String>) {
+    fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
         self.conds.push(Guard::Cond(pair.condition.clone()));
         self.walk_guard_body_pair(pair);
         self.denied = self.conds.pop();
     }
 
-    fn visit_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
+    fn visit_if(&mut self, conditionals: &[GuardBodyPair<AcWord>], else_branch: &[NodeId]) {
         for pair in conditionals {
             self.visit_guard_body_pair(pair);
         }
@@ -285,12 +286,12 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         }
     }
 
-    fn visit_for(&mut self, var: &str, words: &[Word<String>], body: &[NodeId]) {
+    fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
         self.record_variable_definition(var);
         self.walk_for(var, words, body);
     }
 
-    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
+    fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         self.visit_word(word);
         for arm in arms {
             for w in &arm.patterns {
@@ -305,7 +306,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         }
     }
 
-    fn visit_and_or(&mut self, negated: bool, condition: &Condition<String>, cmd: NodeId) {
+    fn visit_and_or(&mut self, negated: bool, condition: &Condition<AcWord>, cmd: NodeId) {
         self.conds.push(if negated {
             Guard::Not(Box::new(Guard::Cond(condition.clone())))
         } else {
@@ -315,8 +316,8 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         self.conds.pop();
     }
 
-    fn visit_word_fragment(&mut self, f: &WordFragment<String>) {
-        if let WordFragment::Param(Parameter::Var(name)) = f {
+    fn visit_word_fragment(&mut self, f: &AcWordFragment) {
+        if let MayM4::Shell(WordFragment::Param(Parameter::Var(name))) = f {
             self.record_variable_usage(name);
         }
         self.walk_word_fragment(f);
@@ -343,7 +344,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         self.walk_parameter(param);
     }
 
-    fn visit_m4_macro(&mut self, m4_macro: &M4Macro<String>) {
+    fn visit_m4_macro(&mut self, m4_macro: &M4Macro) {
         if let Some(effects) = &m4_macro.effects {
             if let Some(shell_vars) = &effects.shell_vars {
                 for var in shell_vars {
@@ -359,10 +360,10 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         self.walk_m4_macro(m4_macro);
     }
 
-    fn visit_command(&mut self, cmd_words: &[Word<String>]) {
+    fn visit_command(&mut self, cmd_words: &[AcWord]) {
         if let Some(first) = cmd_words.get(0) {
             if is_eval(first) {
-                if let Some(Word::Concat(frags)) = cmd_words.get(1) {
+                if let Some(Word::Concat(frags)) = cmd_words.get(1).map(|t| &t.0) {
                     let (lhs, rhs) = self.parse_eval_assignment(frags);
                     let loc = Location {
                         node_id: self.cursor.unwrap(),
@@ -378,11 +379,11 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     }
 }
 
-fn is_eval(word: &Word<String>) -> bool {
-    match word {
-        Word::Single(f) => matches!(f, WordFragment::Literal(t) if t == "eval"),
+fn is_eval(word: &AcWord) -> bool {
+    match &word.0 {
+        Word::Single(f) => matches!(f, MayM4::Shell(WordFragment::Literal(t)) if t == "eval"),
         Word::Concat(frags) => {
-            frags.len() == 1 && matches!(&frags[0], WordFragment::Literal(t) if t == "eval")
+            frags.len() == 1 && matches!(&frags[0], MayM4::Shell(WordFragment::Literal(t)) if t == "eval")
         }
         _ => false,
     }

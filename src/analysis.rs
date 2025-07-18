@@ -2,7 +2,6 @@
 //! in a shell script or autoconf file.
 
 use crate::analyzer::Analyzer;
-use std::{fs::File, io::Write};
 
 pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
     // Initialize the lexer and parser

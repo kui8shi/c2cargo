@@ -1,13 +1,14 @@
-use super::{AstVisitor, Node, NodeId, Parameter, PatternBodyPair, Word, WordFragment};
+use super::{AstVisitor, Node, NodeId, Parameter, PatternBodyPair, AcWord, WordFragment, MayM4};
+use autoconf_parser::ast::minimal::Word;
 use slab::Slab;
 
 /// Represents a matched case statement on a specific variable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaseMatch {
     /// The variable being matched (the word in `case $var in`).
-    pub var: Word<String>,
+    pub var: AcWord,
     /// The arms (patterns and bodies) of the case statement.
-    pub arms: Vec<PatternBodyPair<String>>,
+    pub arms: Vec<PatternBodyPair<AcWord>>,
 }
 
 /// Visitor to find case statements matching given variables.
@@ -50,9 +51,9 @@ impl<'a> AstVisitor for CaseMatchFinder<'a> {
         &self.nodes[node_id]
     }
 
-    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
-        if let Word::Single(fragment) = word {
-            if let WordFragment::Param(Parameter::Var(name)) = fragment {
+    fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
+        if let Word::Single(fragment) = &word.0 {
+            if let MayM4::Shell(WordFragment::Param(Parameter::Var(name))) = fragment {
                 if self.var_names.contains(name) {
                     self.matches.push(CaseMatch {
                         var: word.clone(),

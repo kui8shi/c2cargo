@@ -1,6 +1,4 @@
-use std::collections::{HashMap, HashSet};
-
-use super::{AstVisitor, GuardBodyPair, Node, NodeId, NodeKind, PatternBodyPair, Word};
+use super::{AstVisitor, Node, NodeId};
 use slab::Slab;
 
 /// A visitor to initialize several blank fields of Node
@@ -16,7 +14,7 @@ pub(super) struct LazyInitializer {
 struct ParentInfo {
     node_id: NodeId,
     branch: Option<usize>,
-    ranges: Option<Vec<(usize, usize)>>,
+    range: Option<Vec<(usize, usize)>>,
 }
 
 impl LazyInitializer {
@@ -41,22 +39,22 @@ impl AstVisitor for LazyInitializer {
 
     /// Visits a top-level node and adds it to the top-level ID list
     fn visit_top(&mut self, node_id: NodeId) {
-        self.nodes[node_id].top_id = Some(node_id);
+        self.nodes[node_id].info.top_id = Some(node_id);
         self.visit_node(node_id);
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
         if let Some(parent) = self.parent_stack.last() {
             // Set up parent-child relationships
-            self.nodes[node_id].parent = Some((parent.node_id, parent.branch));
+            self.nodes[node_id].info.parent = Some((parent.node_id, parent.branch));
             self.nodes[parent.node_id]
-                .children
+                .info.children
                 .get_or_insert_default()
                 .push(node_id);
-            if self.nodes[node_id].ranges.is_empty() {
-                if let Some(ref ranges) = parent.ranges {
+            if self.nodes[node_id].range.is_empty() {
+                if let Some(ref ranges) = parent.range {
                     // propagate ranges information if child doesn't know its range.
-                    self.nodes[node_id].ranges = ranges.clone();
+                    self.nodes[node_id].range = ranges.clone();
                 }
             }
         }
@@ -65,7 +63,7 @@ impl AstVisitor for LazyInitializer {
         self.parent_stack.push(ParentInfo {
             node_id,
             branch: None,
-            ranges: Some(self.nodes[node_id].ranges.clone()),
+            range: Some(self.nodes[node_id].range.clone()),
         });
 
         // Recursively process this node's children

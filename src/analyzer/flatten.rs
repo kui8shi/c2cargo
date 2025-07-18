@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
-use super::{AstVisitor, GuardBodyPair, Node, NodeId, NodeKind, PatternBodyPair, Word};
+use super::{
+    AcCommand, AcWord, AstVisitor, GuardBodyPair, Node, NodeId, NodeInfo, PatternBodyPair,
+    ShellCommand,
+};
 use slab::Slab;
 
 /// A visitor to flatten and collect AST nodes into a linear sequence.
@@ -62,7 +65,7 @@ impl Flattener {
     /// A node is considered large if its line span exceeds the threshold
     fn is_large(&self, node_id: NodeId) -> bool {
         self.nodes[node_id]
-            .ranges
+            .range
             .first()
             .is_some_and(|(start, end)| end - start > self.threshold)
     }
@@ -85,23 +88,26 @@ impl Flattener {
     /// parent command at the top level
     fn insert_brace(&mut self, parent: (NodeId, Option<usize>), children: &[NodeId]) -> NodeId {
         let brace_id = self.nodes.insert(Node {
-            node_id: 0,
-            top_id: None,
             comment: None,
-            ranges: children
+            range: children
                 .iter()
-                .flat_map(|id| self.nodes[*id].ranges.clone())
+                .flat_map(|id| self.nodes[*id].range.clone())
                 .collect::<Vec<_>>(),
-            kind: NodeKind::Brace(children.to_vec()),
-            parent: Some(parent),
-            children: Some(Vec::new()), // intentionally left blank to be filled later
-            defines: HashMap::new(),
-            uses: HashMap::new(),
-            var_dependencies: HashSet::new(),
-            var_dependents: HashSet::new(),
+            cmd: AcCommand::new_cmd(ShellCommand::Brace(children.to_vec())),
+            info: NodeInfo {
+                node_id: 0,
+                top_id: None,
+
+                parent: Some(parent),
+                children: Some(Vec::new()), // intentionally left blank to be filled later
+                defines: HashMap::new(),
+                uses: HashMap::new(),
+                var_dependencies: HashSet::new(),
+                var_dependents: HashSet::new(),
+            },
         });
-        self.nodes[brace_id].node_id = brace_id;
-        self.nodes[brace_id].top_id = Some(brace_id);
+        self.nodes[brace_id].info.node_id = brace_id;
+        self.nodes[brace_id].info.top_id = Some(brace_id);
         self.top_ids.push(brace_id);
         brace_id
     }
@@ -134,7 +140,7 @@ impl AstVisitor for Flattener {
 
         // Assign the top_id for this node - this determines which top-level node
         // this node belongs to in the flattened structure
-        self.nodes[node_id].top_id = Some(if is_large {
+        self.nodes[node_id].info.top_id = Some(if is_large {
             // Large nodes become their own top-level nodes
             node_id
         } else {
@@ -176,7 +182,7 @@ impl AstVisitor for Flattener {
         });
         #[cfg(debug_assertions)]
         {
-            self.last_range_start = self.nodes[node_id].ranges.first().map(|r| r.0);
+            self.last_range_start = self.nodes[node_id].range.first().map(|r| r.0);
         }
 
         // Push this node onto the parent stack with its flattening status
@@ -201,14 +207,14 @@ impl AstVisitor for Flattener {
     ///
     /// Large for loops have their body commands promoted to top-level,
     /// while small ones get their commands grouped under a brace node
-    fn visit_for(&mut self, var: &str, words: &[Word<String>], body: &[NodeId]) {
+    fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
         if let Some(cur) = self.will_flatten() {
             #[cfg(debug_assertions)]
             {
                 let start = self.nodes[cur].range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
                     if !(prev <= start) {
-                        dbg!(&self.nodes[cur].ranges, cur, self.last_range_start);
+                        dbg!(&self.nodes[cur].range, cur, self.last_range_start);
                         panic!();
                     }
                 }
@@ -217,7 +223,7 @@ impl AstVisitor for Flattener {
             let body_start = self.nodes[*body.first().unwrap()].range_start().unwrap();
             let body_end = self.nodes[*body.last().unwrap()].range_end().unwrap();
             let gaps = &[(body_start + 1, body_end)];
-            self.nodes[cur].ranges = gap_range(self.nodes[cur].ranges.pop().unwrap(), gaps);
+            self.nodes[cur].range = gap_range(self.nodes[cur].range.pop().unwrap(), gaps);
             if (body_end - body_start) > self.threshold {
                 // For large bodies, promote child commands to top-level
                 self.top_ids.extend(body);
@@ -236,11 +242,11 @@ impl AstVisitor for Flattener {
                 self.visit_brace(body);
                 self.parent_stack.pop();
                 // Update the for loop to use the new structure
-                self.nodes[cur].kind = NodeKind::For {
+                self.nodes[cur].cmd = AcCommand::new_cmd(ShellCommand::For {
                     var: var.to_owned(),
                     words: words.to_owned(),
                     body: vec![brace_id],
-                };
+                });
             }
         } else {
             self.walk_for(var, words, body)
@@ -251,7 +257,7 @@ impl AstVisitor for Flattener {
     ///
     /// Large case arms have their body commands promoted to top-level,
     /// while small arms get their commands grouped under brace nodes
-    fn visit_case(&mut self, word: &Word<String>, arms: &[PatternBodyPair<String>]) {
+    fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         if let Some(cur) = self.will_flatten() {
             #[cfg(debug_assertions)]
             {
@@ -273,7 +279,7 @@ impl AstVisitor for Flattener {
                 .filter(|(s, e)| e - s > 0)
                 .cloned()
                 .collect::<Vec<_>>();
-            self.nodes[cur].ranges = gap_range(self.nodes[cur].ranges.pop().unwrap(), &gaps);
+            self.nodes[cur].range = gap_range(self.nodes[cur].range.pop().unwrap(), &gaps);
             let mut new_arms = Vec::new();
             for (i, (arm, (body_start, body_end))) in arms.iter().zip(ranges.iter()).enumerate() {
                 if (body_end - body_start) > self.threshold {
@@ -300,10 +306,10 @@ impl AstVisitor for Flattener {
                 }
             }
             // Update the case statement to use the new structure
-            self.nodes[cur].kind = NodeKind::Case {
+            self.nodes[cur].cmd = AcCommand::new_cmd(ShellCommand::Case {
                 word: word.to_owned(),
                 arms: new_arms,
-            }
+            })
         } else {
             self.walk_case(word, arms);
         }
@@ -313,7 +319,7 @@ impl AstVisitor for Flattener {
     ///
     /// Large if/else branches have their body commands promoted to top-level,
     /// while small branches get their commands grouped under brace nodes
-    fn visit_if(&mut self, conditionals: &[GuardBodyPair<String>], else_branch: &[NodeId]) {
+    fn visit_if(&mut self, conditionals: &[GuardBodyPair<AcWord>], else_branch: &[NodeId]) {
         if let Some(cur) = self.will_flatten() {
             #[cfg(debug_assertions)]
             {
@@ -333,7 +339,7 @@ impl AstVisitor for Flattener {
                 .filter(|body| !body.is_empty())
                 .map(|body| self.body_range(body))
                 .collect::<Vec<_>>();
-            self.nodes[cur].ranges = gap_range(self.nodes[cur].ranges.pop().unwrap(), &gaps);
+            self.nodes[cur].range = gap_range(self.nodes[cur].range.pop().unwrap(), &gaps);
             let mut new_conditionals = Vec::new();
             let mut new_else_branch = Vec::new();
             for (i, pair) in conditionals.iter().enumerate() {
@@ -376,10 +382,10 @@ impl AstVisitor for Flattener {
                 }
             }
             // Update the if statement to use the new structure
-            self.nodes[cur].kind = NodeKind::If {
+            self.nodes[cur].cmd = AcCommand::new_cmd(ShellCommand::If {
                 conditionals: new_conditionals,
                 else_branch: new_else_branch,
-            };
+            });
         } else {
             self.walk_if(conditionals, else_branch);
         }
