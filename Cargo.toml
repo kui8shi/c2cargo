@@ -5,11 +5,11 @@ edition = "2021"
 
 [dependencies]
 itertools = "0.14.0"
-# autoconf-parser = { git = "https://github.com/kui8shi/autoconf-parser.git" }
+# autotools-parser = { git = "https://github.com/kui8shi/autotools-parser.git" }
 owned_chars = "0.3.2"
 reqwest = { version = "0.12.15", features = ["json", "blocking"] }
 serde = { version = "1.0.219", features = ["derive"] }
 slab = "0.4.9"
 
-[dependencies.autoconf-parser]
-path="../autoconf-parser"
+[dependencies.autotools-parser]
+path="../autotools-parser"
