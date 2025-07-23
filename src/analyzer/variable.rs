@@ -1,8 +1,8 @@
 use std::{collections::HashMap, hash::Hash};
 
 use super::{
-    Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro, Node, NodeId,
-    Parameter, PatternBodyPair, AcWord, WordFragment, AcWordFragment, MayM4, Word,
+    AcWord, AcWordFragment, Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro,
+    MayM4, Node, NodeId, Parameter, PatternBodyPair, Word, WordFragment,
 };
 
 use slab::Slab;
@@ -249,12 +249,12 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     fn visit_node(&mut self, node_id: NodeId) {
         // Save
         let saved_cursor = self.cursor.replace(node_id);
-        dbg!(&self.get_node(node_id));
         // Walk
         if !self.get_node(node_id).info.is_top_node() {
             self.walk_node(node_id);
             // Assign collected variable to the node
-            self.nodes[node_id].info.defines = self.defines.get(&node_id).cloned().unwrap_or_default();
+            self.nodes[node_id].info.defines =
+                self.defines.get(&node_id).cloned().unwrap_or_default();
             self.nodes[node_id].info.uses = self.uses.get(&node_id).cloned().unwrap_or_default();
         }
         // Recover
@@ -383,7 +383,8 @@ fn is_eval(word: &AcWord) -> bool {
     match &word.0 {
         Word::Single(f) => matches!(f, MayM4::Shell(WordFragment::Literal(t)) if t == "eval"),
         Word::Concat(frags) => {
-            frags.len() == 1 && matches!(&frags[0], MayM4::Shell(WordFragment::Literal(t)) if t == "eval")
+            frags.len() == 1
+                && matches!(&frags[0], MayM4::Shell(WordFragment::Literal(t)) if t == "eval")
         }
         _ => false,
     }
