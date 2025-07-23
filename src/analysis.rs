@@ -4,8 +4,9 @@
 use crate::analyzer::Analyzer;
 
 pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
+    let fixed = [("srcdir".to_owned(), format!("{}/src/gmp-6.2.0", env!("HOME")))];
     // Initialize the lexer and parser
-    let mut analyzer = Analyzer::new(&input, None);
+    let mut analyzer = Analyzer::new(&input, None, Some(fixed.into()));
     let top_ids = analyzer.get_top_ids();
 
     /*
@@ -243,53 +244,41 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     }
     */
 
-    // === Value Set Analysis for Eval ===
-    println!("\n=== Value Set Analysis for Eval ===");
-    analyzer.run_value_set_analysis();
-    // for (node_id, eval_match) in analyzer.evals {
-    //     println!("Eval expression {:?}", eval_match);
-    //     println!("  Used Vars: {:?}", eval_match.used_vars());
-    //     println!(
-    //         "  Related Commands: {:?}",
-    //         analyzer.get_all_definition(eval_match.used_vars().first().unwrap(), node_id)
-    //     )
-    // }
-
     // === Variable dependency edge profiling ===
-    use std::collections::HashMap;
+    // use std::collections::HashMap;
 
     // This map will count how many times each variable appears as a dependency edge
-    let mut edge_counter: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    // let mut edge_counter: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
 
-    for &top_id in &top_ids {
-        // Get variables used in the current command
-        if let Some(uses) = analyzer.get_used_variables(top_id) {
-            // Get the commands this one depends on
-            if let Some(deps) = analyzer.get_dependencies(top_id) {
-                for dep in deps {
-                    // For each dependency command, get the variables it defines
-                    if let Some(defs) = analyzer.get_defined_variables(dep) {
-                        for var in defs {
-                            // If the current command uses a variable defined in a dependency, count it
-                            if uses.contains(&var) && top_id != dep {
-                                edge_counter
-                                    .entry(var.clone())
-                                    .or_insert(Vec::new())
-                                    .push((top_id, dep));
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    // for &top_id in &top_ids {
+    //     // Get variables used in the current command
+    //     if let Some(uses) = analyzer.get_used_variables(top_id) {
+    //         // Get the commands this one depends on
+    //         if let Some(deps) = analyzer.get_dependencies(top_id) {
+    //             for dep in deps {
+    //                 // For each dependency command, get the variables it defines
+    //                 if let Some(defs) = analyzer.get_defined_variables(dep) {
+    //                     for var in defs {
+    //                         // If the current command uses a variable defined in a dependency, count it
+    //                         if uses.contains(&var) && top_id != dep {
+    //                             edge_counter
+    //                                 .entry(var.clone())
+    //                                 .or_insert(Vec::new())
+    //                                 .push((top_id, dep));
+    //                         }
+    //                     }
+    //                 }
+    //             }
+    //         }
+    //     }
+    // }
 
     // Sort the variables by descending edge count
-    let mut edge_stats: Vec<(String, usize)> = edge_counter
-        .iter()
-        .map(|(k, v)| (k.clone(), v.len()))
-        .collect();
-    edge_stats.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count (descending)
+    // let mut edge_stats: Vec<(String, usize)> = edge_counter
+    //     .iter()
+    //     .map(|(k, v)| (k.clone(), v.len()))
+    //     .collect();
+    // edge_stats.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count (descending)
 
     // Print the top 50 variables with the most dependency edges
     // println!("\n=== Variable Edge Count Ranking ===");
@@ -302,5 +291,11 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     //     );
     // }
 
+    // === Value Set Analysis for Eval ===
+    // println!("\n=== Value Set Analysis for Eval ===");
+    analyzer.run_value_set_analysis();
+
+    // === Variable Type Inference ===
+    // dbg!(analyzer.run_type_analysis());
     Ok(())
 }

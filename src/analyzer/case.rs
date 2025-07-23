@@ -1,5 +1,5 @@
 use super::{AstVisitor, Node, NodeId, Parameter, PatternBodyPair, AcWord, WordFragment, MayM4};
-use autoconf_parser::ast::minimal::Word;
+use autotools_parser::ast::minimal::Word;
 use slab::Slab;
 
 /// Represents a matched case statement on a specific variable.
