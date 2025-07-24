@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use super::{
     AcCommand, AcWord, AstVisitor, GuardBodyPair, Node, NodeId, NodeInfo, PatternBodyPair,
@@ -102,8 +102,8 @@ impl Flattener {
                 children: Some(Vec::new()), // intentionally left blank to be filled later
                 defines: HashMap::new(),
                 uses: HashMap::new(),
-                var_dependencies: HashSet::new(),
-                var_dependents: HashSet::new(),
+                dependencies: HashMap::new(),
+                dependents: HashMap::new(),
             },
         });
         self.nodes[brace_id].info.node_id = brace_id;

@@ -4,13 +4,16 @@
 use crate::analyzer::Analyzer;
 
 pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
-    let fixed = [("srcdir".to_owned(), format!("{}/src/gmp-6.2.0", env!("HOME")))];
+    let fixed = [(
+        "srcdir".to_owned(),
+        format!("{}/src/gmp-6.2.0", env!("HOME")),
+    )];
     // Initialize the lexer and parser
     let mut analyzer = Analyzer::new(&input, None, Some(fixed.into()));
     let top_ids = analyzer.get_top_ids();
 
     /*
-    
+
     // Print information about the analyzed script
     println!("Total commands: {}", top_ids.len());
 
@@ -293,9 +296,18 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
 
     // === Value Set Analysis for Eval ===
     // println!("\n=== Value Set Analysis for Eval ===");
-    analyzer.run_value_set_analysis();
+    // analyzer.run_value_set_analysis();
 
     // === Variable Type Inference ===
     // dbg!(analyzer.run_type_analysis());
+
+    // === Out-of-scope variables ===
+    // for chunk in analyzer.fuse_chunks(Some(15), true) {
+    //     println!("+++++++++++++++++++++++++++++++++++++++++++++");
+    //     for &id in &chunk {
+    //         // println!("{}", &analyzer.recover_content(id));
+    //     }
+    //     dbg!(analyzer.examine_chunk_io(&chunk));
+    // }
     Ok(())
 }

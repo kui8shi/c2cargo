@@ -15,6 +15,7 @@ use autotools_parser::{
 use lazy_init::LazyInitializer;
 use std::{
     cell::Cell,
+    cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
 };
 
@@ -26,6 +27,7 @@ use variable::{LValue, Location, RValue, VariableAnalyzer};
 use slab::Slab;
 
 mod case;
+mod chunk;
 mod eval;
 mod flatten;
 mod lazy_init;
@@ -438,7 +440,7 @@ pub trait AstVisitor: Sized {
     }
 }
 
-/// Represents a node in the dependency graph
+/// Represents a node extension in the dependency graph
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct NodeInfo {
     /// Index of the node in the original list
@@ -460,9 +462,9 @@ pub(crate) struct NodeInfo {
     /// Variables used by this command
     pub uses: VariableMap,
     /// Dependencies (indices of nodes this command depends on by variables)
-    pub var_dependencies: HashSet<NodeId>,
+    pub dependencies: HashMap<NodeId, HashSet<String>>,
     /// Commands that depend on this node
-    pub var_dependents: HashSet<NodeId>,
+    pub dependents: HashMap<NodeId, HashSet<String>>,
 }
 
 impl NodeInfo {
@@ -551,22 +553,29 @@ impl Analyzer {
         let mut nodes = LazyInitializer::lazy_init(nodes, &top_ids);
 
         // Create a VariableAnalyzer to extract both defined and used variables
-        let mut va = VariableAnalyzer::new(&mut nodes);
+        let mut var = VariableAnalyzer::new(&mut nodes);
         for id in &top_ids {
             // collect all defined and used variables in a command
-            va.analyze(*id);
+            var.analyze(*id);
         }
 
-        let evals = va.evals;
-        let guards = va.guards;
+        let evals = var.evals;
+        let guards = var.guards;
         // collect recorded definitions
-        let var_definitions: VariableMap = va.defines.into_iter().flat_map(|(_, map)| map).fold(
-            HashMap::new(),
-            |mut acc, (name, mut locs)| {
+        let var_definitions: VariableMap = var
+            .defines
+            .into_iter()
+            .flat_map(|(_, map)| map)
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, mut locs)| {
                 acc.entry(name).or_default().append(&mut locs);
                 acc
-            },
-        );
+            })
+            .into_iter()
+            .map(|(name, mut locs)| {
+                locs.sort();
+                (name, locs)
+            })
+            .collect();
 
         let (top_ids, nodes) = Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
 
@@ -597,14 +606,24 @@ impl Analyzer {
         for (id, node) in &s.pool.nodes {
             for var in node.info.uses.keys() {
                 if let Some(def_id) = s.get_dominant_definition(var, id) {
-                    def_use_edges.push((def_id, id));
+                    def_use_edges.push((def_id, id, var.to_owned()));
                 }
             }
         }
         // Apply initialization of depdencies to nodes
-        for (def_id, user_id) in def_use_edges {
-            s.pool.nodes[user_id].info.var_dependencies.insert(def_id);
-            s.pool.nodes[def_id].info.var_dependents.insert(user_id);
+        for (def_id, use_id, var_name) in def_use_edges {
+            s.get_node_mut(use_id)
+                .info
+                .dependencies
+                .entry(def_id)
+                .or_default()
+                .insert(var_name.to_owned());
+            s.get_node_mut(def_id)
+                .info
+                .dependents
+                .entry(use_id)
+                .or_default()
+                .insert(var_name.to_owned());
         }
 
         s
@@ -644,8 +663,11 @@ impl Analyzer {
                         .rev()
                         .filter_map(|loc| {
                             // dumb heulistic to compare two guard conditions
-                            (self.guard_of_location(loc).len()
-                                <= self.guard_of_location(user_loc).len()
+                            (cmp_guards(
+                                self.guard_of_location(loc),
+                                self.guard_of_location(user_loc),
+                            )
+                            .is_none_or(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
                                 && loc <= user_loc)
                                 .then_some(loc.node_id)
                         })
@@ -671,7 +693,34 @@ impl Analyzer {
     }
 
     /// Get all locations that uses a variable before
-    pub fn get_all_usages(&self, var_name: &str, loc: Option<&Location>) -> Option<Vec<Location>> {
+    pub fn get_all_usages_before(
+        &self,
+        var_name: &str,
+        loc: Option<&Location>,
+    ) -> Option<Vec<Location>> {
+        let mut ret = Vec::new();
+        for id in &self.top_ids {
+            if let Some(m) = self.uses_per_top.get(id) {
+                if let Some(locs) = m.get(var_name) {
+                    ret.extend(
+                        locs.iter()
+                            .filter(|use_loc| {
+                                loc.is_none() || loc.is_some_and(|loc| *use_loc < loc)
+                            })
+                            .cloned(),
+                    );
+                }
+            }
+        }
+        (!ret.is_empty()).then_some(ret)
+    }
+
+    /// Get all locations that uses a variable after
+    pub fn get_all_usages_after(
+        &self,
+        var_name: &str,
+        loc: Option<&Location>,
+    ) -> Option<Vec<Location>> {
         let mut ret = Vec::new();
         for id in &self.top_ids {
             if let Some(m) = self.uses_per_top.get(id) {
@@ -704,25 +753,28 @@ impl Analyzer {
     }
 
     /// Get all commands this command depends on
-    pub fn get_dependencies(&self, node_id: NodeId) -> Option<HashSet<NodeId>> {
+    pub fn get_dependencies(&self, node_id: NodeId) -> Option<HashMap<NodeId, HashSet<String>>> {
         self.pool
             .get(node_id)
-            .map(|node| node.info.var_dependencies.clone())
-    }
-
-    pub fn get_parent(&self, node_id: NodeId) -> Option<(NodeId, Option<NodeId>)> {
-        self.pool.nodes[node_id].info.parent
+            .map(|node| node.info.dependencies.clone())
     }
 
     /// Get all commands that depend on this command
-    pub fn get_dependents(&self, node_id: NodeId) -> Option<HashSet<NodeId>> {
-        self.pool.get(node_id).map(|node| {
-            let mut deps = node.info.var_dependencies.clone();
-            if let Some(children) = &node.info.children {
-                deps.extend(children.iter().copied());
-            }
-            deps
-        })
+    pub fn get_dependents(&self, node_id: NodeId) -> Option<HashMap<NodeId, HashSet<String>>> {
+        self.pool
+            .get(node_id)
+            .map(|node| node.info.dependencies.clone())
+    }
+
+    pub fn get_parent(&self, node_id: NodeId) -> Option<(NodeId, Option<NodeId>)> {
+        self.get_node(node_id).info.parent
+    }
+
+    pub fn get_children(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
+        self.pool
+            .get(node_id)
+            .map(|n| n.info.children.clone())
+            .flatten()
     }
 
     /// Get vector of all node ids
@@ -766,6 +818,11 @@ impl Analyzer {
     /// Get node representation by id
     pub fn get_node(&self, node_id: NodeId) -> &Node {
         &self.pool.nodes[node_id]
+    }
+
+    /// Get node representation by id
+    pub fn get_node_mut(&mut self, node_id: NodeId) -> &mut Node {
+        &mut self.pool.nodes[node_id]
     }
 
     /// Get original content of commands in specified node
@@ -834,155 +891,5 @@ impl Analyzer {
         let finder =
             CaseMatchFinder::find_case_matches(&self.pool.nodes, &self.top_ids, var_names.to_vec());
         finder.matches
-    }
-
-    /// Analyze eval expressions using backward taint analysis to enumerate possible variable names
-    // pub fn analyze_eval_with_taint_analysis(&self) -> Vec<(EvalAssignment, Vec<AcWord>)> {
-    //     let finder = EvalAnalyzer::find_eval(&self.nodes, &self.top_ids);
-    //     finder.analyze_eval_with_taint_analysis(&self.top_ids)
-    // }
-
-    /// Check if any node in a chunk is related to any node within a window of nodes.
-    /// Return the index (not NodeId) of the last related window node.
-    fn are_nodes_related_with_window(
-        &self,
-        chunk: &[NodeId],
-        window_nodes: &[NodeId],
-    ) -> Option<usize> {
-        for &chunk_node in chunk {
-            for (i, &window_node) in window_nodes.iter().enumerate().rev() {
-                if self.are_nodes_related(chunk_node, window_node) {
-                    return Some(i);
-                }
-            }
-        }
-        None
-    }
-
-    /// Check if two nodes are related for chunk fusing.
-    /// Nodes are related if one depends on the other through variable dependencies.
-    fn are_nodes_related(&self, node1_id: NodeId, node2_id: NodeId) -> bool {
-        if let (Some(node1), Some(node2)) = (self.pool.get(node1_id), self.pool.get(node2_id)) {
-            // Check if node2 depends on node1 or vice versa
-            (node1.info.parent == node2.info.parent)
-                && !(node1
-                    .info
-                    .defines
-                    .keys()
-                    .filter(|key| !self.fixed.contains_key(key.as_str())) // FIXME
-                    .cloned()
-                    .collect::<HashSet<_>>())
-                .is_disjoint(&node2.info.uses.keys().cloned().collect::<HashSet<_>>())
-        } else {
-            false
-        }
-    }
-
-    /// Check if a node is an assignment statement.
-    fn is_assignment(&self, node_id: NodeId) -> bool {
-        if let Some(node) = self.pool.get(node_id) {
-            matches!(node.cmd.0, MayM4::Shell(ShellCommand::Assignment(_, _)))
-        } else {
-            false
-        }
-    }
-
-    /// Perform chunk fusing with speculative lookahead window.
-    /// When window > 0, speculatively adds next `window` nodes and reverts if no relations found.
-    /// When disrespect_assignment is true, assignment nodes are looked through without consuming window depth.
-    pub fn fuse_chunks(
-        &self,
-        window: Option<usize>,
-        disrespect_assignment: bool,
-    ) -> Vec<Vec<NodeId>> {
-        let window = window.unwrap_or(0);
-        let mut chunks = Vec::new();
-        let mut current_chunk = Vec::new();
-        let mut i = 0;
-
-        while i < self.top_ids.len() {
-            let current_id = self.top_ids[i];
-
-            if current_chunk.is_empty() {
-                // Start a new chunk
-                current_chunk.push(current_id);
-            } else {
-                // Check if current node is related to any node in the current chunk
-                let is_related_to_chunk = current_chunk
-                    .iter()
-                    .any(|&chunk_node_id| self.are_nodes_related(chunk_node_id, current_id));
-
-                if is_related_to_chunk {
-                    // Fuse with current chunk
-                    current_chunk.push(current_id);
-                } else if window > 0 || disrespect_assignment {
-                    // Try speculative lookahead with optional assignment skipping
-                    let mut lookahead_nodes = Vec::new();
-                    let mut j = i;
-                    let mut remaining_window = window;
-                    let chunk_parent = self
-                        .pool
-                        .get(*current_chunk.first().unwrap())
-                        .map(|n| n.info.parent);
-
-                    // Collect lookahead nodes, skipping assignments if disrespect_assignment is true
-                    while j < self.top_ids.len()
-                        && (remaining_window > 0
-                            || (disrespect_assignment && self.is_assignment(self.top_ids[j])))
-                    {
-                        let node_id = self.top_ids[j];
-
-                        // Check if this node has the same parent as the chunk
-                        let node_parent = self.pool.get(node_id).map(|n| n.info.parent);
-                        if chunk_parent != node_parent {
-                            break; // Different parent, stop lookahead
-                        }
-
-                        lookahead_nodes.push(node_id);
-
-                        // Only consume window depth for non-assignments or when not disrespecting assignments
-                        if !(disrespect_assignment && self.is_assignment(node_id)) {
-                            if remaining_window > 0 {
-                                remaining_window -= 1;
-                            } else {
-                                break;
-                            }
-                        }
-
-                        j += 1;
-                    }
-
-                    if let Some(last_related_idx) =
-                        self.are_nodes_related_with_window(&current_chunk, &lookahead_nodes)
-                    {
-                        // Found relation within lookahead - add all lookahead nodes to chunk
-                        current_chunk.extend(lookahead_nodes[..=last_related_idx].iter());
-                        i = i + last_related_idx; // Skip ahead (will be incremented at loop end)
-                    } else {
-                        // No relation found in lookahead - cut here and start new chunk
-                        if !current_chunk.is_empty() {
-                            chunks.push(current_chunk.clone());
-                            current_chunk.clear();
-                        }
-                        current_chunk.push(current_id);
-                    }
-                } else {
-                    // No window - cut here and start new chunk
-                    if !current_chunk.is_empty() {
-                        chunks.push(current_chunk.clone());
-                        current_chunk.clear();
-                    }
-                    current_chunk.push(current_id);
-                }
-            }
-            i += 1;
-        }
-
-        // Add the last chunk if not empty
-        if !current_chunk.is_empty() {
-            chunks.push(current_chunk);
-        }
-
-        chunks
     }
 }

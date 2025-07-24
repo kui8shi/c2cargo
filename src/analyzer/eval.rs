@@ -139,7 +139,7 @@ impl Analyzer {
                     );
                 }
             }
-            if let Some(use_locs) = self.get_all_usages(full_name.as_str(), None) {
+            if let Some(use_locs) = self.get_all_usages_before(full_name.as_str(), None) {
                 for loc in use_locs {
                     ret.insert(
                         loc,
