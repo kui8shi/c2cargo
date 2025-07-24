@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::analyzer::{as_literal, as_shell, as_var};
+
 use super::{AcWord, Analyzer, AstVisitor, MayM4, Node, NodeId, Parameter, PatternBodyPair, Word};
 use autotools_parser::ast::{
     minimal::{Condition, Operator, WordFragment},
@@ -211,7 +213,11 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
 
     fn visit_node(&mut self, node_id: NodeId) {
         let saved_cursor = self.cursor.replace(node_id);
-        self.walk_node(node_id);
+
+        if !self.get_node(node_id).info.is_top_node() {
+            self.walk_node(node_id);
+        }
+
         self.cursor = saved_cursor;
     }
 
@@ -351,29 +357,5 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                 self.add_type_hint(name, ReadBeforeWrite);
             }
         }
-    }
-}
-
-fn as_shell(word: &AcWord) -> Option<&WordFragment<String, NodeId, AcWord>> {
-    if let Word::Single(MayM4::Shell(shell_word)) = &word.0 {
-        Some(shell_word)
-    } else {
-        None
-    }
-}
-
-fn as_literal(word: &WordFragment<String, NodeId, AcWord>) -> Option<&str> {
-    if let WordFragment::Literal(lit) = &word {
-        Some(lit.as_str())
-    } else {
-        None
-    }
-}
-
-fn as_var(word: &WordFragment<String, NodeId, AcWord>) -> Option<&str> {
-    if let WordFragment::Param(Parameter::Var(name)) = &word {
-        Some(name.as_str())
-    } else {
-        None
     }
 }

@@ -31,12 +31,37 @@ mod chunk;
 mod eval;
 mod flatten;
 mod lazy_init;
-mod type_inference;
 mod variable;
+mod type_inference;
+mod platform_branch;
 
 type Command = ShellCommand<AcWord>;
 type VariableMap = HashMap<String, Vec<Location>>;
 type Node = autotools_parser::ast::node::Node<AcCommand, NodeInfo>;
+
+fn as_shell(word: &AcWord) -> Option<&WordFragment<AcWord>> {
+    if let Word::Single(MayM4::Shell(shell_word)) = &word.0 {
+        Some(shell_word)
+    } else {
+        None
+    }
+}
+
+fn as_literal(word: &WordFragment<AcWord>) -> Option<&str> {
+    if let WordFragment::Literal(lit) = &word {
+        Some(lit.as_str())
+    } else {
+        None
+    }
+}
+
+fn as_var(word: &WordFragment<AcWord>) -> Option<&str> {
+    if let WordFragment::Param(Parameter::Var(name)) = &word {
+        Some(name.as_str())
+    } else {
+        None
+    }
+}
 
 /// Visitor trait for walking over the AST nodes.
 pub trait AstVisitor: Sized {
