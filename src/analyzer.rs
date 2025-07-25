@@ -31,9 +31,9 @@ mod chunk;
 mod eval;
 mod flatten;
 mod lazy_init;
-mod variable;
-mod type_inference;
 mod platform_branch;
+mod type_inference;
+mod variable;
 
 type Command = ShellCommand<AcWord>;
 type VariableMap = HashMap<String, Vec<Location>>;
@@ -606,7 +606,7 @@ impl Analyzer {
 
         let mut s = Self {
             lines: contents.as_ref().lines().map(|s| s.to_string()).collect(),
-            pool: AutoconfPool::new(nodes),
+            pool: AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node()))),
             guards,
             evals,
             top_ids,

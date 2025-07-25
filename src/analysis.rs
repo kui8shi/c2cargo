@@ -309,6 +309,8 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     //     }
     //     dbg!(analyzer.examine_chunk_io(&chunk));
     // }
-    analyzer.prune_platform_branch();
+
+    // === Platform Branch Prunning ===
+    // analyzer.prune_platform_branch();
     Ok(())
 }
