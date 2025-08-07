@@ -161,7 +161,6 @@ impl Analyzer {
                 .flatten()
                 .max(),
         );
-        dbg!(range);
         let imported: HashSet<String> = chunk
             .iter()
             .flat_map(|&id| {

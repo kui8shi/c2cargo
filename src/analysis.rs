@@ -302,15 +302,26 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     // dbg!(analyzer.run_type_analysis());
 
     // === Out-of-scope variables ===
-    // for chunk in analyzer.fuse_chunks(Some(15), true) {
-    //     println!("+++++++++++++++++++++++++++++++++++++++++++++");
-    //     for &id in &chunk {
-    //         // println!("{}", &analyzer.recover_content(id));
-    //     }
-    //     dbg!(analyzer.examine_chunk_io(&chunk));
-    // }
+    for chunk in analyzer.fuse_chunks(Some(12), true) {
+        println!("+++++++++++++++++++++++++++++++++++++++++++++");
+        for &id in &chunk {
+            // println!("{}", &analyzer.recover_content(id));
+        }
+        dbg!(analyzer.examine_chunk_io(&chunk));
+    }
 
     // === Platform Branch Prunning ===
     // analyzer.prune_platform_branch();
+    for case_match in analyzer.find_case_matches(&["host", "host_cpu", "host_alias"]) {
+        println!("============================");
+        println!("{}:",analyzer.display_word(&case_match.var));
+        for arm in &case_match.arms {
+            println!("\t[");
+            for pattern in &arm.patterns {
+                println!("\t\t{},", analyzer.display_word(pattern))
+            }
+            println!("\t]");
+        }
+    }
     Ok(())
 }

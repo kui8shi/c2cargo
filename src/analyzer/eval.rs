@@ -412,7 +412,7 @@ impl Analyzer {
                     break;
                 }
                 MayM4::Macro(_) => break, // untrackable
-                _ => todo!("{} -> {}", name, self.recover_content(nid)),
+                _ => todo!("{} -> {}", name, self.display_node(nid)),
             }
         }
         Some(chain)
@@ -465,7 +465,7 @@ impl Analyzer {
             Shell(WordFragment::Subst(subst)) => match &**subst {
                 ParameterSubstitution::Command(cmds) => {
                     let node_id = cmds.first().unwrap().clone();
-                    let shell_string = self.recover_content(node_id);
+                    let shell_string = self.display_node(node_id);
                     let (_, uses) = self.collect_variables(node_id);
                     values.push(RValue::Shell(
                         shell_string,

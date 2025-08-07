@@ -59,7 +59,7 @@ impl<'a> AstVisitor for PlatformBranchPrunner<'a> {
         if let Some(var) = as_shell(word).and_then(as_var) {
             if matches!(var, "host" | "host_alias" | "host_cpu") {
                 println!("Found {}", var);
-                println!("{}", self.analyzer.recover_content(self.cursor.unwrap()));
+                println!("{}", self.analyzer.display_node(self.cursor.unwrap()));
             }
         }
     }

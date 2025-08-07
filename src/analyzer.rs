@@ -548,8 +548,6 @@ pub struct Analyzer {
     guards: HashMap<Location, Vec<Guard>>,
     /// Set of variable maps that is fixed to a certain value
     fixed: HashMap<String, String>,
-    /// State field used for printing a node
-    focus: Cell<Option<NodeId>>,
     /// Set of variables which are used in eval statements
     pub evals: HashMap<LValue, Vec<(Option<RValue>, Location)>>,
     /// State filed used for recording resolved rvalues of variables
@@ -614,7 +612,6 @@ impl Analyzer {
             defines_per_top: HashMap::new(),
             uses_per_top: HashMap::new(),
             fixed: fixed.unwrap_or_default(),
-            focus: Cell::new(None),
             resolved_values: HashMap::new(),
             dynamic_vars: HashMap::new(),
         };
@@ -870,12 +867,13 @@ impl Analyzer {
     }
 
     /// Recover the content of commands from the AST structure
-    pub fn recover_content(&self, node_id: NodeId) -> String {
-        // FIXME: the strategy mutating self is too dumb.
-        self.focus.set(Some(node_id));
-        let ret = self.pool.display_node(node_id, 0);
-        self.focus.set(None);
-        ret
+    pub fn display_node(&self, node_id: NodeId) -> String {
+        self.pool.display_node(node_id, 0)
+    }
+
+    /// Recover the content of words from the AST structure
+    pub fn display_word(&self, word: &AcWord) -> String {
+        self.pool.display_word(word, false)
     }
 
     fn collect_variables(&self, node_id: NodeId) -> (VariableMap, VariableMap) {
@@ -912,9 +910,9 @@ impl Analyzer {
     }
 
     /// Find case statements matching the given variables in the top-level commands.
-    pub fn find_case_matches(&self, var_names: &[String]) -> Vec<CaseMatch> {
+    pub fn find_case_matches(&self, var_names: &[&str]) -> Vec<CaseMatch> {
         let finder =
-            CaseMatchFinder::find_case_matches(&self.pool.nodes, &self.top_ids, var_names.to_vec());
+            CaseMatchFinder::find_case_matches(&self.pool.nodes, &self.top_ids, var_names);
         finder.matches
     }
 }

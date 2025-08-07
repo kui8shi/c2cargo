@@ -13,20 +13,20 @@ pub struct CaseMatch {
 
 /// Visitor to find case statements matching given variables.
 #[derive(Debug)]
-pub(super) struct CaseMatchFinder<'a> {
+pub(super) struct CaseMatchFinder<'a, 'b> {
     nodes: &'a Slab<Node>,
-    var_names: Vec<String>,
+    var_names: &'b [&'b str],
     /// Collected case matches where the variable matches one of `var_names`.
     pub matches: Vec<CaseMatch>,
     pub ids: Vec<usize>,
 }
 
-impl<'a> CaseMatchFinder<'a> {
+impl<'a, 'b> CaseMatchFinder<'a, 'b> {
     /// Create a new MatchFinder for the given variable names.
     pub fn find_case_matches(
         nodes: &'a Slab<Node>,
         top_ids: &[NodeId],
-        var_names: Vec<String>,
+        var_names: &'b [&str],
     ) -> Self {
         let mut s = Self {
             nodes,
@@ -46,7 +46,7 @@ impl<'a> CaseMatchFinder<'a> {
     }
 }
 
-impl<'a> AstVisitor for CaseMatchFinder<'a> {
+impl<'a, 'b> AstVisitor for CaseMatchFinder<'a, 'b> {
     fn get_node(&self, node_id: NodeId) -> &Node {
         &self.nodes[node_id]
     }
@@ -54,7 +54,7 @@ impl<'a> AstVisitor for CaseMatchFinder<'a> {
     fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         if let Word::Single(fragment) = &word.0 {
             if let MayM4::Shell(WordFragment::Param(Parameter::Var(name))) = fragment {
-                if self.var_names.contains(name) {
+                if self.var_names.contains(&name.as_str()) {
                     self.matches.push(CaseMatch {
                         var: word.clone(),
                         arms: arms.to_vec(),
