@@ -1,5 +1,5 @@
 use super::{
-    cmp_guards,
+    guard::cmp_guards,
     type_inference::DataType,
     variable::{LValue, Location, RValue},
     AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
@@ -48,14 +48,14 @@ pub struct DynamicIdentifier {
 
 // Represents the operation on the dictionary types
 #[derive(Debug, PartialEq, Eq)]
-pub enum DictionaryOperation {
+enum DictionaryOperation {
     Set,
     Get,
 }
 
 // Saving the result of dictionary type inference.
 #[derive(Debug, PartialEq, Eq)]
-pub struct DictionaryAccess {
+struct DictionaryAccess {
     operation: DictionaryOperation,
     keys: HashMap<String, String>,
     name: String,

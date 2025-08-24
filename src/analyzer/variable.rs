@@ -1,8 +1,8 @@
 use std::{collections::HashMap, hash::Hash};
 
 use super::{
-    AcWord, AcWordFragment, Arithmetic, AstVisitor, Condition, Guard, GuardBodyPair, M4Macro,
-    MayM4, Node, NodeId, Parameter, PatternBodyPair, Word, WordFragment,
+    AcWord, AcWordFragment, Arithmetic, AstVisitor, M4Macro, MayM4, Node, NodeId, Parameter, Word,
+    WordFragment,
 };
 
 use slab::Slab;
@@ -88,12 +88,9 @@ impl Into<Option<LValue>> for &RValue {
 #[derive(Debug)]
 pub(super) struct VariableAnalyzer<'a> {
     nodes: &'a mut Slab<Node>,
-    pub guards: HashMap<Location, Vec<Guard>>,
     pub evals: HashMap<LValue, Vec<(Option<RValue>, Location)>>,
     pub defines: HashMap<NodeId, HashMap<String, Vec<Location>>>,
     pub uses: HashMap<NodeId, HashMap<String, Vec<Location>>>,
-    conds: Vec<Guard>,
-    denied: Option<Guard>,
     cursor: Option<NodeId>,
 }
 
@@ -102,12 +99,9 @@ impl<'a> VariableAnalyzer<'a> {
     pub fn new(nodes: &'a mut Slab<Node>) -> Self {
         Self {
             nodes,
-            guards: HashMap::new(),
             evals: HashMap::new(),
             defines: HashMap::new(),
             uses: HashMap::new(),
-            conds: Vec::new(),
-            denied: None,
             cursor: None,
         }
     }
@@ -129,7 +123,6 @@ impl<'a> VariableAnalyzer<'a> {
     fn clear(&mut self) {
         self.defines.clear();
         self.uses.clear();
-        self.conds.clear();
     }
 
     fn record_variable_definition(&mut self, name: &str) {
@@ -141,7 +134,6 @@ impl<'a> VariableAnalyzer<'a> {
             .entry(name.to_owned())
             .or_insert(Vec::new())
             .push(loc.clone());
-        self.guards.insert(loc, self.conds.clone());
     }
 
     fn record_variable_usage(&mut self, name: &str) {
@@ -153,7 +145,6 @@ impl<'a> VariableAnalyzer<'a> {
             .entry(name.to_owned())
             .or_insert(Vec::new())
             .push(loc.clone());
-        self.guards.insert(loc, self.conds.clone());
     }
 
     /// parse a body of eval assignment. It is expected to take `word` as a concatenated word fragments
@@ -266,54 +257,9 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         self.walk_assignment(name, word);
     }
 
-    fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
-        self.conds.push(Guard::Cond(pair.condition.clone()));
-        self.walk_guard_body_pair(pair);
-        self.denied = self.conds.pop();
-    }
-
-    fn visit_if(&mut self, conditionals: &[GuardBodyPair<AcWord>], else_branch: &[NodeId]) {
-        for pair in conditionals {
-            self.visit_guard_body_pair(pair);
-        }
-        if !else_branch.is_empty() {
-            self.conds
-                .push(Guard::Not(Box::new(self.denied.take().unwrap())));
-            for c in else_branch {
-                self.visit_node(*c);
-            }
-            self.conds.pop();
-        }
-    }
-
     fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
         self.record_variable_definition(var);
         self.walk_for(var, words, body);
-    }
-
-    fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
-        self.visit_word(word);
-        for arm in arms {
-            for w in &arm.patterns {
-                self.visit_word(w);
-            }
-            self.conds
-                .push(Guard::Match(word.clone(), arm.patterns.clone()));
-            for c in &arm.body {
-                self.visit_node(*c);
-            }
-            self.conds.pop();
-        }
-    }
-
-    fn visit_and_or(&mut self, negated: bool, condition: &Condition<AcWord>, cmd: NodeId) {
-        self.conds.push(if negated {
-            Guard::Not(Box::new(Guard::Cond(condition.clone())))
-        } else {
-            Guard::Cond(condition.clone())
-        });
-        self.walk_and_or(negated, condition, cmd);
-        self.conds.pop();
     }
 
     fn visit_word_fragment(&mut self, f: &AcWordFragment) {
@@ -371,7 +317,6 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
                         is_left: true,
                     };
                     self.evals.entry(lhs).or_default().push((rhs, loc.clone()));
-                    self.guards.insert(loc, self.conds.clone());
                 }
             }
         }

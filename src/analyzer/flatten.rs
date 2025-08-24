@@ -290,6 +290,7 @@ impl AstVisitor for Flattener {
                 } else {
                     let brace_id = self.insert_brace((cur, Some(i)), &arm.body);
                     new_arms.push(PatternBodyPair {
+                        comments: arm.comments.to_owned(),
                         patterns: arm.patterns.to_owned(),
                         body: vec![brace_id],
                     });

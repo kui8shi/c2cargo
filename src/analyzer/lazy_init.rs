@@ -48,7 +48,8 @@ impl AstVisitor for LazyInitializer {
             // Set up parent-child relationships
             self.nodes[node_id].info.parent = Some((parent.node_id, parent.branch));
             self.nodes[parent.node_id]
-                .info.children
+                .info
+                .children
                 .get_or_insert_default()
                 .push(node_id);
             if self.nodes[node_id].range.is_empty() {

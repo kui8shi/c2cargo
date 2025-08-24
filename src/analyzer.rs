@@ -12,32 +12,44 @@ use autotools_parser::{
     lexer::Lexer,
     parse::autoconf::NodeParser,
 };
+use guard::{Guard, GuardAnalyzer, GuardInfo, ScopeId};
 use lazy_init::LazyInitializer;
+use macro_call::MacroCallFinder;
 use std::{
-    cell::Cell,
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
 };
 
-use case::{CaseMatch, CaseMatchFinder};
 use eval::DynamicIdentifier;
 use flatten::Flattener;
 use variable::{LValue, Location, RValue, VariableAnalyzer};
 
 use slab::Slab;
 
+mod argument;
 mod case;
 mod chunk;
 mod eval;
 mod flatten;
+mod guard;
 mod lazy_init;
+mod macro_call;
 mod platform_branch;
+mod translator;
 mod type_inference;
 mod variable;
 
 type Command = ShellCommand<AcWord>;
 type VariableMap = HashMap<String, Vec<Location>>;
 type Node = autotools_parser::ast::node::Node<AcCommand, NodeInfo>;
+
+fn is_empty(word: &AcWord) -> bool {
+    if let Word::Empty = &word.0 {
+        true
+    } else {
+        false
+    }
+}
 
 fn as_shell(word: &AcWord) -> Option<&WordFragment<AcWord>> {
     if let Word::Single(MayM4::Shell(shell_word)) = &word.0 {
@@ -358,10 +370,8 @@ pub trait AstVisitor: Sized {
                 self.visit_condition(c1);
                 self.visit_condition(c2);
             }
-            Condition::Eval(cmds) => {
-                for cmd in cmds {
-                    self.visit_node(*cmd);
-                }
+            Condition::Eval(cmd) => {
+                self.visit_node(**cmd);
             }
             Condition::ReturnZero(cmd) => self.visit_node(**cmd),
         }
@@ -502,30 +512,6 @@ impl NodeInfo {
     }
 }
 
-/// Represents a condition
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Guard {
-    /// doc
-    Not(Box<Self>),
-    /// doc
-    Cond(Condition<AcWord>),
-    /// doc
-    Match(AcWord, Vec<AcWord>),
-}
-
-/// Compare two conditions.
-pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp::Ordering> {
-    for (l, r) in lhs.iter().rev().zip(rhs.iter().rev()) {
-        if l != r {
-            // not comparable.
-            return None;
-        }
-    }
-    // Here, we know that either condition is a subset of the other.
-    // we can decide the order simply by the lengths.
-    Some(lhs.len().cmp(&rhs.len()))
-}
-
 /// Analyzer which conducts various kinds of analyses:
 /// 1. construction of a dependency graph by tracking variable usages
 /// 2. flattening of large commands
@@ -544,8 +530,8 @@ pub struct Analyzer {
     defines_per_top: HashMap<NodeId, VariableMap>,
     /// Map of top node (chunk) ids to information of variables used in the chunk
     uses_per_top: HashMap<NodeId, VariableMap>,
-    /// Map of variable location to guard conditions
-    guards: HashMap<Location, Vec<Guard>>,
+    /// Analysis results of conditions.
+    guard: GuardInfo,
     /// Set of variable maps that is fixed to a certain value
     fixed: HashMap<String, String>,
     /// Set of variables which are used in eval statements
@@ -554,6 +540,8 @@ pub struct Analyzer {
     resolved_values: HashMap<LValue, BTreeMap<Location, HashSet<String>>>,
     /// dynamically constructed identifiers
     dynamic_vars: HashMap<String, DynamicIdentifier>,
+    /// all m4 macro calls
+    macro_calls: HashMap<String, Vec<(NodeId, M4Macro)>>,
 }
 
 impl Analyzer {
@@ -583,7 +571,6 @@ impl Analyzer {
         }
 
         let evals = var.evals;
-        let guards = var.guards;
         // collect recorded definitions
         let var_definitions: VariableMap = var
             .defines
@@ -602,10 +589,15 @@ impl Analyzer {
 
         let (top_ids, nodes) = Flattener::flatten(nodes, top_ids, flatten_threshold.unwrap_or(200));
 
+        let pool = AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node())));
+
+        let guard = GuardAnalyzer::analyze_guards(&pool, &top_ids);
+
+        dbg!(&guard);
         let mut s = Self {
             lines: contents.as_ref().lines().map(|s| s.to_string()).collect(),
-            pool: AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node()))),
-            guards,
+            pool,
+            guard,
             evals,
             top_ids,
             var_definitions,
@@ -614,6 +606,7 @@ impl Analyzer {
             fixed: fixed.unwrap_or_default(),
             resolved_values: HashMap::new(),
             dynamic_vars: HashMap::new(),
+            macro_calls: HashMap::new(),
         };
 
         // Collect
@@ -648,6 +641,9 @@ impl Analyzer {
                 .insert(var_name.to_owned());
         }
 
+        // Record all m4 macro calls
+        s.macro_calls = MacroCallFinder::find_macro_calls(&s.pool.nodes, &s.top_ids);
+
         s
     }
 
@@ -657,8 +653,12 @@ impl Analyzer {
     }
 
     /// Get guard conditions of given variable location
-    fn guard_of_location(&self, location: &Location) -> &Vec<Guard> {
-        &self.guards[location]
+    fn guard_of_location(&self, location: &Location) -> Vec<Guard> {
+        if let Some(scope_id) = self.guard.node_to_scope.get(&location.node_id) {
+            self.guard.scopes[*scope_id].guards.clone()
+        } else {
+            Vec::new()
+        }
     }
 
     /// Get command that defines a variable before
@@ -685,9 +685,9 @@ impl Analyzer {
                         .rev()
                         .filter_map(|loc| {
                             // dumb heulistic to compare two guard conditions
-                            (cmp_guards(
-                                self.guard_of_location(loc),
-                                self.guard_of_location(user_loc),
+                            (guard::cmp_guards(
+                                &self.guard_of_location(loc),
+                                &self.guard_of_location(user_loc),
                             )
                             .is_none_or(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
                                 && loc <= user_loc)
@@ -907,12 +907,5 @@ impl Analyzer {
             );
         }
         (defines, uses)
-    }
-
-    /// Find case statements matching the given variables in the top-level commands.
-    pub fn find_case_matches(&self, var_names: &[&str]) -> Vec<CaseMatch> {
-        let finder =
-            CaseMatchFinder::find_case_matches(&self.pool.nodes, &self.top_ids, var_names);
-        finder.matches
     }
 }
