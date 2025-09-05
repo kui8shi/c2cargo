@@ -1,12 +1,8 @@
-use analyzer::Analyzer;
-use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
-use std::{
-    env,
-    io::{stdin, Read},
-};
+use std::io::{stdin, Read};
 mod analysis;
 mod analyzer;
+mod utils;
 
 #[derive(Serialize)]
 struct ClaudeRequest {
@@ -31,11 +27,12 @@ struct ClaudeContent {
     text: String,
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Read input from stdin
     let mut input = String::new();
     stdin().read_to_string(&mut input)?;
-    analysis::analysis(input)?;
+    analysis::analysis(input).await?;
     // dbg!(analyzer.find_case_matches(&["host".into(), "host_cpu".into()]));
     // migrate(&analyzer)?;
     Ok(())

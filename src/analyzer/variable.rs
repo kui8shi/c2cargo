@@ -1,8 +1,8 @@
 use std::{collections::HashMap, hash::Hash};
 
 use super::{
-    AcWord, AcWordFragment, Arithmetic, AstVisitor, M4Macro, MayM4, Node, NodeId, Parameter, Word,
-    WordFragment,
+    AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, M4Macro, MayM4, Node, NodeId,
+    Parameter, VariableMap, Word, WordFragment,
 };
 
 use slab::Slab;
@@ -87,8 +87,7 @@ impl Into<Option<LValue>> for &RValue {
 
 #[derive(Debug)]
 pub(super) struct VariableAnalyzer<'a> {
-    nodes: &'a mut Slab<Node>,
-    pub evals: HashMap<LValue, Vec<(Option<RValue>, Location)>>,
+    analyzer: &'a mut Analyzer,
     pub defines: HashMap<NodeId, HashMap<String, Vec<Location>>>,
     pub uses: HashMap<NodeId, HashMap<String, Vec<Location>>>,
     cursor: Option<NodeId>,
@@ -96,14 +95,63 @@ pub(super) struct VariableAnalyzer<'a> {
 
 impl<'a> VariableAnalyzer<'a> {
     /// Create a new VariableAnalyzer and visit the given command.
-    pub fn new(nodes: &'a mut Slab<Node>) -> Self {
-        Self {
-            nodes,
-            evals: HashMap::new(),
+    pub fn analyze_variables(analyzer: &'a mut Analyzer) {
+        let mut s = Self {
+            analyzer,
             defines: HashMap::new(),
             uses: HashMap::new(),
             cursor: None,
+        };
+
+        for id in s.analyzer.get_top_ids() {
+            s.visit_top(id);
         }
+
+        // collect recorded definitions
+        let var_definitions: VariableMap = s
+            .defines
+            .into_iter()
+            .flat_map(|(_, map)| map)
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, mut locs)| {
+                acc.entry(name).or_default().append(&mut locs);
+                acc
+            })
+            .into_iter()
+            .map(|(name, mut locs)| {
+                locs.sort();
+                (name, locs)
+            })
+            .collect();
+
+        // collect recorded usages
+        let var_usages: VariableMap = s
+            .uses
+            .into_iter()
+            .flat_map(|(_, map)| map)
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, mut locs)| {
+                acc.entry(name).or_default().append(&mut locs);
+                acc
+            })
+            .into_iter()
+            .map(|(name, mut locs)| {
+                locs.sort();
+                (name, locs)
+            })
+            .collect();
+
+        s.analyzer.var_definitions = var_definitions;
+        s.analyzer.var_usages = var_usages;
+
+        let mut def_use_edges = Vec::new();
+        // Calculate dependency edges
+        for (user_id, node) in &s.analyzer.pool.nodes {
+            for var in node.info.uses.keys() {
+                if let Some(def_id) = s.analyzer.get_dominant_definition(var, user_id) {
+                    def_use_edges.push((def_id, user_id, var.to_owned()));
+                }
+            }
+        }
+        s.analyzer.apply_def_use_edges(def_use_edges);
     }
 }
 
@@ -118,11 +166,6 @@ impl<'a> VariableAnalyzer<'a> {
             line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
             is_left: true,
         }
-    }
-
-    fn clear(&mut self) {
-        self.defines.clear();
-        self.uses.clear();
     }
 
     fn record_variable_definition(&mut self, name: &str) {
@@ -227,14 +270,16 @@ impl<'a> VariableAnalyzer<'a> {
 
 impl<'a> AstVisitor for VariableAnalyzer<'a> {
     fn get_node(&self, node_id: NodeId) -> &Node {
-        &self.nodes[node_id]
+        self.analyzer.get_node(node_id)
     }
 
     fn visit_top(&mut self, node_id: NodeId) {
         self.cursor.replace(node_id);
         self.walk_node(node_id);
-        self.nodes[node_id].info.defines = self.defines.get(&node_id).cloned().unwrap_or_default();
-        self.nodes[node_id].info.uses = self.uses.get(&node_id).cloned().unwrap_or_default();
+        self.analyzer.get_node_mut(node_id).info.defines =
+            self.defines.get(&node_id).cloned().unwrap_or_default();
+        self.analyzer.get_node_mut(node_id).info.uses =
+            self.uses.get(&node_id).cloned().unwrap_or_default();
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
@@ -244,9 +289,10 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         if !self.get_node(node_id).info.is_top_node() {
             self.walk_node(node_id);
             // Assign collected variable to the node
-            self.nodes[node_id].info.defines =
+            self.analyzer.get_node_mut(node_id).info.defines =
                 self.defines.get(&node_id).cloned().unwrap_or_default();
-            self.nodes[node_id].info.uses = self.uses.get(&node_id).cloned().unwrap_or_default();
+            self.analyzer.get_node_mut(node_id).info.uses =
+                self.uses.get(&node_id).cloned().unwrap_or_default();
         }
         // Recover
         self.cursor = saved_cursor;
@@ -316,7 +362,11 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
                         line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
                         is_left: true,
                     };
-                    self.evals.entry(lhs).or_default().push((rhs, loc.clone()));
+                    self.analyzer
+                        .evals
+                        .entry(lhs)
+                        .or_default()
+                        .push((rhs, loc.clone()));
                 }
             }
         }

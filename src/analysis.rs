@@ -1,11 +1,12 @@
 //! An example of how to use the DependencyAnalyzer to analyze variable dependencies
 //! in a shell script or autoconf file.
 
-use autotools_parser::ast::MayM4;
-
 use crate::analyzer::Analyzer;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io::Write;
 
-pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
     let fixed = [(
         "srcdir".to_owned(),
         format!("{}/src/gmp-6.2.0", env!("HOME")),
@@ -14,7 +15,8 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     let mut analyzer = Analyzer::new(&input, None, Some(fixed.into()));
     let top_ids = analyzer.get_top_ids();
 
-    /*
+    analyzer.prune_platform_branch();
+    analyzer.run_value_set_analysis();
 
     // Print information about the analyzed script
     println!("Total commands: {}", top_ids.len());
@@ -30,7 +32,7 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     // Display dependency information for each command
     println!("\nCommand dependencies:");
     let mut chunk_file = File::create("/tmp/chunks.sh")?;
-    for chunk in &analyzer.fuse_chunks(Some(3), true) {
+    for chunk in &analyzer.fuse_chunks(Some(1), true) {
         for &i in chunk {
             writeln!(
                 chunk_file,
@@ -41,7 +43,7 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
         }
 
         for &i in chunk {
-            writeln!(chunk_file, "{}", analyzer.recover_content(i))?;
+            writeln!(chunk_file, "{}", analyzer.display_node(i))?;
         }
 
         for &i in chunk {
@@ -68,69 +70,69 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
 
             // println!("\n===========when recovering==========");
 
-            println!("{}", analyzer.recover_content(i));
+            println!("{}", analyzer.display_node(i));
 
+            let (defines, uses) = analyzer.collect_variables(i);
             // Print defined variables
-            if let Some(defines) = analyzer.get_defined_variables(i) {
-                if !defines.is_empty() {
-                    print!("  Defines: ");
-                    for (idx, var) in defines.iter().enumerate() {
-                        if idx > 0 {
-                            print!(", ");
-                        }
-                        print!("{}", var);
+            if !defines.is_empty() {
+                print!("  Defines: ");
+                for (idx, var) in defines.iter().enumerate() {
+                    if idx > 0 {
+                        print!(", ");
                     }
-                    println!();
+                    print!("{}", var.0);
                 }
+                println!();
             }
 
             // Print used variables
-            if let Some(uses) = analyzer.get_used_variables(i) {
-                if !uses.is_empty() {
-                    print!("  Uses: ");
-                    for (idx, var) in uses.iter().enumerate() {
-                        if idx > 0 {
-                            print!(", ");
-                        }
-                        print!("{}", var);
+            if !uses.is_empty() {
+                print!("  Uses: ");
+                for (idx, var) in uses.iter().enumerate() {
+                    if idx > 0 {
+                        print!(", ");
                     }
-                    println!();
+                    print!("{}", var.0);
                 }
+                println!();
             }
 
+            let (depend_on, depend_by) = analyzer.collect_dependencies(i);
+
             // Print dependencies
-            if let Some(deps) = analyzer.get_dependencies(i) {
-                if !deps.is_empty() {
-                    print!("  Depends on commands: ");
-                    for (idx, &dep) in deps.iter().enumerate() {
-                        if idx > 0 {
-                            print!(", ");
-                        }
-                        print!("{}", dep);
+            if !depend_on.is_empty() {
+                print!("  Depends on commands: ");
+                for (idx, dep) in depend_on
+                    .keys()
+                    .map(|id| analyzer.get_top_of(*id))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .enumerate()
+                {
+                    if idx > 0 {
+                        print!(", ");
                     }
-                    println!();
-                }
-            }
-            if let Some((parent, branch_idx)) = analyzer.get_parent(i) {
-                print!("  Parent : {}", parent);
-                if let Some(b) = branch_idx {
-                    print!(":{}", b);
+                    print!("{}", dep);
                 }
                 println!();
             }
 
             // Print dependents
-            if let Some(deps) = analyzer.get_dependents(i) {
-                if !deps.is_empty() {
-                    print!("  Commands that depend on this: ");
-                    for (idx, &dep) in deps.iter().enumerate() {
-                        if idx > 0 {
-                            print!(", ");
-                        }
-                        print!("{}", dep);
+            if !depend_by.is_empty() {
+                print!("  Commands that depend on this: ");
+                for (idx, dep) in depend_by
+                    .keys()
+                    .map(|id| analyzer.get_top_of(*id))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .enumerate()
+                {
+                    if idx > 0 {
+                        print!(", ");
                     }
-                    println!();
+                    print!("{}", dep);
                 }
+                println!();
             }
 
             println!();
@@ -160,7 +162,7 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
                         group.insert(cmd_idx);
                         belongs_to.insert(cmd_idx, grp_idx);
                         if let Some(deps) = analyzer.get_dependencies(cmd_idx) {
-                            for dep in deps {
+                            for &dep in deps.keys() {
                                 stack.push(dep);
                             }
                         }
@@ -183,6 +185,8 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
         // println!("  Group {}: {:?}", group_idx, analyzer.get_command(cmd_idx));
     }
 
+    /*
+
     // Export graph in DOT format
     let mut dot_file = File::create("/tmp/dependencies.dot")?;
     writeln!(dot_file, "digraph Dependencies {{")?;
@@ -197,7 +201,7 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     // Edges (dependencies)
     for &i in &top_ids {
         if let Some(deps) = analyzer.get_dependencies(i) {
-            for dep in deps {
+            for dep in deps.keys() {
                 writeln!(dot_file, "  {} -> {};", dep, i)?; // dep must come before i
             }
         }
@@ -214,7 +218,7 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
     // Build adjacency list and compute indegree
     for &i in &top_ids {
         if let Some(deps) = analyzer.get_dependencies(i) {
-            for dep in deps {
+            for &dep in deps.keys() {
                 adj[dep].push(i); // dep -> i
                 indegree[i] += 1;
             }
@@ -247,73 +251,84 @@ pub(crate) fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> 
             println!("  {}: Command {}", i, cmd_idx);
         }
     }
-    */
 
     // === Variable dependency edge profiling ===
-    // use std::collections::HashMap;
+    use std::collections::HashMap;
 
     // This map will count how many times each variable appears as a dependency edge
-    // let mut edge_counter: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+    let mut edge_counter: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
 
-    // for &top_id in &top_ids {
-    //     // Get variables used in the current command
-    //     if let Some(uses) = analyzer.get_used_variables(top_id) {
-    //         // Get the commands this one depends on
-    //         if let Some(deps) = analyzer.get_dependencies(top_id) {
-    //             for dep in deps {
-    //                 // For each dependency command, get the variables it defines
-    //                 if let Some(defs) = analyzer.get_defined_variables(dep) {
-    //                     for var in defs {
-    //                         // If the current command uses a variable defined in a dependency, count it
-    //                         if uses.contains(&var) && top_id != dep {
-    //                             edge_counter
-    //                                 .entry(var.clone())
-    //                                 .or_insert(Vec::new())
-    //                                 .push((top_id, dep));
-    //                         }
-    //                     }
-    //                 }
-    //             }
-    //         }
-    //     }
-    // }
+    for &top_id in &top_ids {
+        // Get variables used in the current command
+        if let Some(uses) = analyzer.get_used_variables(top_id) {
+            // Get the commands this one depends on
+            if let Some(deps) = analyzer.get_dependencies(top_id) {
+                for &dep in deps.keys() {
+                    // For each dependency command, get the variables it defines
+                    if let Some(defs) = analyzer.get_defined_variables(dep) {
+                        for var in defs {
+                            // If the current command uses a variable defined in a dependency, count it
+                            if uses.contains(&var) && top_id != dep {
+                                edge_counter
+                                    .entry(var.clone())
+                                    .or_insert(Vec::new())
+                                    .push((top_id, dep));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     // Sort the variables by descending edge count
-    // let mut edge_stats: Vec<(String, usize)> = edge_counter
-    //     .iter()
-    //     .map(|(k, v)| (k.clone(), v.len()))
-    //     .collect();
-    // edge_stats.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count (descending)
+    let mut edge_stats: Vec<(String, usize)> = edge_counter
+        .iter()
+        .map(|(k, v)| (k.clone(), v.len()))
+        .collect();
+    edge_stats.sort_by(|a, b| b.1.cmp(&a.1)); // Sort by count (descending)
 
     // Print the top 50 variables with the most dependency edges
-    // println!("\n=== Variable Edge Count Ranking ===");
-    // for (var, count) in edge_stats.iter().take(1) {
-    //     println!(
-    //         "{:20} ({}): {:?}",
-    //         var,
-    //         count,
-    //         edge_counter.get(var).unwrap()
-    //     );
-    // }
+    println!("\n=== Variable Edge Count Ranking ===");
+    for (var, count) in edge_stats.iter().take(1) {
+        println!(
+            "{:20} ({}): {:?}",
+            var,
+            count,
+            edge_counter.get(var).unwrap()
+        );
+    }
+
+    */
 
     // === Value Set Analysis for Eval ===
-    // println!("\n=== Value Set Analysis for Eval ===");
-    // analyzer.run_value_set_analysis();
+    println!("\n=== Value Set Analysis for Eval ===");
+    analyzer.run_value_set_analysis();
 
+    /*
     // === Variable Type Inference ===
-    // dbg!(analyzer.run_type_analysis());
+    dbg!(analyzer.run_type_analysis());
 
     // === Out-of-scope variables ===
-    // for chunk in analyzer.fuse_chunks(Some(12), true) {
-    //     println!("+++++++++++++++++++++++++++++++++++++++++++++");
-    //     for &id in &chunk {
-    //         // println!("{}", &analyzer.recover_content(id));
-    //     }
-    //     dbg!(analyzer.examine_chunk_io(&chunk));
-    // }
+    for chunk in analyzer.fuse_chunks(Some(12), true) {
+        println!("+++++++++++++++++++++++++++++++++++++++++++++");
+        for &id in &chunk {
+            println!("{}", &analyzer.display_node(id));
+        }
+        dbg!(analyzer.examine_chunk_io(&chunk));
+    }
 
     // === Platform Branch Prunning ===
-    // analyzer.prune_platform_branch();
+    analyzer.prune_platform_branch();
+    for top_id in analyzer.get_top_ids() {
+        println!("==========================");
+        println!("{}", analyzer.display_node(top_id));
+    }
+
+    // === Build Option Analysis ===
+    analyzer.analyze_build_options().await;
+    dbg!(analyzer.find_macro_calls().keys().collect::<Vec<_>>());
+    */
 
     Ok(())
 }

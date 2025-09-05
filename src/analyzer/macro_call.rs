@@ -33,6 +33,11 @@ impl<'a> MacroCallFinder<'a> {
         for &id in top_ids {
             s.visit_top(id);
         }
+        if let Some(v) = s.found.get("AX_PREFIX_CONFIG_H") {
+            if let Some((id, m4_macro)) = v.first().clone() {
+                // prefix CPP vars
+            }
+        }
         s.found
     }
 }

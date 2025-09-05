@@ -24,15 +24,18 @@ impl Analyzer {
     fn are_nodes_related(&self, node1_id: NodeId, node2_id: NodeId) -> bool {
         if let (Some(node1), Some(node2)) = (self.pool.get(node1_id), self.pool.get(node2_id)) {
             // Check if node2 depends on node1 or vice versa
-            (node1.info.parent == node2.info.parent)
-                && !(node1
+            (node1.info.parent == node2.info.parent) && {
+                // FIXME
+                let defs = node1
                     .info
                     .defines
                     .keys()
-                    .filter(|key| !self.fixed.contains_key(key.as_str())) // FIXME
+                    .filter(|key| !self.fixed.contains_key(key.as_str()))
                     .cloned()
-                    .collect::<HashSet<_>>())
-                .is_disjoint(&node2.info.uses.keys().cloned().collect::<HashSet<_>>())
+                    .collect::<HashSet<_>>();
+                let uses = node2.info.uses.keys().cloned().collect::<HashSet<_>>();
+                !defs.is_disjoint(&uses)
+            }
         } else {
             false
         }
@@ -186,5 +189,15 @@ impl Analyzer {
             .cloned()
             .collect();
         (imported, exported)
+    }
+
+    pub(crate) fn classify_chunk(&self, chunk: &[NodeId]) {
+        let content = chunk
+            .iter()
+            .map(|id| self.display_node(*id))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("============={:?}============", chunk);
+        println!("{}", content);
     }
 }

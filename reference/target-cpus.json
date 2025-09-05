@@ -1,0 +1,3588 @@
+{
+  "arch_to_cpus": {
+    "x86": [
+      "alderlake",
+      "amdfam10",
+      "arrowlake",
+      "arrowlake-s",
+      "arrowlake_s",
+      "athlon",
+      "athlon-4",
+      "athlon-fx",
+      "athlon-mp",
+      "athlon-tbird",
+      "athlon-xp",
+      "athlon64",
+      "athlon64-sse3",
+      "atom",
+      "atom_sse4_2",
+      "atom_sse4_2_movbe",
+      "barcelona",
+      "bdver1",
+      "bdver2",
+      "bdver3",
+      "bdver4",
+      "bonnell",
+      "broadwell",
+      "btver1",
+      "btver2",
+      "c3",
+      "c3-2",
+      "cannonlake",
+      "cascadelake",
+      "clearwaterforest",
+      "cooperlake",
+      "core-avx-i",
+      "core-avx2",
+      "core2",
+      "core_2_duo_sse4_1",
+      "core_2_duo_ssse3",
+      "core_2nd_gen_avx",
+      "core_3rd_gen_avx",
+      "core_4th_gen_avx",
+      "core_4th_gen_avx_tsx",
+      "core_5th_gen_avx",
+      "core_5th_gen_avx_tsx",
+      "core_aes_pclmulqdq",
+      "core_i7_sse4_2",
+      "corei7",
+      "corei7-avx",
+      "emeraldrapids",
+      "generic",
+      "geode",
+      "goldmont",
+      "goldmont-plus",
+      "goldmont_plus",
+      "gracemont",
+      "grandridge",
+      "graniterapids",
+      "graniterapids-d",
+      "graniterapids_d",
+      "haswell",
+      "i386",
+      "i486",
+      "i586",
+      "i686",
+      "icelake-client",
+      "icelake-server",
+      "icelake_client",
+      "icelake_server",
+      "ivybridge",
+      "k6",
+      "k6-2",
+      "k6-3",
+      "k8",
+      "k8-sse3",
+      "knl",
+      "knm",
+      "lakemont",
+      "lunarlake",
+      "meteorlake",
+      "mic_avx512",
+      "nehalem",
+      "nocona",
+      "opteron",
+      "opteron-sse3",
+      "pantherlake",
+      "penryn",
+      "pentium",
+      "pentium-m",
+      "pentium-mmx",
+      "pentium2",
+      "pentium3",
+      "pentium3m",
+      "pentium4",
+      "pentium4m",
+      "pentium_4",
+      "pentium_4_sse3",
+      "pentium_ii",
+      "pentium_iii",
+      "pentium_iii_no_xmm_regs",
+      "pentium_m",
+      "pentium_mmx",
+      "pentium_pro",
+      "pentiumpro",
+      "prescott",
+      "raptorlake",
+      "rocketlake",
+      "sandybridge",
+      "sapphirerapids",
+      "sierraforest",
+      "silvermont",
+      "skx",
+      "skylake",
+      "skylake-avx512",
+      "skylake_avx512",
+      "slm",
+      "tigerlake",
+      "tremont",
+      "westmere",
+      "winchip-c6",
+      "winchip2",
+      "x86-64",
+      "x86-64-v2",
+      "x86-64-v3",
+      "x86-64-v4",
+      "yonah",
+      "znver1",
+      "znver2",
+      "znver3",
+      "znver4",
+      "znver5"
+    ],
+    "x86_64": [
+      "alderlake",
+      "amdfam10",
+      "arrowlake",
+      "arrowlake-s",
+      "arrowlake_s",
+      "athlon",
+      "athlon-4",
+      "athlon-fx",
+      "athlon-mp",
+      "athlon-tbird",
+      "athlon-xp",
+      "athlon64",
+      "athlon64-sse3",
+      "atom",
+      "atom_sse4_2",
+      "atom_sse4_2_movbe",
+      "barcelona",
+      "bdver1",
+      "bdver2",
+      "bdver3",
+      "bdver4",
+      "bonnell",
+      "broadwell",
+      "btver1",
+      "btver2",
+      "c3",
+      "c3-2",
+      "cannonlake",
+      "cascadelake",
+      "clearwaterforest",
+      "cooperlake",
+      "core-avx-i",
+      "core-avx2",
+      "core2",
+      "core_2_duo_sse4_1",
+      "core_2_duo_ssse3",
+      "core_2nd_gen_avx",
+      "core_3rd_gen_avx",
+      "core_4th_gen_avx",
+      "core_4th_gen_avx_tsx",
+      "core_5th_gen_avx",
+      "core_5th_gen_avx_tsx",
+      "core_aes_pclmulqdq",
+      "core_i7_sse4_2",
+      "corei7",
+      "corei7-avx",
+      "emeraldrapids",
+      "generic",
+      "geode",
+      "goldmont",
+      "goldmont-plus",
+      "goldmont_plus",
+      "gracemont",
+      "grandridge",
+      "graniterapids",
+      "graniterapids-d",
+      "graniterapids_d",
+      "haswell",
+      "i386",
+      "i486",
+      "i586",
+      "i686",
+      "icelake-client",
+      "icelake-server",
+      "icelake_client",
+      "icelake_server",
+      "ivybridge",
+      "k6",
+      "k6-2",
+      "k6-3",
+      "k8",
+      "k8-sse3",
+      "knl",
+      "knm",
+      "lakemont",
+      "lunarlake",
+      "meteorlake",
+      "mic_avx512",
+      "native",
+      "nehalem",
+      "nocona",
+      "opteron",
+      "opteron-sse3",
+      "pantherlake",
+      "penryn",
+      "pentium",
+      "pentium-m",
+      "pentium-mmx",
+      "pentium2",
+      "pentium3",
+      "pentium3m",
+      "pentium4",
+      "pentium4m",
+      "pentium_4",
+      "pentium_4_sse3",
+      "pentium_ii",
+      "pentium_iii",
+      "pentium_iii_no_xmm_regs",
+      "pentium_m",
+      "pentium_mmx",
+      "pentium_pro",
+      "pentiumpro",
+      "prescott",
+      "raptorlake",
+      "rocketlake",
+      "sandybridge",
+      "sapphirerapids",
+      "sierraforest",
+      "silvermont",
+      "skx",
+      "skylake",
+      "skylake-avx512",
+      "skylake_avx512",
+      "slm",
+      "tigerlake",
+      "tremont",
+      "westmere",
+      "winchip-c6",
+      "winchip2",
+      "x86-64",
+      "x86-64-v2",
+      "x86-64-v3",
+      "x86-64-v4",
+      "yonah",
+      "znver1",
+      "znver2",
+      "znver3",
+      "znver4",
+      "znver5"
+    ],
+    "arm": [
+      "arm1020e",
+      "arm1020t",
+      "arm1022e",
+      "arm10e",
+      "arm10tdmi",
+      "arm1136j-s",
+      "arm1136jf-s",
+      "arm1156t2-s",
+      "arm1156t2f-s",
+      "arm1176jz-s",
+      "arm1176jzf-s",
+      "arm710t",
+      "arm720t",
+      "arm7tdmi",
+      "arm7tdmi-s",
+      "arm8",
+      "arm810",
+      "arm9",
+      "arm920",
+      "arm920t",
+      "arm922t",
+      "arm926ej-s",
+      "arm940t",
+      "arm946e-s",
+      "arm966e-s",
+      "arm968e-s",
+      "arm9e",
+      "arm9tdmi",
+      "cortex-a12",
+      "cortex-a15",
+      "cortex-a17",
+      "cortex-a32",
+      "cortex-a35",
+      "cortex-a5",
+      "cortex-a53",
+      "cortex-a55",
+      "cortex-a57",
+      "cortex-a7",
+      "cortex-a710",
+      "cortex-a72",
+      "cortex-a73",
+      "cortex-a75",
+      "cortex-a76",
+      "cortex-a76ae",
+      "cortex-a77",
+      "cortex-a78",
+      "cortex-a78ae",
+      "cortex-a78c",
+      "cortex-a8",
+      "cortex-a9",
+      "cortex-m0",
+      "cortex-m0plus",
+      "cortex-m1",
+      "cortex-m23",
+      "cortex-m3",
+      "cortex-m33",
+      "cortex-m35p",
+      "cortex-m4",
+      "cortex-m52",
+      "cortex-m55",
+      "cortex-m7",
+      "cortex-m85",
+      "cortex-r4",
+      "cortex-r4f",
+      "cortex-r5",
+      "cortex-r52",
+      "cortex-r52plus",
+      "cortex-r7",
+      "cortex-r8",
+      "cortex-x1",
+      "cortex-x1c",
+      "cyclone",
+      "ep9312",
+      "exynos-m3",
+      "exynos-m4",
+      "exynos-m5",
+      "generic",
+      "iwmmxt",
+      "krait",
+      "kryo",
+      "mpcore",
+      "mpcorenovfp",
+      "neoverse-n1",
+      "neoverse-n2",
+      "neoverse-v1",
+      "sc000",
+      "sc300",
+      "strongarm",
+      "strongarm110",
+      "strongarm1100",
+      "strongarm1110",
+      "swift",
+      "xscale"
+    ],
+    "arm64ec": [
+      "a64fx",
+      "ampere1",
+      "ampere1a",
+      "ampere1b",
+      "apple-a10",
+      "apple-a11",
+      "apple-a12",
+      "apple-a13",
+      "apple-a14",
+      "apple-a15",
+      "apple-a16",
+      "apple-a17",
+      "apple-a7",
+      "apple-m4",
+      "carmel",
+      "cortex-a34",
+      "cortex-a35",
+      "cortex-a510",
+      "cortex-a520",
+      "cortex-a520ae",
+      "cortex-a53",
+      "cortex-a55",
+      "cortex-a57",
+      "cortex-a65",
+      "cortex-a65ae",
+      "cortex-a710",
+      "cortex-a715",
+      "cortex-a72",
+      "cortex-a720",
+      "cortex-a720ae",
+      "cortex-a725",
+      "cortex-a73",
+      "cortex-a75",
+      "cortex-a76",
+      "cortex-a76ae",
+      "cortex-a77",
+      "cortex-a78",
+      "cortex-a78ae",
+      "cortex-a78c",
+      "cortex-r82",
+      "cortex-r82ae",
+      "cortex-x1",
+      "cortex-x1c",
+      "cortex-x2",
+      "cortex-x3",
+      "cortex-x4",
+      "cortex-x925",
+      "exynos-m3",
+      "exynos-m4",
+      "exynos-m5",
+      "falkor",
+      "generic",
+      "kryo",
+      "neoverse-512tvb",
+      "neoverse-e1",
+      "neoverse-n1",
+      "neoverse-n2",
+      "neoverse-n3",
+      "neoverse-v1",
+      "neoverse-v2",
+      "neoverse-v3",
+      "neoverse-v3ae",
+      "oryon-1",
+      "saphira",
+      "thunderx",
+      "thunderx2t99",
+      "thunderx3t110",
+      "thunderxt81",
+      "thunderxt83",
+      "thunderxt88",
+      "tsv110"
+    ],
+    "aarch64": [
+      "a64fx",
+      "ampere1",
+      "ampere1a",
+      "ampere1b",
+      "apple-a10",
+      "apple-a11",
+      "apple-a12",
+      "apple-a13",
+      "apple-a14",
+      "apple-a15",
+      "apple-a16",
+      "apple-a17",
+      "apple-a7",
+      "apple-m4",
+      "carmel",
+      "cortex-a34",
+      "cortex-a35",
+      "cortex-a510",
+      "cortex-a520",
+      "cortex-a520ae",
+      "cortex-a53",
+      "cortex-a55",
+      "cortex-a57",
+      "cortex-a65",
+      "cortex-a65ae",
+      "cortex-a710",
+      "cortex-a715",
+      "cortex-a72",
+      "cortex-a720",
+      "cortex-a720ae",
+      "cortex-a725",
+      "cortex-a73",
+      "cortex-a75",
+      "cortex-a76",
+      "cortex-a76ae",
+      "cortex-a77",
+      "cortex-a78",
+      "cortex-a78ae",
+      "cortex-a78c",
+      "cortex-r82",
+      "cortex-r82ae",
+      "cortex-x1",
+      "cortex-x1c",
+      "cortex-x2",
+      "cortex-x3",
+      "cortex-x4",
+      "cortex-x925",
+      "exynos-m3",
+      "exynos-m4",
+      "exynos-m5",
+      "falkor",
+      "generic",
+      "kryo",
+      "neoverse-512tvb",
+      "neoverse-e1",
+      "neoverse-n1",
+      "neoverse-n2",
+      "neoverse-n3",
+      "neoverse-v1",
+      "neoverse-v2",
+      "neoverse-v3",
+      "neoverse-v3ae",
+      "oryon-1",
+      "saphira",
+      "thunderx",
+      "thunderx2t99",
+      "thunderx3t110",
+      "thunderxt81",
+      "thunderxt83",
+      "thunderxt88",
+      "tsv110"
+    ],
+    "amdgpu": [
+      "bonaire",
+      "carrizo",
+      "fiji",
+      "generic",
+      "generic-hsa",
+      "gfx10-1-generic",
+      "gfx10-3-generic",
+      "gfx1010",
+      "gfx1011",
+      "gfx1012",
+      "gfx1013",
+      "gfx1030",
+      "gfx1031",
+      "gfx1032",
+      "gfx1033",
+      "gfx1034",
+      "gfx1035",
+      "gfx1036",
+      "gfx11-generic",
+      "gfx1100",
+      "gfx1101",
+      "gfx1102",
+      "gfx1103",
+      "gfx1150",
+      "gfx1151",
+      "gfx1152",
+      "gfx12-generic",
+      "gfx1200",
+      "gfx1201",
+      "gfx600",
+      "gfx601",
+      "gfx602",
+      "gfx700",
+      "gfx701",
+      "gfx702",
+      "gfx703",
+      "gfx704",
+      "gfx705",
+      "gfx801",
+      "gfx802",
+      "gfx803",
+      "gfx805",
+      "gfx810",
+      "gfx9-generic",
+      "gfx900",
+      "gfx902",
+      "gfx904",
+      "gfx906",
+      "gfx908",
+      "gfx909",
+      "gfx90a",
+      "gfx90c",
+      "gfx940",
+      "gfx941",
+      "gfx942",
+      "hainan",
+      "hawaii",
+      "iceland",
+      "kabini",
+      "kaveri",
+      "mullins",
+      "oland",
+      "pitcairn",
+      "polaris10",
+      "polaris11",
+      "stoney",
+      "tahiti",
+      "tonga",
+      "tongapro",
+      "verde"
+    ],
+    "bpf": [
+      "generic",
+      "probe",
+      "v1",
+      "v2",
+      "v3",
+      "v4"
+    ],
+    "csky": [
+      "c807",
+      "c807f",
+      "c810",
+      "c810t",
+      "c810tv",
+      "c810v",
+      "c860",
+      "c860v",
+      "ck801",
+      "ck801t",
+      "ck802",
+      "ck802j",
+      "ck802t",
+      "ck803",
+      "ck803e",
+      "ck803ef",
+      "ck803efh",
+      "ck803efhr1",
+      "ck803efhr2",
+      "ck803efhr3",
+      "ck803efht",
+      "ck803efhtr1",
+      "ck803efhtr2",
+      "ck803efhtr3",
+      "ck803efr1",
+      "ck803efr2",
+      "ck803efr3",
+      "ck803eft",
+      "ck803eftr1",
+      "ck803eftr2",
+      "ck803eftr3",
+      "ck803eh",
+      "ck803ehr1",
+      "ck803ehr2",
+      "ck803ehr3",
+      "ck803eht",
+      "ck803ehtr1",
+      "ck803ehtr2",
+      "ck803ehtr3",
+      "ck803er1",
+      "ck803er2",
+      "ck803er3",
+      "ck803et",
+      "ck803etr1",
+      "ck803etr2",
+      "ck803etr3",
+      "ck803f",
+      "ck803fh",
+      "ck803fhr1",
+      "ck803fhr2",
+      "ck803fhr3",
+      "ck803fr1",
+      "ck803fr2",
+      "ck803fr3",
+      "ck803ft",
+      "ck803ftr1",
+      "ck803ftr2",
+      "ck803ftr3",
+      "ck803h",
+      "ck803hr1",
+      "ck803hr2",
+      "ck803hr3",
+      "ck803ht",
+      "ck803htr1",
+      "ck803htr2",
+      "ck803htr3",
+      "ck803r1",
+      "ck803r2",
+      "ck803r3",
+      "ck803s",
+      "ck803se",
+      "ck803sef",
+      "ck803sefn",
+      "ck803sefnt",
+      "ck803seft",
+      "ck803sen",
+      "ck803sf",
+      "ck803sfn",
+      "ck803sn",
+      "ck803snt",
+      "ck803st",
+      "ck803t",
+      "ck803tr1",
+      "ck803tr2",
+      "ck803tr3",
+      "ck804",
+      "ck804e",
+      "ck804ef",
+      "ck804efh",
+      "ck804efht",
+      "ck804eft",
+      "ck804eh",
+      "ck804eht",
+      "ck804et",
+      "ck804f",
+      "ck804fh",
+      "ck804ft",
+      "ck804h",
+      "ck804ht",
+      "ck804t",
+      "ck805",
+      "ck805e",
+      "ck805ef",
+      "ck805eft",
+      "ck805et",
+      "ck805f",
+      "ck805ft",
+      "ck805t",
+      "ck807",
+      "ck807e",
+      "ck807ef",
+      "ck807f",
+      "ck810",
+      "ck810e",
+      "ck810ef",
+      "ck810eft",
+      "ck810eftv",
+      "ck810efv",
+      "ck810et",
+      "ck810etv",
+      "ck810ev",
+      "ck810f",
+      "ck810ft",
+      "ck810ftv",
+      "ck810fv",
+      "ck810t",
+      "ck810tv",
+      "ck810v",
+      "ck860",
+      "ck860f",
+      "ck860fv",
+      "ck860v",
+      "e801",
+      "e802",
+      "e802t",
+      "e803",
+      "e803t",
+      "e804d",
+      "e804df",
+      "e804dft",
+      "e804dt",
+      "e804f",
+      "e804ft",
+      "generic",
+      "i805",
+      "i805f",
+      "r807",
+      "r807f",
+      "s802",
+      "s802t",
+      "s803",
+      "s803t"
+    ],
+    "hexagon": [
+      "generic",
+      "hexagonv5",
+      "hexagonv55",
+      "hexagonv60",
+      "hexagonv62",
+      "hexagonv65",
+      "hexagonv66",
+      "hexagonv67",
+      "hexagonv67t",
+      "hexagonv68",
+      "hexagonv69",
+      "hexagonv71",
+      "hexagonv71t",
+      "hexagonv73"
+    ],
+    "loongarch64": [
+      "generic",
+      "generic-la32",
+      "generic-la64",
+      "la464",
+      "la664",
+      "loongarch64"
+    ],
+    "m68k": [
+      "M68000",
+      "M68010",
+      "M68020",
+      "M68030",
+      "M68040",
+      "M68060",
+      "generic"
+    ],
+    "mips": [
+      "generic",
+      "mips1",
+      "mips2",
+      "mips3",
+      "mips32",
+      "mips32r2",
+      "mips32r3",
+      "mips32r5",
+      "mips32r6",
+      "mips4",
+      "mips5",
+      "mips64",
+      "mips64r2",
+      "mips64r3",
+      "mips64r5",
+      "mips64r6",
+      "octeon",
+      "octeon+",
+      "p5600"
+    ],
+    "mips64": [
+      "generic",
+      "mips1",
+      "mips2",
+      "mips3",
+      "mips32",
+      "mips32r2",
+      "mips32r3",
+      "mips32r5",
+      "mips32r6",
+      "mips4",
+      "mips5",
+      "mips64",
+      "mips64r2",
+      "mips64r3",
+      "mips64r5",
+      "mips64r6",
+      "octeon",
+      "octeon+",
+      "p5600"
+    ],
+    "mips32r6": [
+      "generic",
+      "mips1",
+      "mips2",
+      "mips3",
+      "mips32",
+      "mips32r2",
+      "mips32r3",
+      "mips32r5",
+      "mips32r6",
+      "mips4",
+      "mips5",
+      "mips64",
+      "mips64r2",
+      "mips64r3",
+      "mips64r5",
+      "mips64r6",
+      "octeon",
+      "octeon+",
+      "p5600"
+    ],
+    "mips64r6": [
+      "generic",
+      "mips1",
+      "mips2",
+      "mips3",
+      "mips32",
+      "mips32r2",
+      "mips32r3",
+      "mips32r5",
+      "mips32r6",
+      "mips4",
+      "mips5",
+      "mips64",
+      "mips64r2",
+      "mips64r3",
+      "mips64r5",
+      "mips64r6",
+      "octeon",
+      "octeon+",
+      "p5600"
+    ],
+    "msp430": [
+      "generic",
+      "msp430",
+      "msp430x"
+    ],
+    "nvptx64": [
+      "sm_20",
+      "sm_21",
+      "sm_30",
+      "sm_32",
+      "sm_35",
+      "sm_37",
+      "sm_50",
+      "sm_52",
+      "sm_53",
+      "sm_60",
+      "sm_61",
+      "sm_62",
+      "sm_70",
+      "sm_72",
+      "sm_75",
+      "sm_80",
+      "sm_86",
+      "sm_87",
+      "sm_89",
+      "sm_90",
+      "sm_90a"
+    ],
+    "powerpc": [
+      "440",
+      "450",
+      "601",
+      "602",
+      "603",
+      "603e",
+      "603ev",
+      "604",
+      "604e",
+      "620",
+      "7400",
+      "7450",
+      "750",
+      "970",
+      "a2",
+      "e500",
+      "e500mc",
+      "e5500",
+      "future",
+      "g3",
+      "g4",
+      "g4+",
+      "g5",
+      "generic",
+      "ppc",
+      "ppc32",
+      "ppc64",
+      "ppc64le",
+      "pwr10",
+      "pwr11",
+      "pwr3",
+      "pwr4",
+      "pwr5",
+      "pwr5x",
+      "pwr6",
+      "pwr6x",
+      "pwr7",
+      "pwr8",
+      "pwr9"
+    ],
+    "powerpc64": [
+      "440",
+      "450",
+      "601",
+      "602",
+      "603",
+      "603e",
+      "603ev",
+      "604",
+      "604e",
+      "620",
+      "7400",
+      "7450",
+      "750",
+      "970",
+      "a2",
+      "e500",
+      "e500mc",
+      "e5500",
+      "future",
+      "g3",
+      "g4",
+      "g4+",
+      "g5",
+      "generic",
+      "ppc",
+      "ppc32",
+      "ppc64",
+      "ppc64le",
+      "pwr10",
+      "pwr11",
+      "pwr3",
+      "pwr4",
+      "pwr5",
+      "pwr5x",
+      "pwr6",
+      "pwr6x",
+      "pwr7",
+      "pwr8",
+      "pwr9"
+    ],
+    "riscv32": [
+      "generic",
+      "generic-rv32",
+      "generic-rv64",
+      "rocket",
+      "rocket-rv32",
+      "rocket-rv64",
+      "sifive-7-series",
+      "sifive-e20",
+      "sifive-e21",
+      "sifive-e24",
+      "sifive-e31",
+      "sifive-e34",
+      "sifive-e76",
+      "sifive-p450",
+      "sifive-p670",
+      "sifive-s21",
+      "sifive-s51",
+      "sifive-s54",
+      "sifive-s76",
+      "sifive-u54",
+      "sifive-u74",
+      "sifive-x280",
+      "spacemit-x60",
+      "syntacore-scr1-base",
+      "syntacore-scr1-max",
+      "syntacore-scr3-rv32",
+      "syntacore-scr3-rv64",
+      "veyron-v1",
+      "xiangshan-nanhu"
+    ],
+    "riscv64": [
+      "generic",
+      "generic-rv32",
+      "generic-rv64",
+      "rocket",
+      "rocket-rv32",
+      "rocket-rv64",
+      "sifive-7-series",
+      "sifive-e20",
+      "sifive-e21",
+      "sifive-e24",
+      "sifive-e31",
+      "sifive-e34",
+      "sifive-e76",
+      "sifive-p450",
+      "sifive-p670",
+      "sifive-s21",
+      "sifive-s51",
+      "sifive-s54",
+      "sifive-s76",
+      "sifive-u54",
+      "sifive-u74",
+      "sifive-x280",
+      "spacemit-x60",
+      "syntacore-scr1-base",
+      "syntacore-scr1-max",
+      "syntacore-scr3-rv32",
+      "syntacore-scr3-rv64",
+      "veyron-v1",
+      "xiangshan-nanhu"
+    ],
+    "s390x": [
+      "arch10",
+      "arch11",
+      "arch12",
+      "arch13",
+      "arch14",
+      "arch8",
+      "arch9",
+      "generic",
+      "z10",
+      "z13",
+      "z14",
+      "z15",
+      "z16",
+      "z196",
+      "zEC12"
+    ],
+    "sparc": [
+      "at697e",
+      "at697f",
+      "f934",
+      "generic",
+      "gr712rc",
+      "gr740",
+      "hypersparc",
+      "leon2",
+      "leon3",
+      "leon4",
+      "ma2080",
+      "ma2085",
+      "ma2100",
+      "ma2150",
+      "ma2155",
+      "ma2450",
+      "ma2455",
+      "ma2480",
+      "ma2485",
+      "ma2x5x",
+      "ma2x8x",
+      "myriad2",
+      "myriad2.1",
+      "myriad2.2",
+      "myriad2.3",
+      "niagara",
+      "niagara2",
+      "niagara3",
+      "niagara4",
+      "sparclet",
+      "sparclite",
+      "sparclite86x",
+      "supersparc",
+      "tsc701",
+      "ultrasparc",
+      "ultrasparc3",
+      "ut699",
+      "v7",
+      "v8",
+      "v9"
+    ],
+    "sparc64": [
+      "at697e",
+      "at697f",
+      "f934",
+      "generic",
+      "gr712rc",
+      "gr740",
+      "hypersparc",
+      "leon2",
+      "leon3",
+      "leon4",
+      "ma2080",
+      "ma2085",
+      "ma2100",
+      "ma2150",
+      "ma2155",
+      "ma2450",
+      "ma2455",
+      "ma2480",
+      "ma2485",
+      "ma2x5x",
+      "ma2x8x",
+      "myriad2",
+      "myriad2.1",
+      "myriad2.2",
+      "myriad2.3",
+      "niagara",
+      "niagara2",
+      "niagara3",
+      "niagara4",
+      "sparclet",
+      "sparclite",
+      "sparclite86x",
+      "supersparc",
+      "tsc701",
+      "ultrasparc",
+      "ultrasparc3",
+      "ut699",
+      "v7",
+      "v8",
+      "v9"
+    ],
+    "wasm32": [
+      "bleeding-edge",
+      "generic",
+      "mvp"
+    ],
+    "wasm64": [
+      "bleeding-edge",
+      "generic",
+      "mvp"
+    ],
+    "xtensa": [
+      "generic"
+    ]
+  },
+  "cpu_to_archs": {
+    "a64fx": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "ampere1": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "ampere1a": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "ampere1b": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a10": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a11": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a12": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a13": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a14": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a15": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a16": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a17": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-a7": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "apple-m4": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "carmel": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a34": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a35": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a510": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a520": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a520ae": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a53": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a55": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a57": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a65": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a65ae": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a710": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a715": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a72": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a720": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a720ae": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a725": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-a73": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a75": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a76": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a76ae": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a77": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a78": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a78ae": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-a78c": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-r82": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-r82ae": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-x1": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-x1c": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "cortex-x2": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-x3": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-x4": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "cortex-x925": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "exynos-m3": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "exynos-m4": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "exynos-m5": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "falkor": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "generic": [
+      "aarch64",
+      "amdgpu",
+      "arm",
+      "arm64ec",
+      "bpf",
+      "csky",
+      "hexagon",
+      "loongarch64",
+      "m68k",
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6",
+      "msp430",
+      "powerpc",
+      "powerpc64",
+      "riscv32",
+      "riscv64",
+      "s390x",
+      "sparc",
+      "sparc64",
+      "wasm32",
+      "wasm64",
+      "x86",
+      "x86_64",
+      "xtensa"
+    ],
+    "kryo": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "neoverse-512tvb": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "neoverse-e1": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "neoverse-n1": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "neoverse-n2": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "neoverse-n3": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "neoverse-v1": [
+      "aarch64",
+      "arm",
+      "arm64ec"
+    ],
+    "neoverse-v2": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "neoverse-v3": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "neoverse-v3ae": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "oryon-1": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "saphira": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "thunderx": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "thunderx2t99": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "thunderx3t110": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "thunderxt81": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "thunderxt83": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "thunderxt88": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "tsv110": [
+      "aarch64",
+      "arm64ec"
+    ],
+    "bonaire": [
+      "amdgpu"
+    ],
+    "carrizo": [
+      "amdgpu"
+    ],
+    "fiji": [
+      "amdgpu"
+    ],
+    "generic-hsa": [
+      "amdgpu"
+    ],
+    "gfx10-1-generic": [
+      "amdgpu"
+    ],
+    "gfx10-3-generic": [
+      "amdgpu"
+    ],
+    "gfx1010": [
+      "amdgpu"
+    ],
+    "gfx1011": [
+      "amdgpu"
+    ],
+    "gfx1012": [
+      "amdgpu"
+    ],
+    "gfx1013": [
+      "amdgpu"
+    ],
+    "gfx1030": [
+      "amdgpu"
+    ],
+    "gfx1031": [
+      "amdgpu"
+    ],
+    "gfx1032": [
+      "amdgpu"
+    ],
+    "gfx1033": [
+      "amdgpu"
+    ],
+    "gfx1034": [
+      "amdgpu"
+    ],
+    "gfx1035": [
+      "amdgpu"
+    ],
+    "gfx1036": [
+      "amdgpu"
+    ],
+    "gfx11-generic": [
+      "amdgpu"
+    ],
+    "gfx1100": [
+      "amdgpu"
+    ],
+    "gfx1101": [
+      "amdgpu"
+    ],
+    "gfx1102": [
+      "amdgpu"
+    ],
+    "gfx1103": [
+      "amdgpu"
+    ],
+    "gfx1150": [
+      "amdgpu"
+    ],
+    "gfx1151": [
+      "amdgpu"
+    ],
+    "gfx1152": [
+      "amdgpu"
+    ],
+    "gfx12-generic": [
+      "amdgpu"
+    ],
+    "gfx1200": [
+      "amdgpu"
+    ],
+    "gfx1201": [
+      "amdgpu"
+    ],
+    "gfx600": [
+      "amdgpu"
+    ],
+    "gfx601": [
+      "amdgpu"
+    ],
+    "gfx602": [
+      "amdgpu"
+    ],
+    "gfx700": [
+      "amdgpu"
+    ],
+    "gfx701": [
+      "amdgpu"
+    ],
+    "gfx702": [
+      "amdgpu"
+    ],
+    "gfx703": [
+      "amdgpu"
+    ],
+    "gfx704": [
+      "amdgpu"
+    ],
+    "gfx705": [
+      "amdgpu"
+    ],
+    "gfx801": [
+      "amdgpu"
+    ],
+    "gfx802": [
+      "amdgpu"
+    ],
+    "gfx803": [
+      "amdgpu"
+    ],
+    "gfx805": [
+      "amdgpu"
+    ],
+    "gfx810": [
+      "amdgpu"
+    ],
+    "gfx9-generic": [
+      "amdgpu"
+    ],
+    "gfx900": [
+      "amdgpu"
+    ],
+    "gfx902": [
+      "amdgpu"
+    ],
+    "gfx904": [
+      "amdgpu"
+    ],
+    "gfx906": [
+      "amdgpu"
+    ],
+    "gfx908": [
+      "amdgpu"
+    ],
+    "gfx909": [
+      "amdgpu"
+    ],
+    "gfx90a": [
+      "amdgpu"
+    ],
+    "gfx90c": [
+      "amdgpu"
+    ],
+    "gfx940": [
+      "amdgpu"
+    ],
+    "gfx941": [
+      "amdgpu"
+    ],
+    "gfx942": [
+      "amdgpu"
+    ],
+    "hainan": [
+      "amdgpu"
+    ],
+    "hawaii": [
+      "amdgpu"
+    ],
+    "iceland": [
+      "amdgpu"
+    ],
+    "kabini": [
+      "amdgpu"
+    ],
+    "kaveri": [
+      "amdgpu"
+    ],
+    "mullins": [
+      "amdgpu"
+    ],
+    "oland": [
+      "amdgpu"
+    ],
+    "pitcairn": [
+      "amdgpu"
+    ],
+    "polaris10": [
+      "amdgpu"
+    ],
+    "polaris11": [
+      "amdgpu"
+    ],
+    "stoney": [
+      "amdgpu"
+    ],
+    "tahiti": [
+      "amdgpu"
+    ],
+    "tonga": [
+      "amdgpu"
+    ],
+    "tongapro": [
+      "amdgpu"
+    ],
+    "verde": [
+      "amdgpu"
+    ],
+    "arm1020e": [
+      "arm"
+    ],
+    "arm1020t": [
+      "arm"
+    ],
+    "arm1022e": [
+      "arm"
+    ],
+    "arm10e": [
+      "arm"
+    ],
+    "arm10tdmi": [
+      "arm"
+    ],
+    "arm1136j-s": [
+      "arm"
+    ],
+    "arm1136jf-s": [
+      "arm"
+    ],
+    "arm1156t2-s": [
+      "arm"
+    ],
+    "arm1156t2f-s": [
+      "arm"
+    ],
+    "arm1176jz-s": [
+      "arm"
+    ],
+    "arm1176jzf-s": [
+      "arm"
+    ],
+    "arm710t": [
+      "arm"
+    ],
+    "arm720t": [
+      "arm"
+    ],
+    "arm7tdmi": [
+      "arm"
+    ],
+    "arm7tdmi-s": [
+      "arm"
+    ],
+    "arm8": [
+      "arm"
+    ],
+    "arm810": [
+      "arm"
+    ],
+    "arm9": [
+      "arm"
+    ],
+    "arm920": [
+      "arm"
+    ],
+    "arm920t": [
+      "arm"
+    ],
+    "arm922t": [
+      "arm"
+    ],
+    "arm926ej-s": [
+      "arm"
+    ],
+    "arm940t": [
+      "arm"
+    ],
+    "arm946e-s": [
+      "arm"
+    ],
+    "arm966e-s": [
+      "arm"
+    ],
+    "arm968e-s": [
+      "arm"
+    ],
+    "arm9e": [
+      "arm"
+    ],
+    "arm9tdmi": [
+      "arm"
+    ],
+    "cortex-a12": [
+      "arm"
+    ],
+    "cortex-a15": [
+      "arm"
+    ],
+    "cortex-a17": [
+      "arm"
+    ],
+    "cortex-a32": [
+      "arm"
+    ],
+    "cortex-a5": [
+      "arm"
+    ],
+    "cortex-a7": [
+      "arm"
+    ],
+    "cortex-a8": [
+      "arm"
+    ],
+    "cortex-a9": [
+      "arm"
+    ],
+    "cortex-m0": [
+      "arm"
+    ],
+    "cortex-m0plus": [
+      "arm"
+    ],
+    "cortex-m1": [
+      "arm"
+    ],
+    "cortex-m23": [
+      "arm"
+    ],
+    "cortex-m3": [
+      "arm"
+    ],
+    "cortex-m33": [
+      "arm"
+    ],
+    "cortex-m35p": [
+      "arm"
+    ],
+    "cortex-m4": [
+      "arm"
+    ],
+    "cortex-m52": [
+      "arm"
+    ],
+    "cortex-m55": [
+      "arm"
+    ],
+    "cortex-m7": [
+      "arm"
+    ],
+    "cortex-m85": [
+      "arm"
+    ],
+    "cortex-r4": [
+      "arm"
+    ],
+    "cortex-r4f": [
+      "arm"
+    ],
+    "cortex-r5": [
+      "arm"
+    ],
+    "cortex-r52": [
+      "arm"
+    ],
+    "cortex-r52plus": [
+      "arm"
+    ],
+    "cortex-r7": [
+      "arm"
+    ],
+    "cortex-r8": [
+      "arm"
+    ],
+    "cyclone": [
+      "arm"
+    ],
+    "ep9312": [
+      "arm"
+    ],
+    "iwmmxt": [
+      "arm"
+    ],
+    "krait": [
+      "arm"
+    ],
+    "mpcore": [
+      "arm"
+    ],
+    "mpcorenovfp": [
+      "arm"
+    ],
+    "sc000": [
+      "arm"
+    ],
+    "sc300": [
+      "arm"
+    ],
+    "strongarm": [
+      "arm"
+    ],
+    "strongarm110": [
+      "arm"
+    ],
+    "strongarm1100": [
+      "arm"
+    ],
+    "strongarm1110": [
+      "arm"
+    ],
+    "swift": [
+      "arm"
+    ],
+    "xscale": [
+      "arm"
+    ],
+    "probe": [
+      "bpf"
+    ],
+    "v1": [
+      "bpf"
+    ],
+    "v2": [
+      "bpf"
+    ],
+    "v3": [
+      "bpf"
+    ],
+    "v4": [
+      "bpf"
+    ],
+    "c807": [
+      "csky"
+    ],
+    "c807f": [
+      "csky"
+    ],
+    "c810": [
+      "csky"
+    ],
+    "c810t": [
+      "csky"
+    ],
+    "c810tv": [
+      "csky"
+    ],
+    "c810v": [
+      "csky"
+    ],
+    "c860": [
+      "csky"
+    ],
+    "c860v": [
+      "csky"
+    ],
+    "ck801": [
+      "csky"
+    ],
+    "ck801t": [
+      "csky"
+    ],
+    "ck802": [
+      "csky"
+    ],
+    "ck802j": [
+      "csky"
+    ],
+    "ck802t": [
+      "csky"
+    ],
+    "ck803": [
+      "csky"
+    ],
+    "ck803e": [
+      "csky"
+    ],
+    "ck803ef": [
+      "csky"
+    ],
+    "ck803efh": [
+      "csky"
+    ],
+    "ck803efhr1": [
+      "csky"
+    ],
+    "ck803efhr2": [
+      "csky"
+    ],
+    "ck803efhr3": [
+      "csky"
+    ],
+    "ck803efht": [
+      "csky"
+    ],
+    "ck803efhtr1": [
+      "csky"
+    ],
+    "ck803efhtr2": [
+      "csky"
+    ],
+    "ck803efhtr3": [
+      "csky"
+    ],
+    "ck803efr1": [
+      "csky"
+    ],
+    "ck803efr2": [
+      "csky"
+    ],
+    "ck803efr3": [
+      "csky"
+    ],
+    "ck803eft": [
+      "csky"
+    ],
+    "ck803eftr1": [
+      "csky"
+    ],
+    "ck803eftr2": [
+      "csky"
+    ],
+    "ck803eftr3": [
+      "csky"
+    ],
+    "ck803eh": [
+      "csky"
+    ],
+    "ck803ehr1": [
+      "csky"
+    ],
+    "ck803ehr2": [
+      "csky"
+    ],
+    "ck803ehr3": [
+      "csky"
+    ],
+    "ck803eht": [
+      "csky"
+    ],
+    "ck803ehtr1": [
+      "csky"
+    ],
+    "ck803ehtr2": [
+      "csky"
+    ],
+    "ck803ehtr3": [
+      "csky"
+    ],
+    "ck803er1": [
+      "csky"
+    ],
+    "ck803er2": [
+      "csky"
+    ],
+    "ck803er3": [
+      "csky"
+    ],
+    "ck803et": [
+      "csky"
+    ],
+    "ck803etr1": [
+      "csky"
+    ],
+    "ck803etr2": [
+      "csky"
+    ],
+    "ck803etr3": [
+      "csky"
+    ],
+    "ck803f": [
+      "csky"
+    ],
+    "ck803fh": [
+      "csky"
+    ],
+    "ck803fhr1": [
+      "csky"
+    ],
+    "ck803fhr2": [
+      "csky"
+    ],
+    "ck803fhr3": [
+      "csky"
+    ],
+    "ck803fr1": [
+      "csky"
+    ],
+    "ck803fr2": [
+      "csky"
+    ],
+    "ck803fr3": [
+      "csky"
+    ],
+    "ck803ft": [
+      "csky"
+    ],
+    "ck803ftr1": [
+      "csky"
+    ],
+    "ck803ftr2": [
+      "csky"
+    ],
+    "ck803ftr3": [
+      "csky"
+    ],
+    "ck803h": [
+      "csky"
+    ],
+    "ck803hr1": [
+      "csky"
+    ],
+    "ck803hr2": [
+      "csky"
+    ],
+    "ck803hr3": [
+      "csky"
+    ],
+    "ck803ht": [
+      "csky"
+    ],
+    "ck803htr1": [
+      "csky"
+    ],
+    "ck803htr2": [
+      "csky"
+    ],
+    "ck803htr3": [
+      "csky"
+    ],
+    "ck803r1": [
+      "csky"
+    ],
+    "ck803r2": [
+      "csky"
+    ],
+    "ck803r3": [
+      "csky"
+    ],
+    "ck803s": [
+      "csky"
+    ],
+    "ck803se": [
+      "csky"
+    ],
+    "ck803sef": [
+      "csky"
+    ],
+    "ck803sefn": [
+      "csky"
+    ],
+    "ck803sefnt": [
+      "csky"
+    ],
+    "ck803seft": [
+      "csky"
+    ],
+    "ck803sen": [
+      "csky"
+    ],
+    "ck803sf": [
+      "csky"
+    ],
+    "ck803sfn": [
+      "csky"
+    ],
+    "ck803sn": [
+      "csky"
+    ],
+    "ck803snt": [
+      "csky"
+    ],
+    "ck803st": [
+      "csky"
+    ],
+    "ck803t": [
+      "csky"
+    ],
+    "ck803tr1": [
+      "csky"
+    ],
+    "ck803tr2": [
+      "csky"
+    ],
+    "ck803tr3": [
+      "csky"
+    ],
+    "ck804": [
+      "csky"
+    ],
+    "ck804e": [
+      "csky"
+    ],
+    "ck804ef": [
+      "csky"
+    ],
+    "ck804efh": [
+      "csky"
+    ],
+    "ck804efht": [
+      "csky"
+    ],
+    "ck804eft": [
+      "csky"
+    ],
+    "ck804eh": [
+      "csky"
+    ],
+    "ck804eht": [
+      "csky"
+    ],
+    "ck804et": [
+      "csky"
+    ],
+    "ck804f": [
+      "csky"
+    ],
+    "ck804fh": [
+      "csky"
+    ],
+    "ck804ft": [
+      "csky"
+    ],
+    "ck804h": [
+      "csky"
+    ],
+    "ck804ht": [
+      "csky"
+    ],
+    "ck804t": [
+      "csky"
+    ],
+    "ck805": [
+      "csky"
+    ],
+    "ck805e": [
+      "csky"
+    ],
+    "ck805ef": [
+      "csky"
+    ],
+    "ck805eft": [
+      "csky"
+    ],
+    "ck805et": [
+      "csky"
+    ],
+    "ck805f": [
+      "csky"
+    ],
+    "ck805ft": [
+      "csky"
+    ],
+    "ck805t": [
+      "csky"
+    ],
+    "ck807": [
+      "csky"
+    ],
+    "ck807e": [
+      "csky"
+    ],
+    "ck807ef": [
+      "csky"
+    ],
+    "ck807f": [
+      "csky"
+    ],
+    "ck810": [
+      "csky"
+    ],
+    "ck810e": [
+      "csky"
+    ],
+    "ck810ef": [
+      "csky"
+    ],
+    "ck810eft": [
+      "csky"
+    ],
+    "ck810eftv": [
+      "csky"
+    ],
+    "ck810efv": [
+      "csky"
+    ],
+    "ck810et": [
+      "csky"
+    ],
+    "ck810etv": [
+      "csky"
+    ],
+    "ck810ev": [
+      "csky"
+    ],
+    "ck810f": [
+      "csky"
+    ],
+    "ck810ft": [
+      "csky"
+    ],
+    "ck810ftv": [
+      "csky"
+    ],
+    "ck810fv": [
+      "csky"
+    ],
+    "ck810t": [
+      "csky"
+    ],
+    "ck810tv": [
+      "csky"
+    ],
+    "ck810v": [
+      "csky"
+    ],
+    "ck860": [
+      "csky"
+    ],
+    "ck860f": [
+      "csky"
+    ],
+    "ck860fv": [
+      "csky"
+    ],
+    "ck860v": [
+      "csky"
+    ],
+    "e801": [
+      "csky"
+    ],
+    "e802": [
+      "csky"
+    ],
+    "e802t": [
+      "csky"
+    ],
+    "e803": [
+      "csky"
+    ],
+    "e803t": [
+      "csky"
+    ],
+    "e804d": [
+      "csky"
+    ],
+    "e804df": [
+      "csky"
+    ],
+    "e804dft": [
+      "csky"
+    ],
+    "e804dt": [
+      "csky"
+    ],
+    "e804f": [
+      "csky"
+    ],
+    "e804ft": [
+      "csky"
+    ],
+    "i805": [
+      "csky"
+    ],
+    "i805f": [
+      "csky"
+    ],
+    "r807": [
+      "csky"
+    ],
+    "r807f": [
+      "csky"
+    ],
+    "s802": [
+      "csky"
+    ],
+    "s802t": [
+      "csky"
+    ],
+    "s803": [
+      "csky"
+    ],
+    "s803t": [
+      "csky"
+    ],
+    "hexagonv5": [
+      "hexagon"
+    ],
+    "hexagonv55": [
+      "hexagon"
+    ],
+    "hexagonv60": [
+      "hexagon"
+    ],
+    "hexagonv62": [
+      "hexagon"
+    ],
+    "hexagonv65": [
+      "hexagon"
+    ],
+    "hexagonv66": [
+      "hexagon"
+    ],
+    "hexagonv67": [
+      "hexagon"
+    ],
+    "hexagonv67t": [
+      "hexagon"
+    ],
+    "hexagonv68": [
+      "hexagon"
+    ],
+    "hexagonv69": [
+      "hexagon"
+    ],
+    "hexagonv71": [
+      "hexagon"
+    ],
+    "hexagonv71t": [
+      "hexagon"
+    ],
+    "hexagonv73": [
+      "hexagon"
+    ],
+    "alderlake": [
+      "x86",
+      "x86_64"
+    ],
+    "amdfam10": [
+      "x86",
+      "x86_64"
+    ],
+    "arrowlake": [
+      "x86",
+      "x86_64"
+    ],
+    "arrowlake-s": [
+      "x86",
+      "x86_64"
+    ],
+    "arrowlake_s": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon-4": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon-fx": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon-mp": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon-tbird": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon-xp": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon64": [
+      "x86",
+      "x86_64"
+    ],
+    "athlon64-sse3": [
+      "x86",
+      "x86_64"
+    ],
+    "atom": [
+      "x86",
+      "x86_64"
+    ],
+    "atom_sse4_2": [
+      "x86",
+      "x86_64"
+    ],
+    "atom_sse4_2_movbe": [
+      "x86",
+      "x86_64"
+    ],
+    "barcelona": [
+      "x86",
+      "x86_64"
+    ],
+    "bdver1": [
+      "x86",
+      "x86_64"
+    ],
+    "bdver2": [
+      "x86",
+      "x86_64"
+    ],
+    "bdver3": [
+      "x86",
+      "x86_64"
+    ],
+    "bdver4": [
+      "x86",
+      "x86_64"
+    ],
+    "bonnell": [
+      "x86",
+      "x86_64"
+    ],
+    "broadwell": [
+      "x86",
+      "x86_64"
+    ],
+    "btver1": [
+      "x86",
+      "x86_64"
+    ],
+    "btver2": [
+      "x86",
+      "x86_64"
+    ],
+    "c3": [
+      "x86",
+      "x86_64"
+    ],
+    "c3-2": [
+      "x86",
+      "x86_64"
+    ],
+    "cannonlake": [
+      "x86",
+      "x86_64"
+    ],
+    "cascadelake": [
+      "x86",
+      "x86_64"
+    ],
+    "clearwaterforest": [
+      "x86",
+      "x86_64"
+    ],
+    "cooperlake": [
+      "x86",
+      "x86_64"
+    ],
+    "core-avx-i": [
+      "x86",
+      "x86_64"
+    ],
+    "core-avx2": [
+      "x86",
+      "x86_64"
+    ],
+    "core2": [
+      "x86",
+      "x86_64"
+    ],
+    "core_2_duo_sse4_1": [
+      "x86",
+      "x86_64"
+    ],
+    "core_2_duo_ssse3": [
+      "x86",
+      "x86_64"
+    ],
+    "core_2nd_gen_avx": [
+      "x86",
+      "x86_64"
+    ],
+    "core_3rd_gen_avx": [
+      "x86",
+      "x86_64"
+    ],
+    "core_4th_gen_avx": [
+      "x86",
+      "x86_64"
+    ],
+    "core_4th_gen_avx_tsx": [
+      "x86",
+      "x86_64"
+    ],
+    "core_5th_gen_avx": [
+      "x86",
+      "x86_64"
+    ],
+    "core_5th_gen_avx_tsx": [
+      "x86",
+      "x86_64"
+    ],
+    "core_aes_pclmulqdq": [
+      "x86",
+      "x86_64"
+    ],
+    "core_i7_sse4_2": [
+      "x86",
+      "x86_64"
+    ],
+    "corei7": [
+      "x86",
+      "x86_64"
+    ],
+    "corei7-avx": [
+      "x86",
+      "x86_64"
+    ],
+    "emeraldrapids": [
+      "x86",
+      "x86_64"
+    ],
+    "geode": [
+      "x86",
+      "x86_64"
+    ],
+    "goldmont": [
+      "x86",
+      "x86_64"
+    ],
+    "goldmont-plus": [
+      "x86",
+      "x86_64"
+    ],
+    "goldmont_plus": [
+      "x86",
+      "x86_64"
+    ],
+    "gracemont": [
+      "x86",
+      "x86_64"
+    ],
+    "grandridge": [
+      "x86",
+      "x86_64"
+    ],
+    "graniterapids": [
+      "x86",
+      "x86_64"
+    ],
+    "graniterapids-d": [
+      "x86",
+      "x86_64"
+    ],
+    "graniterapids_d": [
+      "x86",
+      "x86_64"
+    ],
+    "haswell": [
+      "x86",
+      "x86_64"
+    ],
+    "i386": [
+      "x86",
+      "x86_64"
+    ],
+    "i486": [
+      "x86",
+      "x86_64"
+    ],
+    "i586": [
+      "x86",
+      "x86_64"
+    ],
+    "i686": [
+      "x86",
+      "x86_64"
+    ],
+    "icelake-client": [
+      "x86",
+      "x86_64"
+    ],
+    "icelake-server": [
+      "x86",
+      "x86_64"
+    ],
+    "icelake_client": [
+      "x86",
+      "x86_64"
+    ],
+    "icelake_server": [
+      "x86",
+      "x86_64"
+    ],
+    "ivybridge": [
+      "x86",
+      "x86_64"
+    ],
+    "k6": [
+      "x86",
+      "x86_64"
+    ],
+    "k6-2": [
+      "x86",
+      "x86_64"
+    ],
+    "k6-3": [
+      "x86",
+      "x86_64"
+    ],
+    "k8": [
+      "x86",
+      "x86_64"
+    ],
+    "k8-sse3": [
+      "x86",
+      "x86_64"
+    ],
+    "knl": [
+      "x86",
+      "x86_64"
+    ],
+    "knm": [
+      "x86",
+      "x86_64"
+    ],
+    "lakemont": [
+      "x86",
+      "x86_64"
+    ],
+    "lunarlake": [
+      "x86",
+      "x86_64"
+    ],
+    "meteorlake": [
+      "x86",
+      "x86_64"
+    ],
+    "mic_avx512": [
+      "x86",
+      "x86_64"
+    ],
+    "nehalem": [
+      "x86",
+      "x86_64"
+    ],
+    "nocona": [
+      "x86",
+      "x86_64"
+    ],
+    "opteron": [
+      "x86",
+      "x86_64"
+    ],
+    "opteron-sse3": [
+      "x86",
+      "x86_64"
+    ],
+    "pantherlake": [
+      "x86",
+      "x86_64"
+    ],
+    "penryn": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium-m": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium-mmx": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium2": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium3": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium3m": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium4": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium4m": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_4": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_4_sse3": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_ii": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_iii": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_iii_no_xmm_regs": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_m": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_mmx": [
+      "x86",
+      "x86_64"
+    ],
+    "pentium_pro": [
+      "x86",
+      "x86_64"
+    ],
+    "pentiumpro": [
+      "x86",
+      "x86_64"
+    ],
+    "prescott": [
+      "x86",
+      "x86_64"
+    ],
+    "raptorlake": [
+      "x86",
+      "x86_64"
+    ],
+    "rocketlake": [
+      "x86",
+      "x86_64"
+    ],
+    "sandybridge": [
+      "x86",
+      "x86_64"
+    ],
+    "sapphirerapids": [
+      "x86",
+      "x86_64"
+    ],
+    "sierraforest": [
+      "x86",
+      "x86_64"
+    ],
+    "silvermont": [
+      "x86",
+      "x86_64"
+    ],
+    "skx": [
+      "x86",
+      "x86_64"
+    ],
+    "skylake": [
+      "x86",
+      "x86_64"
+    ],
+    "skylake-avx512": [
+      "x86",
+      "x86_64"
+    ],
+    "skylake_avx512": [
+      "x86",
+      "x86_64"
+    ],
+    "slm": [
+      "x86",
+      "x86_64"
+    ],
+    "tigerlake": [
+      "x86",
+      "x86_64"
+    ],
+    "tremont": [
+      "x86",
+      "x86_64"
+    ],
+    "westmere": [
+      "x86",
+      "x86_64"
+    ],
+    "winchip-c6": [
+      "x86",
+      "x86_64"
+    ],
+    "winchip2": [
+      "x86",
+      "x86_64"
+    ],
+    "x86-64": [
+      "x86",
+      "x86_64"
+    ],
+    "x86-64-v2": [
+      "x86",
+      "x86_64"
+    ],
+    "x86-64-v3": [
+      "x86",
+      "x86_64"
+    ],
+    "x86-64-v4": [
+      "x86",
+      "x86_64"
+    ],
+    "yonah": [
+      "x86",
+      "x86_64"
+    ],
+    "znver1": [
+      "x86",
+      "x86_64"
+    ],
+    "znver2": [
+      "x86",
+      "x86_64"
+    ],
+    "znver3": [
+      "x86",
+      "x86_64"
+    ],
+    "znver4": [
+      "x86",
+      "x86_64"
+    ],
+    "znver5": [
+      "x86",
+      "x86_64"
+    ],
+    "generic-la32": [
+      "loongarch64"
+    ],
+    "generic-la64": [
+      "loongarch64"
+    ],
+    "la464": [
+      "loongarch64"
+    ],
+    "la664": [
+      "loongarch64"
+    ],
+    "loongarch64": [
+      "loongarch64"
+    ],
+    "M68000": [
+      "m68k"
+    ],
+    "M68010": [
+      "m68k"
+    ],
+    "M68020": [
+      "m68k"
+    ],
+    "M68030": [
+      "m68k"
+    ],
+    "M68040": [
+      "m68k"
+    ],
+    "M68060": [
+      "m68k"
+    ],
+    "mips1": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips2": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips3": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips32": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips32r2": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips32r3": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips32r5": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips32r6": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips4": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips5": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips64": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips64r2": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips64r3": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips64r5": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "mips64r6": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "octeon": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "octeon+": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "p5600": [
+      "mips",
+      "mips32r6",
+      "mips64",
+      "mips64r6"
+    ],
+    "msp430": [
+      "msp430"
+    ],
+    "msp430x": [
+      "msp430"
+    ],
+    "sm_20": [
+      "nvptx64"
+    ],
+    "sm_21": [
+      "nvptx64"
+    ],
+    "sm_30": [
+      "nvptx64"
+    ],
+    "sm_32": [
+      "nvptx64"
+    ],
+    "sm_35": [
+      "nvptx64"
+    ],
+    "sm_37": [
+      "nvptx64"
+    ],
+    "sm_50": [
+      "nvptx64"
+    ],
+    "sm_52": [
+      "nvptx64"
+    ],
+    "sm_53": [
+      "nvptx64"
+    ],
+    "sm_60": [
+      "nvptx64"
+    ],
+    "sm_61": [
+      "nvptx64"
+    ],
+    "sm_62": [
+      "nvptx64"
+    ],
+    "sm_70": [
+      "nvptx64"
+    ],
+    "sm_72": [
+      "nvptx64"
+    ],
+    "sm_75": [
+      "nvptx64"
+    ],
+    "sm_80": [
+      "nvptx64"
+    ],
+    "sm_86": [
+      "nvptx64"
+    ],
+    "sm_87": [
+      "nvptx64"
+    ],
+    "sm_89": [
+      "nvptx64"
+    ],
+    "sm_90": [
+      "nvptx64"
+    ],
+    "sm_90a": [
+      "nvptx64"
+    ],
+    "440": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "450": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "601": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "602": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "603": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "603e": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "603ev": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "604": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "604e": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "620": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "7400": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "7450": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "750": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "970": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "a2": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "e500": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "e500mc": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "e5500": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "future": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "g3": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "g4": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "g4+": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "g5": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "ppc": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "ppc32": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "ppc64": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "ppc64le": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr10": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr11": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr3": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr4": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr5": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr5x": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr6": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr6x": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr7": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr8": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "pwr9": [
+      "powerpc",
+      "powerpc64"
+    ],
+    "generic-rv32": [
+      "riscv32",
+      "riscv64"
+    ],
+    "generic-rv64": [
+      "riscv32",
+      "riscv64"
+    ],
+    "rocket": [
+      "riscv32",
+      "riscv64"
+    ],
+    "rocket-rv32": [
+      "riscv32",
+      "riscv64"
+    ],
+    "rocket-rv64": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-7-series": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-e20": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-e21": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-e24": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-e31": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-e34": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-e76": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-p450": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-p670": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-s21": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-s51": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-s54": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-s76": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-u54": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-u74": [
+      "riscv32",
+      "riscv64"
+    ],
+    "sifive-x280": [
+      "riscv32",
+      "riscv64"
+    ],
+    "spacemit-x60": [
+      "riscv32",
+      "riscv64"
+    ],
+    "syntacore-scr1-base": [
+      "riscv32",
+      "riscv64"
+    ],
+    "syntacore-scr1-max": [
+      "riscv32",
+      "riscv64"
+    ],
+    "syntacore-scr3-rv32": [
+      "riscv32",
+      "riscv64"
+    ],
+    "syntacore-scr3-rv64": [
+      "riscv32",
+      "riscv64"
+    ],
+    "veyron-v1": [
+      "riscv32",
+      "riscv64"
+    ],
+    "xiangshan-nanhu": [
+      "riscv32",
+      "riscv64"
+    ],
+    "arch10": [
+      "s390x"
+    ],
+    "arch11": [
+      "s390x"
+    ],
+    "arch12": [
+      "s390x"
+    ],
+    "arch13": [
+      "s390x"
+    ],
+    "arch14": [
+      "s390x"
+    ],
+    "arch8": [
+      "s390x"
+    ],
+    "arch9": [
+      "s390x"
+    ],
+    "z10": [
+      "s390x"
+    ],
+    "z13": [
+      "s390x"
+    ],
+    "z14": [
+      "s390x"
+    ],
+    "z15": [
+      "s390x"
+    ],
+    "z16": [
+      "s390x"
+    ],
+    "z196": [
+      "s390x"
+    ],
+    "zEC12": [
+      "s390x"
+    ],
+    "at697e": [
+      "sparc",
+      "sparc64"
+    ],
+    "at697f": [
+      "sparc",
+      "sparc64"
+    ],
+    "f934": [
+      "sparc",
+      "sparc64"
+    ],
+    "gr712rc": [
+      "sparc",
+      "sparc64"
+    ],
+    "gr740": [
+      "sparc",
+      "sparc64"
+    ],
+    "hypersparc": [
+      "sparc",
+      "sparc64"
+    ],
+    "leon2": [
+      "sparc",
+      "sparc64"
+    ],
+    "leon3": [
+      "sparc",
+      "sparc64"
+    ],
+    "leon4": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2080": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2085": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2100": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2150": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2155": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2450": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2455": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2480": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2485": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2x5x": [
+      "sparc",
+      "sparc64"
+    ],
+    "ma2x8x": [
+      "sparc",
+      "sparc64"
+    ],
+    "myriad2": [
+      "sparc",
+      "sparc64"
+    ],
+    "myriad2.1": [
+      "sparc",
+      "sparc64"
+    ],
+    "myriad2.2": [
+      "sparc",
+      "sparc64"
+    ],
+    "myriad2.3": [
+      "sparc",
+      "sparc64"
+    ],
+    "niagara": [
+      "sparc",
+      "sparc64"
+    ],
+    "niagara2": [
+      "sparc",
+      "sparc64"
+    ],
+    "niagara3": [
+      "sparc",
+      "sparc64"
+    ],
+    "niagara4": [
+      "sparc",
+      "sparc64"
+    ],
+    "sparclet": [
+      "sparc",
+      "sparc64"
+    ],
+    "sparclite": [
+      "sparc",
+      "sparc64"
+    ],
+    "sparclite86x": [
+      "sparc",
+      "sparc64"
+    ],
+    "supersparc": [
+      "sparc",
+      "sparc64"
+    ],
+    "tsc701": [
+      "sparc",
+      "sparc64"
+    ],
+    "ultrasparc": [
+      "sparc",
+      "sparc64"
+    ],
+    "ultrasparc3": [
+      "sparc",
+      "sparc64"
+    ],
+    "ut699": [
+      "sparc",
+      "sparc64"
+    ],
+    "v7": [
+      "sparc",
+      "sparc64"
+    ],
+    "v8": [
+      "sparc",
+      "sparc64"
+    ],
+    "v9": [
+      "sparc",
+      "sparc64"
+    ],
+    "bleeding-edge": [
+      "wasm32",
+      "wasm64"
+    ],
+    "mvp": [
+      "wasm32",
+      "wasm64"
+    ],
+    "native": [
+      "x86_64"
+    ]
+  }
+}

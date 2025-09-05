@@ -1,34 +1,42 @@
-use autotools_parser::ast::node::DisplayNode;
+use super::{DisplayNode, M4Argument, M4Macro};
 use itertools::Itertools;
-use std::collections::HashMap;
+use slab::Slab;
+use std::collections::HashSet;
 
 use super::{
-    AcWord, AstVisitor, AutoconfPool, Condition, GuardBodyPair, MayM4, Node, NodeId, NodeInfo,
-    Operator, Parameter, ParameterSubstitution, PatternBodyPair, Word, WordFragment,
+    AcWord, Analyzer, AstVisitor, AutoconfPool, Condition, GuardBodyPair, MayM4, Node, NodeId,
+    NodeInfo, Operator, Parameter, ParameterSubstitution, PatternBodyPair, Redirect, Word,
+    WordFragment,
 };
 use crate::analyzer::{as_literal, as_shell, as_var};
 
-/// unique Id to a scoped set of commands (NodeIds).
-/// it is needed for identifying which guards are applied to a scope.
-pub type ScopeId = usize;
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Guard {
-    N(bool, Atom), // false if negated
+pub(super) enum Guard {
+    N(bool, Atom), // true if negated
     And(Vec<Self>),
     Or(Vec<Self>),
 }
 
-impl Guard {
-    fn confirmed(atom: Atom) -> Guard {
-        Guard::N(true, atom)
-    }
+pub(super) type BlockId = usize;
 
-    fn negated(atom: Atom) -> Guard {
+#[derive(Debug, Clone)]
+pub(super) struct Block {
+    pub block_id: BlockId,
+    pub parent: NodeId,
+    pub children: Vec<NodeId>,
+    pub guards: Vec<Guard>,
+}
+
+impl Guard {
+    pub(crate) fn confirmed(atom: Atom) -> Guard {
         Guard::N(false, atom)
     }
 
-    fn negate_whole(self) -> Guard {
+    pub(crate) fn negated(atom: Atom) -> Guard {
+        Guard::N(true, atom)
+    }
+
+    pub(crate) fn negate_whole(self) -> Guard {
         match self {
             Guard::N(b, atom) => Guard::N(!b, atom),
             Guard::And(guards) => Guard::Or(guards.into_iter().map(|g| g.negate_whole()).collect()),
@@ -36,7 +44,7 @@ impl Guard {
         }
     }
 
-    fn and(mut guards: Vec<Guard>) -> Guard {
+    pub(crate) fn make_and(mut guards: Vec<Guard>) -> Guard {
         if guards.len() == 1 {
             guards.pop().unwrap()
         } else {
@@ -44,21 +52,38 @@ impl Guard {
         }
     }
 
-    fn or(mut guards: Vec<Guard>) -> Guard {
+    pub(crate) fn make_or(mut guards: Vec<Guard>) -> Guard {
         if guards.len() == 1 {
             guards.pop().unwrap()
         } else {
             Guard::Or(guards)
         }
     }
+
+    pub(crate) fn has_variable(&self, var_name: &str) -> bool {
+        use Atom::*;
+        use Guard::*;
+        match self {
+            N(_, atom) => match atom {
+                Var(name, _) => name == var_name,
+                Arg(name, _) => name == var_name,
+                _ => false,
+            },
+            And(guards) | Or(guards) => guards.iter().any(|guard| guard.has_variable(var_name)),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Atom {
-    Arg(ArgCond),
-    Arch(String),         // glob string
-    OsAbi(String),        // glob string
-    CpuExtension(String), // e.g. sse, neon
+    ArchGlob(String),         // glob string
+    OsAbiGlob(String),        // glob string
+    Arch(String),
+    Cpu(String),
+    Os(String),
+    Env(String),
+    Abi(String),
+    Ext(String), // e.g. sse, neon
     BigEndian,
     HasProgram(String),
     HasLibrary(String),
@@ -68,14 +93,8 @@ pub enum Atom {
     PathExists(Vec<VoL>, bool),
     Compiler(CompilerCheck),
     Var(String, VarCond),
+    Arg(String, VarCond),
     Cmd(NodeId),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ArgCond {
-    Empty,
-    Bool(bool),
-    Arbitrary,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,66 +151,86 @@ pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp:
     Some(lhs.len().cmp(&rhs.len()))
 }
 
-#[derive(Debug)]
-pub(super) struct GuardInfo {
-    /// node id -> scope id
-    pub node_to_scope: HashMap<NodeId, ScopeId>,
-    /// scope id -> scope
-    pub scopes: Vec<Scope>,
-}
-
-#[derive(Debug)]
-pub(super) struct Scope {
-    pub node_ids: Vec<NodeId>,
-    pub owner: NodeId,
-    pub guards: Vec<Guard>,
-}
-
 /// Visitor to find case statements branching given variables.
 #[derive(Debug)]
 pub(super) struct GuardAnalyzer<'a> {
-    pool: &'a AutoconfPool<NodeInfo>,
+    pool: &'a mut AutoconfPool<NodeInfo>,
     cursor: Option<NodeId>,
-    stack: Vec<Guard>,
-    info: GuardInfo,
+    range: Option<Vec<(usize, usize)>>,
+    guard_stack: Vec<Guard>,
+    blocks: Slab<Block>,
+}
+
+impl Analyzer {
+    pub(super) fn blocks_guarded_by_variable(&self, var_name: &str) -> Vec<Block> {
+        self.blocks
+            .iter()
+            .filter_map(|(_, block)| {
+                block
+                    .guards
+                    .last()
+                    .is_some_and(|guard| guard.has_variable(var_name))
+                    .then_some(block.clone())
+            })
+            .collect()
+    }
+
+    pub(super) fn parent_nodes_of_blocks_guarded_by_variable(&self, var_name: &str) -> Vec<NodeId> {
+        let mut children = HashSet::<NodeId>::new();
+        let mut ret = Vec::new();
+        for block in self.blocks_guarded_by_variable(var_name) {
+            children.extend(block.children.iter());
+            if !children.contains(&block.parent) {
+                if !ret.contains(&block.parent) {
+                    ret.push(block.parent)
+                }
+            }
+        }
+        ret
+    }
 }
 
 impl<'a> GuardAnalyzer<'a> {
-    /// Create a new BranchFinder for the given variable names.
-    pub fn analyze_guards(pool: &'a AutoconfPool<NodeInfo>, top_ids: &[NodeId]) -> GuardInfo {
+    pub fn analyze_blocks(pool: &'a mut AutoconfPool<NodeInfo>, top_ids: &[NodeId]) -> Slab<Block> {
         let mut s = Self {
             pool,
             cursor: None,
-            stack: Vec::new(),
-            info: GuardInfo {
-                node_to_scope: HashMap::new(),
-                scopes: Vec::new(),
-            },
+            range: None,
+            guard_stack: Vec::new(),
+            blocks: Slab::new(),
         };
         for &id in top_ids {
             s.visit_top(id);
         }
-        s.info
+        s.blocks
     }
 
-    fn add_scope(&mut self, node_ids: &[NodeId]) {
-        if node_ids.is_empty() {
-            return
-        }
-        let new_scope_id = self.info.scopes.len();
-        for node_id in node_ids {
-            self.info.node_to_scope.insert(*node_id, new_scope_id);
-        }
-        self.info.scopes.push(Scope {
-            node_ids: node_ids.to_vec(),
-            owner: self.cursor.unwrap(),
-            guards: self.stack.clone(),
+    fn record_block(&mut self, node_ids: &[NodeId]) {
+        let parent = self.cursor.unwrap();
+        let new_block_id = self.blocks.insert(Block {
+            block_id: 0,
+            parent,
+            children: node_ids.to_vec(),
+            guards: self.guard_stack.clone(),
         });
+        self.blocks[new_block_id].block_id = new_block_id;
+
+        // record parent-child relation ships
+        for &id in node_ids {
+            assert!(self.get_node(parent).range.len() > 0);
+            self.pool.nodes[id].info.parent = Some((parent, new_block_id));
+
+            if self.get_node(id).range.is_empty() {
+                // propagate ranges information if child doesn't know its range.
+                self.pool.nodes[id].range = self.get_node(parent).range.clone();
+            }
+        }
+        self.pool.nodes[parent].info.child_blocks.push(new_block_id);
     }
 
     fn negate_last_guard(&mut self) {
-        let guard = self.stack.pop().unwrap();
-        self.stack.push(guard.negate_whole());
+        let guard = self.guard_stack.pop().unwrap();
+        self.guard_stack.push(guard.negate_whole());
     }
 
     fn equality(&self, a: &AcWord, b: &AcWord) -> Option<Atom> {
@@ -230,33 +269,25 @@ impl<'a> GuardAnalyzer<'a> {
             }
             Word::Single(MayM4::Shell(w)) => {
                 if let WordFragment::Subst(subst) = w {
-                    if let ParameterSubstitution::Alternative(
-                        _,
-                        Parameter::Var(name),
-                        Some(alter),
-                    ) = &**subst
-                    {
-                        if alter == b {
+                    match &**subst {
+                        ParameterSubstitution::Alternative(
+                            _,
+                            Parameter::Var(name),
+                            Some(alter),
+                        ) if alter == b => {
                             return Some(Atom::Var(name.to_owned(), VarCond::Set));
                         }
-                    } else if let ParameterSubstitution::Default(
-                        _,
-                        Parameter::Var(name),
-                        Some(default),
-                    ) = &**subst
-                    {
-                        if default == b {
+                        ParameterSubstitution::Default(_, Parameter::Var(name), Some(default))
+                            if default == b =>
+                        {
                             return Some(Atom::Var(name.to_owned(), VarCond::Unset));
                         }
-                    } else if let ParameterSubstitution::Assign(
-                        _,
-                        Parameter::Var(name),
-                        Some(default),
-                    ) = &**subst
-                    {
-                        if default == b {
+                        ParameterSubstitution::Assign(_, Parameter::Var(name), Some(default))
+                            if default == b =>
+                        {
                             return Some(Atom::Var(name.to_owned(), VarCond::Unset));
                         }
+                        _ => {}
                     }
                 } else if let Some(b) = as_shell(b) {
                     if let WordFragment::DoubleQuoted(frags) = w {
@@ -297,6 +328,7 @@ impl<'a> GuardAnalyzer<'a> {
                 self.condition_to_guard(c1),
                 self.condition_to_guard(c2),
             ]),
+            Condition::Not(cond) => self.condition_to_guard(cond).negate_whole(),
             Condition::Eval(cmd) | Condition::ReturnZero(cmd) => Guard::N(true, Atom::Cmd(**cmd)),
             Condition::Cond(op) => match op {
                 Operator::Eq(w1, w2) => {
@@ -431,7 +463,14 @@ impl<'a> GuardAnalyzer<'a> {
             } else {
                 word
             };
-            if let Some(var) = as_var(word) {
+            if let WordFragment::Subst(subst) = &word {
+                match &**subst {
+                    ParameterSubstitution::Command(cmds) if cmds.len() == 1 => {
+                        Some(Guard::confirmed(Atom::Cmd(cmds.first().unwrap().clone())))
+                    }
+                    _ => None,
+                }
+            } else if let Some(var) = as_var(word) {
                 match &pattern.0 {
                     Word::Empty => {
                         Some(Guard::confirmed(Atom::Var(var.to_owned(), VarCond::Empty)))
@@ -439,14 +478,20 @@ impl<'a> GuardAnalyzer<'a> {
                     Word::Single(MayM4::Shell(pat)) => {
                         if let Some(lit) = as_literal(pat) {
                             if var == "host_cpu" {
-                                Some(Guard::confirmed(Atom::Arch(lit.to_owned())))
+                                Some(Guard::confirmed(Atom::ArchGlob(lit.to_owned())))
                             } else if var == "host_os" {
-                                Some(Guard::confirmed(Atom::OsAbi(lit.to_owned())))
+                                Some(Guard::confirmed(Atom::OsAbiGlob(lit.to_owned())))
                             } else {
-                                Some(Guard::confirmed(Atom::Var(
-                                    var.to_owned(),
-                                    VarCond::Eq(VoL::Lit(lit.to_owned())),
-                                )))
+                                let cond = if lit == "yes" {
+                                    VarCond::Yes
+                                } else if lit == "no" {
+                                    VarCond::No
+                                } else if lit.is_empty() {
+                                    VarCond::Empty
+                                } else {
+                                    VarCond::Eq(VoL::Lit(lit.to_owned()))
+                                };
+                                Some(Guard::confirmed(Atom::Var(var.to_owned(), cond)))
                             }
                         } else if let &WordFragment::Star = pat {
                             Some(Guard::confirmed(Atom::Var(
@@ -468,13 +513,13 @@ impl<'a> GuardAnalyzer<'a> {
                                     .collect();
                             if arch != "*" && os != "*" {
                                 Some(Guard::And(vec![
-                                    Guard::confirmed(Atom::Arch(arch)),
-                                    Guard::confirmed(Atom::OsAbi(os)),
+                                    Guard::confirmed(Atom::ArchGlob(arch)),
+                                    Guard::confirmed(Atom::OsAbiGlob(os)),
                                 ]))
                             } else if arch != "*" {
-                                Some(Guard::confirmed(Atom::Arch(arch)))
+                                Some(Guard::confirmed(Atom::ArchGlob(arch)))
                             } else if os != "*" {
-                                Some(Guard::confirmed(Atom::OsAbi(os)))
+                                Some(Guard::confirmed(Atom::OsAbiGlob(os)))
                             } else {
                                 Some(Guard::confirmed(Atom::Var(
                                     var.to_owned(),
@@ -482,7 +527,7 @@ impl<'a> GuardAnalyzer<'a> {
                                 )))
                             }
                         } else if var == "host_cpu" {
-                            Some(Guard::confirmed(Atom::Arch(pattern_string)))
+                            Some(Guard::confirmed(Atom::ArchGlob(pattern_string)))
                         } else if pattern_string.contains("*")
                             || pattern_string.contains("[")
                             || pattern_string.contains("]")
@@ -507,7 +552,7 @@ impl<'a> GuardAnalyzer<'a> {
                     .filter_map(as_var)
                     .map(|s| s.to_owned())
                     .collect();
-                let guard = Guard::or(
+                let guard = Guard::make_or(
                     vars.into_iter()
                         .map(|var| {
                             Guard::confirmed(Atom::Var(var, VarCond::Match(pattern_string.clone())))
@@ -546,33 +591,54 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
 
     fn visit_condition(&mut self, cond: &Condition<AcWord>) {
         let guard = self.condition_to_guard(cond);
-        self.stack.push(guard);
+        self.guard_stack.push(guard);
+        if let Condition::Eval(cmd) | Condition::ReturnZero(cmd) = cond {
+            self.record_block(&[**cmd]);
+        }
+        self.walk_condition(cond);
     }
 
+    fn visit_parameter_substitution(&mut self, subs: &ParameterSubstitution<AcWord>) {
+        use autotools_parser::ast::ParameterSubstitution::*;
+        if let Command(cmds) = subs {
+            self.record_block(cmds);
+        }
+        self.walk_parameter_substitution(subs);
+    }
+
+    // Note that in this implementation, this method is not called by visit_if.
+    // Only visit_while and visit_until will call it,
     fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
         self.visit_condition(&pair.condition);
-        self.add_scope(&pair.body);
+        self.record_block(&pair.body);
         for c in &pair.body {
             self.visit_node(*c);
         }
-        self.stack.pop();
+        self.guard_stack.pop();
+    }
+
+    fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
+        self.record_block(body);
+        self.walk_for(var, words, body);
     }
 
     fn visit_if(&mut self, conditionals: &[GuardBodyPair<AcWord>], else_branch: &[NodeId]) {
-        let saved_stack = self.stack.clone();
+        let saved_stack = self.guard_stack.clone();
         for pair in conditionals.iter() {
             self.visit_condition(&pair.condition);
-            self.add_scope(&pair.body);
+            self.record_block(&pair.body);
             for c in &pair.body {
                 self.visit_node(*c);
             }
             self.negate_last_guard();
         }
-        self.add_scope(&else_branch);
+        if !else_branch.is_empty() {
+            self.record_block(&else_branch);
+        }
         for c in else_branch {
             self.visit_node(*c);
         }
-        self.stack = saved_stack;
+        self.guard_stack = saved_stack;
     }
 
     fn visit_and_or(&mut self, negated: bool, condition: &Condition<AcWord>, cmd: NodeId) {
@@ -580,28 +646,58 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
         if negated {
             self.negate_last_guard();
         }
-        self.add_scope(&[cmd]);
+        self.record_block(&[cmd]);
         self.walk_node(cmd);
-        self.stack.pop();
+        self.guard_stack.pop();
+    }
+
+    fn visit_pipe(&mut self, bang: bool, cmds: &[NodeId]) {
+        self.record_block(cmds);
+        self.walk_pipe(bang, cmds);
+    }
+
+    fn visit_redirect(&mut self, cmd: NodeId, redirects: &[Redirect<AcWord>]) {
+        self.record_block(&[cmd]);
+        self.walk_redirect(cmd, redirects);
     }
 
     fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
-        let saved_stack = self.stack.clone();
+        let saved_stack = self.guard_stack.clone();
         for arm in arms {
-            let guard = Guard::or(
+            let guard = Guard::make_or(
                 arm.patterns
                     .iter()
-                    .map(|pattern| self.pattern_to_guard(word, pattern).expect("unsupported syntax"))
+                    .map(|pattern| {
+                        self.pattern_to_guard(word, pattern)
+                            .expect("unsupported syntax")
+                    })
                     .collect(),
             );
-            self.stack.push(guard);
-            self.add_scope(&arm.body);
+            self.guard_stack.push(guard);
+            self.record_block(&arm.body);
             for c in &arm.body {
                 self.visit_node(*c);
             }
             self.negate_last_guard();
         }
-        self.stack = saved_stack;
+        self.guard_stack = saved_stack;
+    }
+
+    fn visit_m4_macro(&mut self, m4_macro: &M4Macro) {
+        for arg in m4_macro.args.iter() {
+            match arg {
+                M4Argument::Condition(cond) => {
+                    self.visit_condition(cond);
+                    self.record_block(&[]);
+                    self.guard_stack.pop();
+                }
+                M4Argument::Commands(cmds) => {
+                    self.record_block(cmds);
+                }
+                _ => {}
+            }
+        }
+        self.walk_m4_macro(m4_macro);
     }
 }
 

@@ -4,7 +4,8 @@ use crate::analyzer::{as_literal, as_shell, as_var};
 
 use super::{AcWord, Analyzer, AstVisitor, MayM4, Node, NodeId, Parameter, PatternBodyPair, Word};
 use autotools_parser::ast::{
-    minimal::{Condition, Operator, WordFragment},
+    condition::{Condition, Operator},
+    minimal::WordFragment,
     Redirect,
 };
 

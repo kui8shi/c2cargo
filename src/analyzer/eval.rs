@@ -11,7 +11,7 @@ use std::{
     collections::{HashMap, HashSet},
 };
 
-// Saving the result of backward traversal
+/// Saving the result of backward traversal
 #[derive(Debug, PartialEq, Eq)]
 struct Chain {
     // lit or var
@@ -37,25 +37,27 @@ impl Chain {
     }
 }
 
-// Saving how a dynamic identifier is constructed via eval statements.
+/// Saving how a dynamic identifier is constructed via eval statements.
 #[derive(Debug, PartialEq, Eq)]
-pub struct DynamicIdentifier {
-    // components of the dynamic variable reference
-    components: Vec<RValue>,
-    // variable to value map
-    map: HashMap<String, String>,
+pub(crate) struct DynamicIdentifier {
+    /// components of the dynamic variable reference
+    pub components: Vec<RValue>,
+    /// variable to value map
+    pub map: HashMap<String, String>,
+    /// The location where dynamic identifier is constructed.
+    pub ref_loc: Location,
 }
 
-// Represents the operation on the dictionary types
+/// Represents the operation on the dictionary types
 #[derive(Debug, PartialEq, Eq)]
-enum DictionaryOperation {
-    Set,
-    Get,
+pub(crate) enum DictionaryOperation {
+    Read,
+    Write,
 }
 
-// Saving the result of dictionary type inference.
+/// Saving the result of dictionary type inference.
 #[derive(Debug, PartialEq, Eq)]
-struct DictionaryAccess {
+pub(crate) struct DictionaryAccess {
     operation: DictionaryOperation,
     keys: HashMap<String, String>,
     name: String,
@@ -82,13 +84,27 @@ impl Analyzer {
             .map(|((r, loc), l)| (l.clone(), r.clone(), loc.clone()))
             .collect::<Vec<_>>();
         evals.sort_by_key(|(_, _, loc)| loc.clone());
-        for (i, (l, r, loc)) in evals.iter().enumerate() {
+        for (l, r, loc) in evals.iter() {
             self.resolve_eval(&l, &r, &loc);
         }
-        dbg!(&self.evals);
-        dbg!(&self.resolved_values);
-        dbg!(&self.dynamic_vars);
-        dbg!(self.infer_dictionary_types());
+        // Add def use chains caused by dynamic identifier
+        let mut def_use_edges = Vec::new();
+        for (name, dynamic) in self.dynamic_vars.iter() {
+            if let Some(def_locs) = self.var_definitions.get(name) {
+                for def_loc in def_locs {
+                    def_use_edges.push((def_loc.node_id, dynamic.ref_loc.node_id, name.to_owned()));
+                    self.var_dynamic_usages
+                        .entry(name.to_owned())
+                        .or_default()
+                        .push(dynamic.ref_loc.clone());
+                }
+            }
+        }
+        self.apply_def_use_edges(def_use_edges);
+        // dbg!(&self.evals);
+        // dbg!(&self.resolved_values);
+        // dbg!(&self.dynamic_vars);
+        // dbg!(self.infer_dictionary_types());
     }
 
     /// collect literals of a var
@@ -99,7 +115,7 @@ impl Analyzer {
 
     /// run type inference only for dictionary types based on the result of value set analysis.
     /// returns a map from location to accesses to variable as dictionary
-    fn infer_dictionary_types(&self) -> HashMap<Location, DictionaryAccess> {
+    pub(crate) fn infer_dictionary_types(&self) -> HashMap<Location, DictionaryAccess> {
         use DictionaryOperation::*;
         let mut ret = HashMap::new();
         let strip_underscore = |s: &str| -> String {
@@ -130,7 +146,7 @@ impl Analyzer {
                     ret.insert(
                         loc,
                         DictionaryAccess {
-                            operation: Set,
+                            operation: Read,
                             keys: keys.clone(),
                             name: name.clone(),
                             full_name: full_name.clone(),
@@ -144,7 +160,7 @@ impl Analyzer {
                     ret.insert(
                         loc,
                         DictionaryAccess {
-                            operation: Get,
+                            operation: Write,
                             keys: keys.clone(),
                             name: name.clone(),
                             full_name: full_name.clone(),
@@ -160,15 +176,24 @@ impl Analyzer {
     fn record_dynamic_identifier(&mut self, rvalues: Vec<RValue>, resolved: Vec<String>) {
         let name = resolved.concat();
         if self.var_definitions.contains_key(name.as_str()) {
+            let mut ref_loc = None; // FIXME: so dirty data flow.
             let components = rvalues.clone();
             let mut map = HashMap::new();
             for (r, v) in rvalues.into_iter().zip(resolved.iter()) {
-                if let RValue::Var(name, _) = r {
+                if let RValue::Var(name, loc) = r {
                     map.insert(name, v.to_owned());
+                    ref_loc.replace(loc);
                 }
             }
-            self.dynamic_vars
-                .insert(name, DynamicIdentifier { components, map });
+            let ref_loc = ref_loc.unwrap();
+            self.dynamic_vars.insert(
+                name,
+                DynamicIdentifier {
+                    components,
+                    map,
+                    ref_loc,
+                },
+            );
         }
     }
 
@@ -229,6 +254,11 @@ impl Analyzer {
 
     fn resolve_rvalue(&mut self, rvalue: &RValue, loc: &Location) -> HashSet<String> {
         let mut result = HashSet::new();
+        if let Some(lvalue) = rvalue.into() {
+            if let Some(resolved) = self.get_last_resolved_values(&lvalue, loc) {
+                return resolved;
+            }
+        }
         match rvalue {
             RValue::Lit(lit) => {
                 result.extend(
@@ -297,11 +327,6 @@ impl Analyzer {
                 }
             }
         }
-        // if let Some(lvalue) = rvalue.into() {
-        //     if let Some(resolved) = self.get_last_resolved_values(&lvalue, loc) {
-        //         result.extend(resolved.clone());
-        //     }
-        // }
         result
     }
 
