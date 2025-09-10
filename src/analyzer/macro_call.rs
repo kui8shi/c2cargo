@@ -1,12 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use super::{Analyzer, AstVisitor, M4Macro, Node, NodeId};
-use slab::Slab;
 
 /// Visitor to find case statements branching given variables.
 #[derive(Debug)]
-pub(super) struct MacroCallFinder<'a> {
-    nodes: &'a Slab<Node>,
+pub(super) struct MacroHandler<'a> {
+    analyzer: &'a mut Analyzer,
     cursor: Option<NodeId>,
     /// Collected case branches where the variable branches one of `var_names`.
     pub found: HashMap<String, Vec<(NodeId, M4Macro)>>,
@@ -14,23 +13,20 @@ pub(super) struct MacroCallFinder<'a> {
 
 impl Analyzer {
     /// Find case statements matching the given variables in the top-level commands.
-    pub fn find_macro_calls(&self) -> HashMap<String, Vec<(NodeId, M4Macro)>> {
-        MacroCallFinder::find_macro_calls(&self.pool.nodes, &self.top_ids)
+    pub fn find_macro_calls(&mut self) {
+        MacroHandler::handle_macro_calls(self)
     }
 }
 
-impl<'a> MacroCallFinder<'a> {
+impl<'a> MacroHandler<'a> {
     /// Create a new BranchFinder for the given variable names.
-    pub fn find_macro_calls(
-        nodes: &'a Slab<Node>,
-        top_ids: &[NodeId],
-    ) -> HashMap<String, Vec<(NodeId, M4Macro)>> {
+    pub fn handle_macro_calls(analyzer: &'a mut Analyzer) {
         let mut s = Self {
-            nodes,
+            analyzer,
             cursor: None,
             found: HashMap::new(),
         };
-        for &id in top_ids {
+        for id in s.analyzer.get_top_ids() {
             s.visit_top(id);
         }
         if let Some(v) = s.found.get("AX_PREFIX_CONFIG_H") {
@@ -38,13 +34,38 @@ impl<'a> MacroCallFinder<'a> {
                 // prefix CPP vars
             }
         }
-        s.found
+
+        s.analyzer.subst_vars = s
+            .found
+            .values()
+            .flatten()
+            .flat_map(|(id, m4_macro)| {
+                m4_macro
+                    .effects
+                    .as_ref()
+                    .and_then(|e| e.shell_vars.as_ref())
+                    .map(|vars| {
+                        vars.iter()
+                            .filter_map(|var| var.is_output().then_some(var.name.to_owned()))
+                    })
+                    .into_iter()
+                    .flatten()
+            })
+            .collect::<HashSet<String>>();
+
+        for subst_macro_name in ["AC_SUBST", "AM_SUBST_NOTMAKE"] {
+            for (id, _) in s.found.get(subst_macro_name).into_iter().flatten() {
+                s.analyzer.remove_node(*id);
+            }
+        }
+
+        s.analyzer.macro_calls = s.found
     }
 }
 
-impl<'a> AstVisitor for MacroCallFinder<'a> {
+impl<'a> AstVisitor for MacroHandler<'a> {
     fn get_node(&self, node_id: NodeId) -> &Node {
-        &self.nodes[node_id]
+        self.analyzer.get_node(node_id)
     }
 
     fn visit_top(&mut self, node_id: NodeId) {

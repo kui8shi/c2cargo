@@ -1,7 +1,7 @@
 use super::{
     guard::cmp_guards,
     type_inference::DataType,
-    variable::{LValue, Location, RValue},
+    variable::{Identifier, Location, ValueExpr},
     AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
 };
 use autotools_parser::ast::node::{AcWordFragment, NodePool};
@@ -15,21 +15,21 @@ use std::{
 #[derive(Debug, PartialEq, Eq)]
 struct Chain {
     // lit or var
-    name: LValue,
+    identifier: Identifier,
     // location
     loc: Location,
-    /// Set of resolved rvalues (as literals).
+    /// Set of resolved values (as literals).
     resolved: HashSet<String>,
-    /// Set of unresolved rvalues: var, or ref
-    /// if Option<_> is None, it means the rvalue is not resolvable.
-    unresolved: HashSet<RValue>,
+    /// Set of unresolved values: var, or ref
+    /// if Option<_> is None, it means the value is not resolvable.
+    unresolved: HashSet<ValueExpr>,
 }
 
 impl Chain {
     /// Creates a new chaining struct
-    pub fn new(name: LValue, loc: Location) -> Self {
+    pub fn new(identifier: Identifier, loc: Location) -> Self {
         Self {
-            name,
+            identifier,
             loc,
             resolved: HashSet::new(),
             unresolved: HashSet::new(),
@@ -37,14 +37,14 @@ impl Chain {
     }
 }
 
-/// Saving how a dynamic identifier is constructed via eval statements.
+/// Saving information how an identifier is divided via eval statements.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DynamicIdentifier {
-    /// components of the dynamic variable reference
-    pub components: Vec<RValue>,
+pub(crate) struct DividedIdentifier {
+    /// components of the divided identifier
+    pub components: Vec<ValueExpr>,
     /// variable to value map
     pub map: HashMap<String, String>,
-    /// The location where dynamic identifier is constructed.
+    /// The location where divided identifier is constructed.
     pub ref_loc: Location,
 }
 
@@ -89,28 +89,30 @@ impl Analyzer {
         }
         // Add def use chains caused by dynamic identifier
         let mut def_use_edges = Vec::new();
-        for (name, dynamic) in self.dynamic_vars.iter() {
+        for (name, divided) in self.divided_vars.iter() {
             if let Some(def_locs) = self.var_definitions.get(name) {
                 for def_loc in def_locs {
-                    def_use_edges.push((def_loc.node_id, dynamic.ref_loc.node_id, name.to_owned()));
-                    self.var_dynamic_usages
+                    def_use_edges.push((def_loc.node_id, divided.ref_loc.node_id, name.to_owned()));
+                    self.var_indirect_usages
                         .entry(name.to_owned())
                         .or_default()
-                        .push(dynamic.ref_loc.clone());
+                        .push(divided.ref_loc.clone());
                 }
             }
         }
         self.apply_def_use_edges(def_use_edges);
-        // dbg!(&self.evals);
-        // dbg!(&self.resolved_values);
-        // dbg!(&self.dynamic_vars);
+        dbg!(&self.evals);
+        dbg!(&self.resolved_values);
+        dbg!(&self.divided_vars);
         // dbg!(self.infer_dictionary_types());
     }
 
     /// collect literals of a var
     pub(crate) fn resolve_var(&mut self, name: &str, loc: &Location) -> HashSet<String> {
-        self.get_last_resolved_values(&LValue::Lit(name.to_owned()), loc)
-            .unwrap_or(self.resolve_rvalue(&RValue::Var(name.to_owned(), loc.clone()), loc))
+        self.get_last_resolved_values(&Identifier::Name(name.to_owned()), loc)
+            .unwrap_or(
+                self.resolve_value_expression(&ValueExpr::Var(name.to_owned(), loc.clone()), loc),
+            )
     }
 
     /// run type inference only for dictionary types based on the result of value set analysis.
@@ -123,12 +125,12 @@ impl Analyzer {
             let s = s.strip_suffix("_").unwrap_or(s);
             s.to_owned()
         };
-        for (full_name, dynamic) in self.dynamic_vars.iter() {
-            let name = dynamic
+        for (full_name, divided) in self.divided_vars.iter() {
+            let name = divided
                 .components
                 .iter()
                 .filter_map(|r| {
-                    if let RValue::Lit(lit) = r {
+                    if let ValueExpr::Lit(lit) = r {
                         Some(strip_underscore(lit))
                     } else {
                         None
@@ -136,7 +138,7 @@ impl Analyzer {
                 })
                 .collect::<Vec<_>>()
                 .join("_");
-            let keys = dynamic
+            let keys = divided
                 .map
                 .iter()
                 .map(|(k, v)| (k.to_owned(), strip_underscore(v)))
@@ -173,22 +175,22 @@ impl Analyzer {
         ret
     }
 
-    fn record_dynamic_identifier(&mut self, rvalues: Vec<RValue>, resolved: Vec<String>) {
+    fn record_identifier_division(&mut self, values: Vec<ValueExpr>, resolved: Vec<String>) {
         let name = resolved.concat();
         if self.var_definitions.contains_key(name.as_str()) {
             let mut ref_loc = None; // FIXME: so dirty data flow.
-            let components = rvalues.clone();
+            let components = values.clone();
             let mut map = HashMap::new();
-            for (r, v) in rvalues.into_iter().zip(resolved.iter()) {
-                if let RValue::Var(name, loc) = r {
+            for (r, v) in values.into_iter().zip(resolved.iter()) {
+                if let ValueExpr::Var(name, loc) = r {
                     map.insert(name, v.to_owned());
                     ref_loc.replace(loc);
                 }
             }
             let ref_loc = ref_loc.unwrap();
-            self.dynamic_vars.insert(
+            self.divided_vars.insert(
                 name,
-                DynamicIdentifier {
+                DividedIdentifier {
                     components,
                     map,
                     ref_loc,
@@ -197,7 +199,7 @@ impl Analyzer {
         }
     }
 
-    fn record_resolved_values(&mut self, l: LValue, loc: Location, values: HashSet<String>) {
+    fn record_resolved_values(&mut self, l: Identifier, loc: Location, values: HashSet<String>) {
         self.resolved_values
             .entry(l)
             .or_default()
@@ -206,18 +208,18 @@ impl Analyzer {
             .extend(values);
     }
 
-    fn get_last_resolved_values(&self, l: &LValue, loc: &Location) -> Option<HashSet<String>> {
+    fn get_last_resolved_values(&self, l: &Identifier, loc: &Location) -> Option<HashSet<String>> {
         self.resolved_values
             .get(l)
             .and_then(|m| m.range(..=loc).next().map(|(_, s)| s.clone()))
     }
 
     /// construct chain of value flows in backward order and resolve them.
-    fn resolve_eval(&mut self, l: &LValue, r: &Option<RValue>, loc: &Location) {
+    fn resolve_eval(&mut self, l: &Identifier, r: &Option<ValueExpr>, loc: &Location) {
         if let Some(r) = r {
-            let rhs = self.resolve_rvalue(r, loc);
-            for var_name in self.resolve_lvalue(l, loc) {
-                self.record_resolved_values(LValue::Lit(var_name), loc.clone(), rhs.clone());
+            let rhs = self.resolve_value_expression(r, loc);
+            for var_name in self.resolve_identifier(l, loc) {
+                self.record_resolved_values(Identifier::Name(var_name), loc.clone(), rhs.clone());
             }
             self.record_resolved_values(l.clone(), loc.clone(), rhs.clone());
         } else {
@@ -225,21 +227,21 @@ impl Analyzer {
         }
     }
 
-    fn resolve_lvalue(&mut self, lvalue: &LValue, loc: &Location) -> HashSet<String> {
+    fn resolve_identifier(&mut self, identifier: &Identifier, loc: &Location) -> HashSet<String> {
         let mut result = HashSet::new();
-        match lvalue {
-            LValue::Lit(lit) => {
+        match identifier {
+            Identifier::Name(lit) => {
                 result.insert(lit.to_owned());
             }
-            LValue::Var(name, loc) => {
+            Identifier::Indirect(name, loc) => {
                 if let Some(chain) = self.construct_chain(name, loc) {
                     result.extend(self.resolve_chain(chain))
                 }
             }
-            LValue::Concat(lvalues) => {
+            Identifier::Concat(lvalues) => {
                 let resolved = lvalues
                     .iter()
-                    .map(|l| self.resolve_lvalue(l, loc))
+                    .map(|l| self.resolve_identifier(l, loc))
                     .collect();
                 // enumerate combinations
                 result.extend(
@@ -252,21 +254,21 @@ impl Analyzer {
         result
     }
 
-    fn resolve_rvalue(&mut self, rvalue: &RValue, loc: &Location) -> HashSet<String> {
+    fn resolve_value_expression(&mut self, value: &ValueExpr, loc: &Location) -> HashSet<String> {
         let mut result = HashSet::new();
-        if let Some(lvalue) = rvalue.into() {
-            if let Some(resolved) = self.get_last_resolved_values(&lvalue, loc) {
+        if let Some(identifier) = value.into() {
+            if let Some(resolved) = self.get_last_resolved_values(&identifier, loc) {
                 return resolved;
             }
         }
-        match rvalue {
-            RValue::Lit(lit) => {
+        match value {
+            ValueExpr::Lit(lit) => {
                 result.extend(
                     lit.split_whitespace()
                         .filter_map(|s| (!s.is_empty()).then_some(s.to_owned())),
                 );
             }
-            RValue::Var(name, loc) => {
+            ValueExpr::Var(name, loc) => {
                 if let Some(chain) = self.construct_chain(name, loc) {
                     let chain_result = self.resolve_chain(chain);
                     result.extend(chain_result);
@@ -274,10 +276,10 @@ impl Analyzer {
                     // No chain found for variable
                 }
             }
-            RValue::Concat(rvalues) => {
-                let resolved = rvalues
+            ValueExpr::Concat(values) => {
+                let resolved = values
                     .iter()
-                    .map(|r| self.resolve_rvalue(r, loc))
+                    .map(|r| self.resolve_value_expression(r, loc))
                     .collect();
                 // enumerate combinations
                 result.extend(
@@ -287,15 +289,15 @@ impl Analyzer {
                 );
             }
 
-            RValue::Ref(rvalues) => {
-                let resolved = rvalues
+            ValueExpr::DynName(values) => {
+                let resolved = values
                     .iter()
-                    .map(|r| self.resolve_rvalue(r, loc))
+                    .map(|r| self.resolve_value_expression(r, loc))
                     .collect();
                 let combos = enumerate_combinations(resolved);
                 for combo in combos.iter() {
-                    self.record_dynamic_identifier(
-                        rvalues.iter().cloned().collect(),
+                    self.record_identifier_division(
+                        values.iter().cloned().collect(),
                         combo.clone(),
                     );
                 }
@@ -306,8 +308,11 @@ impl Analyzer {
                     }
                 }
             }
-            RValue::Shell(shell_string, vars) => {
-                let resolved = vars.iter().map(|r| self.resolve_rvalue(r, loc)).collect();
+            ValueExpr::Shell(shell_string, vars) => {
+                let resolved = vars
+                    .iter()
+                    .map(|r| self.resolve_value_expression(r, loc))
+                    .collect();
                 // enumerate combinations & additoinal resolving with shell execution
                 // cf. RValue::concretize
                 let var_names = vars
@@ -327,12 +332,15 @@ impl Analyzer {
                 }
             }
         }
+        if let Some(identifier) = value.into() {
+            self.record_resolved_values(identifier, loc.clone(), result.clone());
+        }
         result
     }
 
     fn resolve_chain(&mut self, chain: Chain) -> HashSet<String> {
         // resolve chain
-        // 1. if unresolved is not empty, recursively call resolve_rvalue on them
+        // 1. if unresolved is not empty, recursively call resolve_value_expression on them
         // 2. else, return resolved
         if !chain.unresolved.is_empty() {
             chain
@@ -342,7 +350,7 @@ impl Analyzer {
                     chain
                         .unresolved
                         .into_iter()
-                        .flat_map(|rvalue| self.resolve_rvalue(&rvalue, &chain.loc)),
+                        .flat_map(|value| self.resolve_value_expression(&value, &chain.loc)),
                 )
                 .collect()
         } else {
@@ -352,9 +360,9 @@ impl Analyzer {
 
     /// Given a variable, traverse the script backward to construct chain of values
     fn construct_chain(&self, name: &str, loc: &Location) -> Option<Chain> {
-        let lvalue = LValue::Lit(name.to_owned());
-        let mut chain = Chain::new(lvalue.clone(), loc.clone());
-        if let Some(resolved) = self.get_last_resolved_values(&lvalue, loc) {
+        let identifier = Identifier::Name(name.to_owned());
+        let mut chain = Chain::new(identifier.clone(), loc.clone());
+        if let Some(resolved) = self.get_last_resolved_values(&identifier, loc) {
             chain.resolved.extend(resolved.clone());
             return Some(chain);
         }
@@ -362,21 +370,25 @@ impl Analyzer {
             chain.resolved.insert(self.fixed[name].to_owned());
             return Some(chain);
         }
-        let mut chain_rvalue = |rvalue| match rvalue {
-            RValue::Lit(lit) => {
-                chain.resolved.extend(
-                    lit.split_whitespace()
-                        .filter_map(|s| (!s.is_empty()).then_some(s.to_owned())),
-                );
+        let mut chain_value = |value| match value {
+            ValueExpr::Lit(lit) => {
+                if lit.is_empty() {
+                    chain.resolved.insert(lit);
+                } else {
+                    chain.resolved.extend(
+                        lit.split_whitespace()
+                            .filter_map(|s| (!s.is_empty()).then_some(s.to_owned())),
+                    );
+                }
             }
-            RValue::Var(var, loc) => {
+            ValueExpr::Var(var, loc) => {
                 if var != name {
-                    if let Some(values) =
-                        self.get_last_resolved_values(&LValue::Lit(var.clone()), &loc)
+                    if let Some(resolved) =
+                        self.get_last_resolved_values(&Identifier::Name(var.clone()), &loc)
                     {
-                        chain.resolved.extend(values);
+                        chain.resolved.extend(resolved);
                     } else {
-                        chain.unresolved.insert(RValue::Var(var, loc));
+                        chain.unresolved.insert(ValueExpr::Var(var, loc));
                     }
                 }
             }
@@ -398,7 +410,7 @@ impl Analyzer {
                 MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) if lhs == name => {
                     let vals = self.inspect_word(&rhs, &def_loc);
                     let found_dominant_initialization = (vals.is_empty()
-                        || vals.iter().all(|v| matches!(v, RValue::Lit(_))))
+                        || vals.iter().all(|v| matches!(v, ValueExpr::Lit(_))))
                         && matches!(
                             cmp_guards(
                                 &self.guard_of_location(&def_loc),
@@ -407,7 +419,7 @@ impl Analyzer {
                             Some(Ordering::Less | Ordering::Equal)
                         );
                     for val in vals {
-                        chain_rvalue(val);
+                        chain_value(val);
                     }
                     if found_dominant_initialization {
                         // Found the dominant initialization of the variable. Stop searching.
@@ -423,11 +435,11 @@ impl Analyzer {
                         let vals = self.inspect_word(&word, &def_loc);
                         for val in vals {
                             match val {
-                                RValue::Lit(lit) => {
-                                    chain_rvalue(RValue::Lit(lit.to_owned()));
+                                ValueExpr::Lit(lit) => {
+                                    chain_value(ValueExpr::Lit(lit.to_owned()));
                                 }
                                 other => {
-                                    chain_rvalue(other);
+                                    chain_value(other);
                                 }
                             }
                         }
@@ -443,29 +455,29 @@ impl Analyzer {
         Some(chain)
     }
 
-    fn inspect_word(&self, word: &AcWord, loc: &Location) -> Vec<RValue> {
+    fn inspect_word(&self, word: &AcWord, loc: &Location) -> Vec<ValueExpr> {
         let mut values = Vec::new();
         match &word.0 {
             Word::Single(word) => values.extend(self.inspect_word_fragment(word, loc)),
-            Word::Concat(words) => values.push(RValue::Concat(
+            Word::Concat(words) => values.push(ValueExpr::Concat(
                 words
                     .iter()
                     .flat_map(|w| self.inspect_word_fragment(w, loc))
                     .collect(),
             )),
-            Word::Empty => (),
+            Word::Empty => values.push(ValueExpr::Lit(String::new())),
         }
         values
     }
 
-    fn inspect_word_fragment(&self, word: &AcWordFragment, loc: &Location) -> Vec<RValue> {
+    fn inspect_word_fragment(&self, word: &AcWordFragment, loc: &Location) -> Vec<ValueExpr> {
         let mut values = Vec::new();
         use MayM4::*;
         match word {
             Shell(WordFragment::Literal(lit)) => {
                 values.extend(
                     lit.split_whitespace()
-                        .filter_map(|s| (!s.is_empty()).then_some(RValue::Lit(s.to_owned()))),
+                        .filter_map(|s| (!s.is_empty()).then_some(ValueExpr::Lit(s.to_owned()))),
                 );
             }
             Shell(WordFragment::DoubleQuoted(frags)) => {
@@ -473,11 +485,11 @@ impl Analyzer {
                     match f {
                         WordFragment::Literal(lit) => {
                             values.extend(lit.split_whitespace().filter_map(|s| {
-                                (!s.is_empty()).then_some(RValue::Lit(s.to_owned()))
+                                (!s.is_empty()).then_some(ValueExpr::Lit(s.to_owned()))
                             }));
                         }
                         WordFragment::Param(Parameter::Var(var)) => {
-                            values.push(RValue::Var(var.to_owned(), loc.clone()));
+                            values.push(ValueExpr::Var(var.to_owned(), loc.clone()));
                         }
                         WordFragment::Escaped(s) if s == "\n" => (),
                         _ => todo!("{:?}", f),
@@ -485,24 +497,24 @@ impl Analyzer {
                 }
             }
             Shell(WordFragment::Param(Parameter::Var(var))) => {
-                values.push(RValue::Var(var.to_owned(), loc.clone()));
+                values.push(ValueExpr::Var(var.to_owned(), loc.clone()));
             }
             Shell(WordFragment::Subst(subst)) => match &**subst {
                 ParameterSubstitution::Command(cmds) => {
                     let node_id = cmds.first().unwrap().clone();
                     let shell_string = self.display_node(node_id);
                     let (_, uses) = self.collect_variables(node_id);
-                    values.push(RValue::Shell(
+                    values.push(ValueExpr::Shell(
                         shell_string,
                         uses.keys()
-                            .map(|name| RValue::Var(name.to_owned(), loc.clone()))
+                            .map(|name| ValueExpr::Var(name.to_owned(), loc.clone()))
                             .collect(),
                     ));
                 }
                 _ => todo!(),
             },
             Shell(w) => {
-                values.push(RValue::Lit(self.pool.shell_word_to_string(w)));
+                values.push(ValueExpr::Lit(self.pool.shell_word_to_string(w)));
             }
             _ => todo!(),
         }

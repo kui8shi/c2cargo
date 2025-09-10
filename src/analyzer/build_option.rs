@@ -24,14 +24,15 @@ struct BuildOption {
 #[derive(Debug, Clone, Default)]
 pub(crate) struct BuildOptionInfo {
     build_options: HashMap<String, BuildOption>,
-    decl_ids: HashSet<NodeId>,
+    decl_ids: Vec<NodeId>,
     arg_var_to_option_name: HashMap<String, String>,
     dependencies: HashMap<String, HashSet<String>>,
 }
 
 impl Analyzer {
-    /// Analyze various properties of build options using LLMs
-    pub async fn analyze_build_options(&mut self) {
+    /// Analyze basic properties of build options
+    /// Calling this will remove nodes related to build option declaration/overwriting.
+    pub(crate) fn run_build_option_analysis(&mut self) {
         self.build_option_info = self.extract_build_options();
 
         // we add information to guards that touch build options.
@@ -46,6 +47,12 @@ impl Analyzer {
         self.collect_build_option_contexts();
         self.collect_build_option_value_candidates();
 
+        // remove build option declaraton nodes from targets of later analyses
+        self.remove_build_option_declarations();
+    }
+
+    /// Analyze various properties of build options using LLMs
+    pub(crate) async fn run_extra_build_option_analysis(&self) {
         // conduct llm analysis
         let results =
             llm_analysis::analyze_build_options(self.build_option_info.build_options.values())
@@ -98,13 +105,28 @@ impl Analyzer {
                     context: Vec::new(),
                 };
                 ret.build_options.insert(option_name.clone(), build_option);
-                ret.decl_ids.insert(*node_id);
-                ret.decl_ids.extend(self.collect_descendant_nodes(*node_id));
+                for id in self.collect_descendant_nodes(*node_id, false, true) {
+                    if !ret.decl_ids.contains(&id) {
+                        ret.decl_ids.push(id);
+                    }
+                }
                 ret.arg_var_to_option_name
                     .extend(vars.into_iter().zip(std::iter::repeat(option_name.clone())));
             }
         }
         ret
+    }
+
+    fn remove_build_option_declarations(&mut self) {
+        for (option_name, build_option) in self.build_option_info.build_options.clone() {
+            if self.pool.nodes.contains(build_option.decl_id) {
+                self.remove_node(build_option.decl_id);
+            }
+            if build_option.context.is_empty() {
+                // remove build options that have no side effects.
+                self.build_option_info.build_options.remove(&option_name);
+            }
+        }
     }
 
     fn convert_guards(&mut self) {
@@ -130,7 +152,6 @@ impl Analyzer {
             .build_options
             .drain()
             .collect::<HashMap<_, _>>();
-        let mut option_names_to_remove = HashSet::new();
         for build_option in build_options.values_mut() {
             build_option.declaration = self.display_node(build_option.decl_id);
             let mut target_vars = Vec::from(build_option.vars.clone());
@@ -153,14 +174,6 @@ impl Analyzer {
                     }
                 }
             }
-            if build_option.context.is_empty() {
-                option_names_to_remove.insert(build_option.option_name.to_owned());
-            }
-        }
-
-        for option_name in option_names_to_remove {
-            // remove build options that have no side effects.
-            build_options.remove(option_name.as_str());
         }
 
         self.build_option_info.build_options = build_options;
@@ -174,8 +187,8 @@ impl Analyzer {
             .collect::<HashMap<_, _>>();
         for build_option in build_options.values_mut() {
             let mut values = HashSet::from(["yes".to_owned(), "no".to_owned()]);
-            for id in self.collect_descendant_nodes(build_option.decl_id) {
-                for &block_id in &self.get_node(id).info.child_blocks {
+            for id in self.collect_descendant_nodes(build_option.decl_id, false, false) {
+                for &block_id in &self.get_node(id).info.branches {
                     for guard in self.blocks[block_id].guards.iter() {
                         values.extend(enumerate_literal(guard));
                     }

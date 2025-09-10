@@ -91,7 +91,7 @@ impl<'a> TypeInferrer<'a> {
             assigned: HashMap::new(),
             cursor: None,
         };
-        for &id in &analyzer.top_ids {
+        for id in analyzer.get_top_ids() {
             s.visit_top(id);
         }
 
@@ -100,8 +100,10 @@ impl<'a> TypeInferrer<'a> {
         }
 
         for (from, to) in s.type_relations.clone() {
-            if let Some(from_type) = s.types.get(&from).cloned() {
-                s.types.insert(to.to_owned(), from_type);
+            if !s.types.contains_key(&to) {
+                if let Some(from_type) = s.types.get(&from).cloned() {
+                    s.types.insert(to.to_owned(), from_type);
+                }
             }
         }
 

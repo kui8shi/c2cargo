@@ -1,4 +1,4 @@
-use super::{Analyzer, MayM4, NodeId, ShellCommand};
+use super::{Analyzer, Location, MayM4, NodeId, ShellCommand};
 use std::collections::HashSet;
 
 impl Analyzer {
@@ -62,7 +62,6 @@ impl Analyzer {
         let mut chunks = Vec::new();
         let mut current_chunk = Vec::new();
         let mut i = 0;
-
         while i < self.top_ids.len() {
             let current_id = self.top_ids[i];
 
@@ -151,43 +150,54 @@ impl Analyzer {
 
     /// enumerate out-of-scope variables
     pub(crate) fn examine_chunk_io(&self, chunk: &[NodeId]) -> (HashSet<String>, HashSet<String>) {
-        let id_set: HashSet<NodeId> = chunk.iter().cloned().collect();
-        let range = (
-            id_set
-                .iter()
-                .map(|&id| self.get_node(id).range_start())
-                .flatten()
-                .min(),
-            id_set
-                .iter()
-                .map(|&id| self.get_node(id).range_end())
-                .flatten()
-                .max(),
-        );
-        let imported: HashSet<String> = chunk
+        let chunk_end_loc = chunk
             .iter()
-            .flat_map(|&id| {
-                self.get_node(id)
-                    .info
-                    .dependencies
-                    .iter()
-                    .filter_map(|(id, var)| (!id_set.contains(id)).then_some(var))
-                    .flatten()
+            .map(|id| Location {
+                node_id: *id,
+                line: self.get_node(*id).range_end().unwrap(),
+                is_left: true,
+            })
+            .max()
+            .unwrap();
+
+        // Collect all variables defined within the chunk
+        let mut chunk_defines = HashSet::new();
+        let mut chunk_uses = HashSet::new();
+
+        for &id in chunk {
+            // Get variables from all descendant nodes in the chunk
+            let (defines, uses) = self.collect_variables(id);
+            chunk_defines.extend(defines.into_keys());
+            chunk_uses.extend(uses.into_keys());
+        }
+
+        // Imported variables: used in chunk but not defined in chunk
+        let imported: HashSet<String> = chunk_uses.difference(&chunk_defines).cloned().collect();
+
+        // Helper function to check if a variable is used outside this chunk
+        let is_used_outside_chunk = |var_name: &String| -> bool {
+            self.var_usages
+                .get(var_name)
+                .is_some_and(|locs| locs.iter().any(|loc| *loc > chunk_end_loc))
+                || self
+                    .var_indirect_usages
+                    .get(var_name)
+                    .is_some_and(|locs| locs.iter().any(|loc| *loc > chunk_end_loc))
+                || self.subst_vars.contains(var_name)
+        };
+
+        // Exported variables: defined in chunk and used outside the chunk
+        let exported: HashSet<String> = chunk_defines
+            .iter()
+            .filter(|var_name| {
+                if var_name.as_str() == "HAVE_STACK_T_01" {
+                    dbg!(is_used_outside_chunk(var_name));
+                }
+                is_used_outside_chunk(var_name)
             })
             .cloned()
             .collect();
-        let exported: HashSet<String> = chunk
-            .iter()
-            .flat_map(|&id| {
-                self.get_node(id)
-                    .info
-                    .dependents
-                    .iter()
-                    .filter_map(|(id, var)| (!id_set.contains(id)).then_some(var))
-                    .flatten()
-            })
-            .cloned()
-            .collect();
+
         (imported, exported)
     }
 

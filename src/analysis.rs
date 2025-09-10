@@ -5,18 +5,25 @@ use crate::analyzer::Analyzer;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io::Write;
+use std::path::Path;
 
-pub(crate) async fn analysis(input: String) -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    // Read file contents
+    let path = std::path::absolute(path).unwrap();
+    let contents = std::fs::read_to_string(&path)?;
     let fixed = [(
         "srcdir".to_owned(),
-        format!("{}/src/gmp-6.2.0", env!("HOME")),
+        path.parent().unwrap().to_str().unwrap().to_owned(),
     )];
     // Initialize the lexer and parser
-    let mut analyzer = Analyzer::new(&input, None, Some(fixed.into()));
+    let mut analyzer = Analyzer::new(&contents, None, Some(fixed.into()));
     let top_ids = analyzer.get_top_ids();
 
     analyzer.prune_platform_branch();
     analyzer.run_value_set_analysis();
+    analyzer.run_build_option_analysis();
+
+    /*
 
     // Print information about the analyzed script
     println!("Total commands: {}", top_ids.len());
@@ -185,8 +192,6 @@ pub(crate) async fn analysis(input: String) -> Result<(), Box<dyn std::error::Er
         // println!("  Group {}: {:?}", group_idx, analyzer.get_command(cmd_idx));
     }
 
-    /*
-
     // Export graph in DOT format
     let mut dot_file = File::create("/tmp/dependencies.dot")?;
     writeln!(dot_file, "digraph Dependencies {{")?;
@@ -301,34 +306,26 @@ pub(crate) async fn analysis(input: String) -> Result<(), Box<dyn std::error::Er
 
     */
 
-    // === Value Set Analysis for Eval ===
-    println!("\n=== Value Set Analysis for Eval ===");
-    analyzer.run_value_set_analysis();
-
-    /*
     // === Variable Type Inference ===
-    dbg!(analyzer.run_type_analysis());
+    // dbg!(analyzer.run_type_analysis());
 
     // === Out-of-scope variables ===
-    for chunk in analyzer.fuse_chunks(Some(12), true) {
+    for (i, chunk) in analyzer.fuse_chunks(Some(5), true).iter().enumerate() {
         println!("+++++++++++++++++++++++++++++++++++++++++++++");
-        for &id in &chunk {
+        println!("CHUNK {}: {} nodes", i, chunk.len());
+        for &id in chunk {
             println!("{}", &analyzer.display_node(id));
         }
-        dbg!(analyzer.examine_chunk_io(&chunk));
-    }
-
-    // === Platform Branch Prunning ===
-    analyzer.prune_platform_branch();
-    for top_id in analyzer.get_top_ids() {
-        println!("==========================");
-        println!("{}", analyzer.display_node(top_id));
+        let (imported, exported) = analyzer.examine_chunk_io(chunk);
+        println!(
+            "CHUNK {}: imported={:?}, exported={:?}",
+            i, imported, exported
+        );
     }
 
     // === Build Option Analysis ===
-    analyzer.analyze_build_options().await;
-    dbg!(analyzer.find_macro_calls().keys().collect::<Vec<_>>());
-    */
+    // analyzer.run_extra_build_option_analysis().await;
+    // dbg!(analyzer.find_macro_calls().keys().collect::<Vec<_>>());
 
     Ok(())
 }

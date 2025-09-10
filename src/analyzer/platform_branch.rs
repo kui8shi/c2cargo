@@ -124,7 +124,7 @@ impl Analyzer {
                         block.guards.pop();
                         block.guards.push(guard);
                     } else {
-                        for &child in block.children.iter() {
+                        for &child in block.nodes.iter() {
                             if self.pool.nodes.contains(child) {
                                 self.remove_node(child);
                             }

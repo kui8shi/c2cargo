@@ -1,13 +1,12 @@
-use super::{DisplayNode, M4Argument, M4Macro};
+use super::{M4Argument, M4Macro};
 use itertools::Itertools;
-use slab::Slab;
 use std::collections::HashSet;
 
 use super::{
-    AcWord, Analyzer, AstVisitor, AutoconfPool, Condition, GuardBodyPair, MayM4, Node, NodeId,
-    NodeInfo, Operator, Parameter, ParameterSubstitution, PatternBodyPair, Redirect, Word,
-    WordFragment,
+    AcWord, Analyzer, AstVisitor, Condition, GuardBodyPair, MayM4, Node, NodeId, Operator,
+    Parameter, ParameterSubstitution, PatternBodyPair, Redirect, Word, WordFragment,
 };
+
 use crate::analyzer::{as_literal, as_shell, as_var};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,7 +22,7 @@ pub(super) type BlockId = usize;
 pub(super) struct Block {
     pub block_id: BlockId,
     pub parent: NodeId,
-    pub children: Vec<NodeId>,
+    pub nodes: Vec<NodeId>,
     pub guards: Vec<Guard>,
 }
 
@@ -76,8 +75,8 @@ impl Guard {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Atom {
-    ArchGlob(String),         // glob string
-    OsAbiGlob(String),        // glob string
+    ArchGlob(String),  // glob string
+    OsAbiGlob(String), // glob string
     Arch(String),
     Cpu(String),
     Os(String),
@@ -154,11 +153,10 @@ pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp:
 /// Visitor to find case statements branching given variables.
 #[derive(Debug)]
 pub(super) struct GuardAnalyzer<'a> {
-    pool: &'a mut AutoconfPool<NodeInfo>,
+    analyzer: &'a mut Analyzer,
     cursor: Option<NodeId>,
     range: Option<Vec<(usize, usize)>>,
     guard_stack: Vec<Guard>,
-    blocks: Slab<Block>,
 }
 
 impl Analyzer {
@@ -179,7 +177,7 @@ impl Analyzer {
         let mut children = HashSet::<NodeId>::new();
         let mut ret = Vec::new();
         for block in self.blocks_guarded_by_variable(var_name) {
-            children.extend(block.children.iter());
+            children.extend(block.nodes.iter());
             if !children.contains(&block.parent) {
                 if !ret.contains(&block.parent) {
                     ret.push(block.parent)
@@ -191,41 +189,42 @@ impl Analyzer {
 }
 
 impl<'a> GuardAnalyzer<'a> {
-    pub fn analyze_blocks(pool: &'a mut AutoconfPool<NodeInfo>, top_ids: &[NodeId]) -> Slab<Block> {
+    pub fn analyze_blocks(analyzer: &'a mut Analyzer) {
         let mut s = Self {
-            pool,
+            analyzer,
             cursor: None,
             range: None,
             guard_stack: Vec::new(),
-            blocks: Slab::new(),
         };
-        for &id in top_ids {
+        for id in s.analyzer.get_top_ids() {
             s.visit_top(id);
         }
-        s.blocks
     }
 
     fn record_block(&mut self, node_ids: &[NodeId]) {
         let parent = self.cursor.unwrap();
-        let new_block_id = self.blocks.insert(Block {
+        let new_block_id = self.analyzer.add_block(Block {
             block_id: 0,
             parent,
-            children: node_ids.to_vec(),
+            nodes: node_ids.to_vec(),
             guards: self.guard_stack.clone(),
         });
-        self.blocks[new_block_id].block_id = new_block_id;
 
         // record parent-child relation ships
         for &id in node_ids {
             assert!(self.get_node(parent).range.len() > 0);
-            self.pool.nodes[id].info.parent = Some((parent, new_block_id));
+            self.analyzer.get_node_mut(id).info.parent = Some((parent, new_block_id));
 
             if self.get_node(id).range.is_empty() {
                 // propagate ranges information if child doesn't know its range.
-                self.pool.nodes[id].range = self.get_node(parent).range.clone();
+                self.analyzer.get_node_mut(id).range = self.get_node(parent).range.clone();
             }
         }
-        self.pool.nodes[parent].info.child_blocks.push(new_block_id);
+        self.analyzer
+            .get_node_mut(parent)
+            .info
+            .branches
+            .push(new_block_id);
     }
 
     fn negate_last_guard(&mut self) {
@@ -318,7 +317,7 @@ impl<'a> GuardAnalyzer<'a> {
         }
     }
 
-    fn condition_to_guard(&self, cond: &Condition<AcWord>) -> Guard {
+    fn condition_to_guard(&mut self, cond: &Condition<AcWord>) -> Guard {
         match cond {
             Condition::And(c1, c2) => Guard::And(vec![
                 self.condition_to_guard(c1),
@@ -329,7 +328,20 @@ impl<'a> GuardAnalyzer<'a> {
                 self.condition_to_guard(c2),
             ]),
             Condition::Not(cond) => self.condition_to_guard(cond).negate_whole(),
-            Condition::Eval(cmd) | Condition::ReturnZero(cmd) => Guard::N(true, Atom::Cmd(**cmd)),
+            Condition::Eval(cmd) | Condition::ReturnZero(cmd) => {
+                let parent = self.cursor.unwrap();
+                let cmd = **cmd;
+                self.analyzer
+                    .get_node_mut(parent)
+                    .info
+                    .pre_body_nodes
+                    .push(cmd);
+                if self.analyzer.get_node(cmd).range.is_empty() {
+                    self.analyzer.get_node_mut(cmd).range =
+                        self.analyzer.get_node(parent).range.clone();
+                }
+                Guard::N(true, Atom::Cmd(cmd))
+            }
             Condition::Cond(op) => match op {
                 Operator::Eq(w1, w2) => {
                     let atom = if let Some(res) = self.equality(w1, w2) {
@@ -503,7 +515,7 @@ impl<'a> GuardAnalyzer<'a> {
                         }
                     }
                     _ => {
-                        let pattern_string = self.pool.display_word(pattern, false);
+                        let pattern_string = self.analyzer.display_word(pattern);
                         if var == "host" {
                             let (arch, _, os): (String, String, String) =
                                 split_glob_triplet(&pattern_string)
@@ -546,7 +558,7 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
             } else if let &WordFragment::DoubleQuoted(ref frags) = word {
-                let pattern_string = self.pool.display_word(pattern, false);
+                let pattern_string = self.analyzer.display_word(pattern);
                 let vars: Vec<String> = frags
                     .iter()
                     .filter_map(as_var)
@@ -571,30 +583,26 @@ impl<'a> GuardAnalyzer<'a> {
 
 impl<'a> AstVisitor for GuardAnalyzer<'a> {
     fn get_node(&self, node_id: NodeId) -> &Node {
-        &self.pool.nodes[node_id]
+        self.analyzer.get_node(node_id)
     }
 
     fn visit_top(&mut self, node_id: NodeId) {
+        if self.get_node(node_id).info.is_child_node() {
+            return;
+        }
         self.cursor.replace(node_id);
         self.walk_node(node_id);
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
         let saved_cursor = self.cursor.replace(node_id);
-
-        if !self.get_node(node_id).info.is_top_node() {
-            self.walk_node(node_id);
-        }
-
+        self.walk_node(node_id);
         self.cursor = saved_cursor;
     }
 
     fn visit_condition(&mut self, cond: &Condition<AcWord>) {
         let guard = self.condition_to_guard(cond);
         self.guard_stack.push(guard);
-        if let Condition::Eval(cmd) | Condition::ReturnZero(cmd) = cond {
-            self.record_block(&[**cmd]);
-        }
         self.walk_condition(cond);
     }
 
@@ -615,6 +623,16 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
             self.visit_node(*c);
         }
         self.guard_stack.pop();
+    }
+
+    fn visit_brace(&mut self, body: &[NodeId]) {
+        self.record_block(body);
+        self.walk_body(body);
+    }
+
+    fn visit_subshell(&mut self, body: &[NodeId]) {
+        self.record_block(body);
+        self.walk_body(body);
     }
 
     fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
@@ -647,7 +665,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
             self.negate_last_guard();
         }
         self.record_block(&[cmd]);
-        self.walk_node(cmd);
+        self.visit_node(cmd);
         self.guard_stack.pop();
     }
 
@@ -663,6 +681,18 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
 
     fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         let saved_stack = self.guard_stack.clone();
+        if let Some(w) = as_shell(word) {
+            let node_id = self.cursor.unwrap();
+            if let WordFragment::Subst(subst) = w {
+                if let ParameterSubstitution::Command(cmds) = subst.as_ref() {
+                    self.analyzer
+                        .get_node_mut(node_id)
+                        .info
+                        .pre_body_nodes
+                        .extend(cmds)
+                }
+            }
+        }
         for arm in arms {
             let guard = Guard::make_or(
                 arm.patterns
@@ -686,6 +716,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
     fn visit_m4_macro(&mut self, m4_macro: &M4Macro) {
         for arg in m4_macro.args.iter() {
             match arg {
+                M4Argument::Word(w) => self.visit_word(w),
                 M4Argument::Condition(cond) => {
                     self.visit_condition(cond);
                     self.record_block(&[]);
@@ -693,11 +724,13 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 }
                 M4Argument::Commands(cmds) => {
                     self.record_block(cmds);
+                    for c in cmds {
+                        self.visit_node(*c);
+                    }
                 }
                 _ => {}
             }
         }
-        self.walk_m4_macro(m4_macro);
     }
 }
 

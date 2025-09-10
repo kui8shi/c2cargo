@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use super::{Analyzer, BlockId, Condition, GuardBodyPair, MayM4, NodeId, ShellCommand};
 
 impl Analyzer {
@@ -10,7 +12,7 @@ impl Analyzer {
 
         // Clean up parent references
         if let Some((parent, block_id)) = parent_info {
-            self.cleanup_parent(parent, block_id);
+            self.cleanup_parent(parent, node_id, block_id);
         }
     }
 
@@ -21,9 +23,9 @@ impl Analyzer {
         self.cleanup_node(node_id);
 
         if let Some(children) = children_info {
-            for child in children {
-                if self.pool.nodes.contains(child) {
-                    self.remove_node_and_children(child);
+            for id in children {
+                if self.pool.nodes.contains(id) {
+                    self.remove_node_and_children(id);
                 }
             }
         }
@@ -38,21 +40,14 @@ impl Analyzer {
             locations.retain(|loc| loc.node_id != node_id);
             !locations.is_empty()
         });
+        self.var_usages.retain(|_, locations| {
+            locations.retain(|loc| loc.node_id != node_id);
+            !locations.is_empty()
+        });
 
-        // Remove block information
-        for child_block_id in self.get_node(node_id).info.child_blocks.clone() {
-            if self.blocks.contains(child_block_id) {
-                self.blocks.remove(child_block_id);
-            }
-        }
-        if let Some((_, block_id)) = self.get_node(node_id).info.parent {
-            let is_block_empty = if let Some(block) = self.blocks.get_mut(block_id) {
-                block.children.retain(|id| *id != node_id);
-                block.children.is_empty()
-            } else {
-                false
-            };
-            if is_block_empty {
+        // Remove the node's child blocks
+        for block_id in self.get_node(node_id).info.branches.clone() {
+            if self.blocks.contains(block_id) {
                 self.blocks.remove(block_id);
             }
         }
@@ -61,48 +56,105 @@ impl Analyzer {
         self.pool.nodes.remove(node_id);
     }
 
-    fn cleanup_parent(&mut self, parent_id: NodeId, block_id: BlockId) {
+    fn cleanup_parent(&mut self, parent_id: NodeId, node_id: NodeId, block_id: BlockId) {
+        // Remove the information of the node's block
+        let is_block_empty = {
+            let block = self.blocks.get_mut(block_id).unwrap();
+            block.nodes.retain(|id| *id != node_id);
+            if block.nodes.is_empty() {
+                self.blocks.remove(block_id);
+                true
+            } else {
+                false
+            }
+        };
         if self.is_effectively_empty_node(parent_id) {
             // If parent has no children left, recursively remove it
             self.remove_node(parent_id);
-        } else if self.get_block(block_id).is_none() {
-            // When the parent is not empty but its branch (block) is, prune the branch
-            let branch_index = self.get_branch_index(parent_id, block_id).unwrap();
-            if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).cmd.0 {
-                match cmd {
-                    ShellCommand::If {
-                        conditionals,
-                        else_branch,
-                    } => {
-                        if branch_index < conditionals.len() {
-                            let removed_conditon = conditionals.remove(branch_index).condition;
-                            if !conditionals.is_empty() {
-                                conditionals[branch_index].condition = Condition::And(
-                                    Box::new(removed_conditon.flip()),
-                                    Box::new(conditionals[branch_index].condition.clone()),
-                                );
-                            } else {
-                                conditionals.push(GuardBodyPair {
-                                    condition: removed_conditon.flip(),
-                                    body: else_branch.clone(),
-                                });
-                                else_branch.clear();
-                            }
+        } else if is_block_empty {
+            // When the parent is not empty but its branch (block) is, the parent node
+            // should have multiple branches (either if/case). Prune the empty branch
+            self.prune_block(parent_id, block_id);
+        } else {
+            // When the parent & its branch are not empty, prune the command
+            self.prune_command(parent_id, node_id, block_id);
+        }
+    }
+
+    fn prune_block(&mut self, parent_id: NodeId, block_id: BlockId) {
+        let branch_index = self.get_branch_index(parent_id, block_id).unwrap();
+        if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).cmd.0 {
+            match cmd {
+                ShellCommand::If {
+                    conditionals,
+                    else_branch,
+                } => {
+                    if branch_index < conditionals.len() {
+                        let removed_conditon = conditionals.remove(branch_index).condition;
+                        if !conditionals.is_empty() {
+                            conditionals[branch_index].condition = Condition::And(
+                                Box::new(removed_conditon.flip()),
+                                Box::new(conditionals[branch_index].condition.clone()),
+                            );
                         } else {
+                            conditionals.push(GuardBodyPair {
+                                condition: removed_conditon.flip(),
+                                body: else_branch.clone(),
+                            });
                             else_branch.clear();
                         }
+                    } else {
+                        else_branch.clear();
                     }
-                    ShellCommand::Case { word: _, arms } => {
-                        arms.remove(branch_index);
-                    }
-                    _ => unreachable!(),
                 }
+                ShellCommand::Case { word: _, arms } => {
+                    arms.remove(branch_index);
+                }
+                _ => unreachable!(),
             }
-            // Unlink parent to block relationship
-            self.get_node_mut(parent_id)
-                .info
-                .child_blocks
-                .retain(|id| *id != block_id);
+        }
+        // Unlink parent to block relationship
+        self.get_node_mut(parent_id)
+            .info
+            .branches
+            .retain(|id| *id != block_id);
+    }
+
+    fn prune_command(&mut self, parent_id: NodeId, node_id: NodeId, block_id: BlockId) {
+        let branch_index = self.get_branch_index(parent_id, block_id).unwrap();
+        if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).cmd.0 {
+            match cmd {
+                ShellCommand::If {
+                    conditionals,
+                    else_branch,
+                } => {
+                    if branch_index < conditionals.len() {
+                        conditionals
+                            .get_mut(branch_index)
+                            .map(|pair| pair.body.retain(|id| *id != node_id));
+                    } else {
+                        else_branch.retain(|id| *id != node_id);
+                    }
+                }
+                ShellCommand::Case { word: _, arms } => {
+                    arms.get_mut(branch_index)
+                        .map(|pair| pair.body.retain(|id| *id != node_id));
+                }
+                ShellCommand::Brace(body) | ShellCommand::Subshell(body) => {
+                    body.retain(|id| *id != node_id);
+                }
+                ShellCommand::While(pair) | ShellCommand::Until(pair) => {
+                    pair.body.retain(|id| *id != node_id);
+                }
+                ShellCommand::For {
+                    var: _,
+                    words: _,
+                    body,
+                } => {
+                    body.retain(|id| *id != node_id);
+                }
+                _ => unreachable!(),
+            }
         }
     }
 
@@ -134,8 +186,8 @@ impl Analyzer {
                 MayM4::Shell(ShellCommand::Redirect(_, _)) => false,
                 MayM4::Shell(ShellCommand::Pipe(_, _)) => false,
                 _ => self
-                    .get_children(node_id)
-                    .is_some_and(|children| self.children_effectively_empty(&children)),
+                    .get_body(node_id)
+                    .is_some_and(|body| self.is_body_effectively_empty(&body)),
             }
         } else {
             false
@@ -143,10 +195,10 @@ impl Analyzer {
     }
 
     /// Check if all children are effectively empty (either actually empty or only contain echo/AC_MSG_RESULT)
-    fn children_effectively_empty(&self, children: &[NodeId]) -> bool {
-        children.is_empty()
-            || children
+    fn is_body_effectively_empty(&self, body: &[NodeId]) -> bool {
+        body.is_empty()
+            || body
                 .iter()
-                .all(|&child_id| self.is_effectively_empty_node(child_id))
+                .all(|&id| self.is_effectively_empty_node(id))
     }
 }

@@ -14,15 +14,15 @@ use autotools_parser::{
 };
 use build_option::BuildOptionInfo;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
-use macro_call::MacroCallFinder;
+use macro_call::MacroHandler;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
 };
 
-use eval::DynamicIdentifier;
+use eval::DividedIdentifier;
 use flatten::Flattener;
-use variable::{LValue, Location, RValue, VariableAnalyzer};
+use variable::{Identifier, Location, ValueExpr, VariableAnalyzer};
 
 use slab::Slab;
 
@@ -105,17 +105,17 @@ pub trait AstVisitor: Sized {
 
     /// Intermediate function for visiting a brace statement
     fn visit_brace(&mut self, body: &[NodeId]) {
-        self.walk_brace(body);
+        self.walk_body(body);
+    }
+
+    /// Intermediate function for visiting a subshell.
+    fn visit_subshell(&mut self, body: &[NodeId]) {
+        self.walk_body(body);
     }
 
     /// Intermediate function for visiting a guard-body pair (e.g., in while/until/if).
     fn visit_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
         self.walk_guard_body_pair(pair);
-    }
-
-    /// Intermediate function for visiting a pattern-body pair (an arm in case).
-    fn visit_pattern_body_pair(&mut self, arm: &PatternBodyPair<AcWord>) {
-        self.walk_pattern_body_pair(arm);
     }
 
     /// Intermediate function for visiting an `if` statement
@@ -188,6 +188,10 @@ pub trait AstVisitor: Sized {
         self.walk_function_definition(name, body);
     }
 
+    fn visit_background(&mut self, cmd: NodeId) {
+        self.walk_node(cmd);
+    }
+
     /// Walk a node: wrappper of arbitrary command.
     fn walk_node(&mut self, node_id: NodeId) {
         let node = self.get_node(node_id);
@@ -197,11 +201,7 @@ pub trait AstVisitor: Sized {
             Shell(Assignment(name, word)) => self.visit_assignment(name, word),
             Shell(Cmd(words)) => self.visit_command(words),
             Shell(Brace(body)) => self.visit_brace(body),
-            Shell(Subshell(body)) => {
-                for n in body {
-                    self.visit_node(*n);
-                }
-            }
+            Shell(Subshell(body)) => self.visit_subshell(body),
             Shell(While(pair)) => self.visit_guard_body_pair(pair),
             Shell(Until(pair)) => self.visit_guard_body_pair(pair),
             Shell(If {
@@ -216,7 +216,7 @@ pub trait AstVisitor: Sized {
             Shell(Or(condition, cmd)) => self.visit_and_or(false, condition, *cmd),
             Shell(Pipe(bang, cmds)) => self.visit_pipe(*bang, cmds),
             Shell(Redirect(cmd, redirects)) => self.visit_redirect(*cmd, redirects),
-            Shell(Background(cmd)) => self.visit_node(*cmd),
+            Shell(Background(cmd)) => self.visit_background(*cmd),
             Shell(FunctionDef { name, body }) => self.visit_function_definition(name, *body),
             Macro(m4_macro) => self.visit_m4_macro(m4_macro),
         };
@@ -228,7 +228,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a brace statement.
-    fn walk_brace(&mut self, body: &[NodeId]) {
+    fn walk_body(&mut self, body: &[NodeId]) {
         for n in body {
             self.visit_node(*n);
         }
@@ -265,15 +265,7 @@ pub trait AstVisitor: Sized {
     fn walk_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         self.visit_word(word);
         for arm in arms {
-            self.visit_pattern_body_pair(arm);
-        }
-    }
-
-    /// Walk a guard-body pair node.
-    fn walk_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
-        self.visit_condition(&pair.condition);
-        for c in &pair.body {
-            self.visit_node(*c);
+            self.walk_pattern_body_pair(arm);
         }
     }
 
@@ -283,6 +275,14 @@ pub trait AstVisitor: Sized {
             self.visit_word(w);
         }
         for c in &arm.body {
+            self.visit_node(*c);
+        }
+    }
+
+    /// Walk a guard-body pair node.
+    fn walk_guard_body_pair(&mut self, pair: &GuardBodyPair<AcWord>) {
+        self.visit_condition(&pair.condition);
+        for c in &pair.body {
             self.visit_node(*c);
         }
     }
@@ -454,7 +454,9 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a function definition.
-    fn walk_function_definition(&mut self, name: &str, body: NodeId) {}
+    fn walk_function_definition(&mut self, name: &str, body: NodeId) {
+        self.visit_node(body);
+    }
 
     /// Walk an M4 macro node (walks arguments only).
     fn walk_m4_macro(&mut self, m4_macro: &M4Macro) {
@@ -466,6 +468,7 @@ pub trait AstVisitor: Sized {
                         self.visit_word(w);
                     }
                 }
+                M4Argument::Condition(cond) => self.visit_condition(cond),
                 M4Argument::Commands(cmds) => {
                     for c in cmds {
                         self.visit_node(*c);
@@ -492,9 +495,16 @@ pub(crate) struct NodeInfo {
     // pub cmd: AcCommand,
     /// Node ID of the parent node, and Block ID of the block where the node resides
     pub parent: Option<(NodeId, BlockId)>,
-    /// Block IDs of the child blocks
-    /// The indexes correspond to the branch/arm indexes of if/case statements
-    pub child_blocks: Vec<BlockId>,
+    /// Block IDs of the child branches
+    /// The indexes correspond to the branch indexes of if/case statements
+    pub branches: Vec<BlockId>,
+    /// Optional Node ID for commands used in pre body clause.
+    /// The reason why we need this field instead of just creating
+    /// a new block for the command is:
+    /// 1. now we assume the indexes of child_blocks correspond to branch indexes
+    /// 2. due to the parser's optimization, condtitions may not be represented as nodes but operators.
+    /// FIXME: this looks dirty so refine it if possible.
+    pub pre_body_nodes: Vec<NodeId>,
     /// Variables defined by this command
     pub defines: VariableMap,
     /// Variables used by this command
@@ -536,8 +546,8 @@ pub struct Analyzer {
     var_definitions: VariableMap,
     /// Map of variable names to information of commands that uses them
     var_usages: VariableMap,
-    /// Map of variable names to information of commands that dynamically uses them
-    var_dynamic_usages: VariableMap,
+    /// Map of variable names to information of commands that indirectly uses them
+    var_indirect_usages: VariableMap,
     /// Map of top node (chunk) ids to information of variables defined in the chunk
     defines_per_top: HashMap<NodeId, VariableMap>,
     /// Map of top node (chunk) ids to information of variables used in the chunk
@@ -550,13 +560,15 @@ pub struct Analyzer {
     /// Set of variable maps that is fixed to a certain value
     fixed: HashMap<String, String>,
     /// Set of variables which are used in eval statements
-    evals: HashMap<LValue, Vec<(Option<RValue>, Location)>>,
+    evals: HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>,
     /// State filed used for recording resolved rvalues of variables
-    resolved_values: HashMap<LValue, BTreeMap<Location, HashSet<String>>>,
-    /// dynamically constructed identifiers
-    dynamic_vars: HashMap<String, DynamicIdentifier>,
+    resolved_values: HashMap<Identifier, BTreeMap<Location, HashSet<String>>>,
+    /// dynamically divided identifiers
+    divided_vars: HashMap<String, DividedIdentifier>,
     /// all m4 macro calls
     macro_calls: HashMap<String, Vec<(NodeId, M4Macro)>>,
+    /// all susbstitued variables
+    subst_vars: HashSet<String>,
     /// options of this analyzer
     options: AnalyzerOptions,
 }
@@ -566,12 +578,7 @@ impl Analyzer {
     /// Note that once we call it, the structure of nodes will change irreversibly,
     /// which will affect behaviors of many analysis paths.
     pub fn flatten(&mut self) {
-        Flattener::flatten(
-            &mut self.pool.nodes,
-            &mut self.blocks,
-            &mut self.top_ids,
-            self.options.flatten_threshold,
-        );
+        Flattener::flatten(self, self.options.flatten_threshold);
     }
 
     /// Analyze commands and build the dependency graph
@@ -581,7 +588,7 @@ impl Analyzer {
         fixed: Option<HashMap<String, String>>,
     ) -> Self {
         let lexer = Lexer::new(contents.as_ref().chars());
-        let (nodes, mut top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
+        let (nodes, top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
         let nodes = nodes
             .into_iter()
             .map(|(node_id, mut n)| {
@@ -589,19 +596,6 @@ impl Analyzer {
                 (node_id, n)
             })
             .collect::<Slab<Node>>();
-
-        let mut pool = AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node())));
-
-        let mut blocks = GuardAnalyzer::analyze_blocks(&mut pool, &top_ids);
-
-        let mut nodes = pool.nodes;
-
-        Flattener::flatten(
-            &mut nodes,
-            &mut blocks,
-            &mut top_ids,
-            flatten_threshold.unwrap_or(200),
-        );
 
         let pool = AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node())));
 
@@ -613,18 +607,22 @@ impl Analyzer {
             evals: HashMap::new(),
             var_definitions: HashMap::new(),
             var_usages: HashMap::new(),
-            var_dynamic_usages: HashMap::new(),
+            var_indirect_usages: HashMap::new(),
             defines_per_top: HashMap::new(),
             uses_per_top: HashMap::new(),
-            blocks,
+            blocks: Slab::new(),
             fixed: fixed.unwrap_or_default(),
             resolved_values: HashMap::new(),
-            dynamic_vars: HashMap::new(),
+            divided_vars: HashMap::new(),
             macro_calls: HashMap::new(),
+            subst_vars: HashSet::new(),
             options: AnalyzerOptions {
                 flatten_threshold: flatten_threshold.unwrap_or(200),
             },
         };
+        GuardAnalyzer::analyze_blocks(&mut s);
+
+        Flattener::flatten(&mut s, flatten_threshold.unwrap_or(200));
 
         // Collect
         for id in &s.top_ids {
@@ -637,7 +635,7 @@ impl Analyzer {
         VariableAnalyzer::analyze_variables(&mut s);
 
         // Record all m4 macro calls
-        s.macro_calls = MacroCallFinder::find_macro_calls(&s.pool.nodes, &s.top_ids);
+        MacroHandler::handle_macro_calls(&mut s);
 
         s
     }
@@ -656,14 +654,10 @@ impl Analyzer {
         }
     }
 
-    fn get_block(&self, block_id: BlockId) -> Option<&Block> {
-        self.blocks.get(block_id)
-    }
-
     fn get_branch_index(&self, parent_id: NodeId, block_id: BlockId) -> Option<usize> {
         self.get_node(parent_id)
             .info
-            .child_blocks
+            .branches
             .iter()
             .enumerate()
             .filter_map(|(index, bid)| (*bid == block_id).then_some(index))
@@ -811,18 +805,31 @@ impl Analyzer {
     }
 
     pub fn get_children(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
+        let body_nodes = self.get_body(node_id).into_iter().flatten();
+
+        let pre_body_nodes = self.pool.get(node_id).map_or_else(
+            || [].iter().cloned(),
+            |n| n.info.pre_body_nodes.iter().cloned(),
+        );
+
+        let children: Vec<_> = pre_body_nodes.chain(body_nodes).collect();
+
+        (!children.is_empty()).then_some(children)
+    }
+
+    pub fn get_body(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
         self.pool.get(node_id).and_then(|n| {
-            if n.info.child_blocks.is_empty() {
+            if n.info.branches.is_empty() {
                 None
             } else {
                 Some(
                     n.info
-                        .child_blocks
+                        .branches
                         .iter()
                         .map(|block_id| {
                             self.blocks
                                 .get(*block_id)
-                                .map(|block| block.children.clone().into_iter())
+                                .map(|block| block.nodes.clone().into_iter())
                         })
                         .flatten()
                         .flatten()
@@ -880,6 +887,14 @@ impl Analyzer {
         &mut self.pool.nodes[node_id]
     }
 
+    fn get_block(&self, block_id: BlockId) -> &Block {
+        &self.blocks[block_id]
+    }
+
+    fn get_block_mut(&mut self, block_id: BlockId) -> &mut Block {
+        &mut self.blocks[block_id]
+    }
+
     /// Get original content of commands in specified node
     pub fn get_content(&self, node_id: NodeId) -> Option<Vec<String>> {
         self.pool.get(node_id).map(|node| {
@@ -914,14 +929,34 @@ impl Analyzer {
         self.get_node(node_id).info.top_id.unwrap()
     }
 
-    fn collect_descendant_nodes(&self, node_id: NodeId) -> Vec<NodeId> {
+    fn add_block(&mut self, block: Block) -> BlockId {
+        let new_id = self.blocks.insert(block);
+        self.get_block_mut(new_id).block_id = new_id;
+        new_id
+    }
+
+    fn collect_descendant_nodes(
+        &self,
+        node_id: NodeId,
+        aware_chunk_boundary: bool,
+        include_pre_body_nodes: bool,
+    ) -> Vec<NodeId> {
         let mut stack = vec![node_id];
         let mut ret = HashSet::new();
         while let Some(id) = stack.pop() {
-            if id == node_id || !ret.contains(&id) {
-                if let Some(children) = self.get_children(id) {
-                    stack.extend(children.iter());
-                    ret.extend(children.iter());
+            if !ret.contains(&id) {
+                ret.insert(id);
+                if let Some(children) = if include_pre_body_nodes {
+                    self.get_children(id)
+                } else {
+                    self.get_body(id)
+                } {
+                    let filtered = children.iter().filter(|&&child| {
+                        // if aware chunk boundary,
+                        // exclude children that are beyond chunk boundary
+                        !(aware_chunk_boundary && self.get_node(child).info.is_top_node())
+                    });
+                    stack.extend(filtered.clone());
                 }
             }
         }
@@ -935,20 +970,8 @@ impl Analyzer {
     ) -> (NodeDependencyMap, NodeDependencyMap) {
         let mut dependencies = HashMap::new();
         let mut dependents = HashMap::new();
-        let mut stack = vec![node_id];
-        let mut visited = HashSet::new();
-        while let Some(id) = stack.pop() {
-            assert!(!visited.contains(&id));
-            visited.insert(id);
+        for id in self.collect_descendant_nodes(node_id, false, false) {
             if let Some(node) = self.pool.nodes.get(id) {
-                if let Some(children) = &self.get_children(node.info.node_id) {
-                    stack.extend(children.iter().filter(|&&child| {
-                        self.pool
-                            .nodes
-                            .get(child)
-                            .is_some_and(|n| !n.info.is_top_node())
-                    }));
-                }
                 dependencies.extend(node.info.dependencies.clone().into_iter());
                 dependents.extend(node.info.dependents.clone().into_iter());
             }
@@ -956,28 +979,24 @@ impl Analyzer {
         (dependencies, dependents)
     }
 
+    fn is_var_used(&self, var_name: &str) -> bool {
+        self.var_usages.contains_key(var_name)
+            || self.var_indirect_usages.contains_key(var_name)
+            || self.subst_vars.contains(var_name)
+    }
+
     /// recursively collect defined/used variables
     pub(crate) fn collect_variables(&self, node_id: NodeId) -> (VariableMap, VariableMap) {
         let mut defines = HashMap::new();
         let mut uses = HashMap::new();
-        let mut stack = vec![node_id];
-        let mut visited = HashSet::new();
-        while let Some(id) = stack.pop() {
-            assert!(!visited.contains(&id));
-            visited.insert(id);
+        for id in self.collect_descendant_nodes(node_id, true, false) {
             if let Some(node) = self.pool.nodes.get(id) {
-                if let Some(children) = &self.get_children(node.info.node_id) {
-                    stack.extend(children.iter().filter(|&&child| {
-                        self.pool
-                            .nodes
-                            .get(child)
-                            .is_some_and(|n| !n.info.is_top_node())
-                    }));
-                }
-                defines.extend(node.info.defines.iter().filter_map(|(s, v)| {
-                    (self.var_usages.contains_key(s) || self.var_dynamic_usages.contains_key(s))
-                        .then_some((s.clone(), v.clone()))
-                }));
+                defines.extend(
+                    node.info
+                        .defines
+                        .iter()
+                        .filter_map(|(s, v)| self.is_var_used(s).then_some((s.clone(), v.clone()))),
+                );
                 uses.extend(node.info.uses.iter().map(|(s, v)| (s.clone(), v.clone())));
             }
         }

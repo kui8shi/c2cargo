@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::io::{stdin, Read};
+use std::{env, fs, path::Path};
 mod analysis;
 mod analyzer;
 mod utils;
@@ -29,10 +29,23 @@ struct ClaudeContent {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    // Read input from stdin
-    let mut input = String::new();
-    stdin().read_to_string(&mut input)?;
-    analysis::analysis(input).await?;
+    let args: Vec<String> = env::args().collect();
+
+    let path = match args.get(1) {
+        Some(path) => path,
+        None => {
+            eprintln!("Usage: c2cargo <path>");
+            std::process::exit(1);
+        }
+    };
+
+    // Check if file exists
+    if !Path::new(path).exists() {
+        eprintln!("Error: File '{}' does not exist", path);
+        std::process::exit(1);
+    }
+
+    analysis::analysis(&Path::new(path)).await?;
     // dbg!(analyzer.find_case_matches(&["host".into(), "host_cpu".into()]));
     // migrate(&analyzer)?;
     Ok(())

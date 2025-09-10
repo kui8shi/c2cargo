@@ -2,10 +2,8 @@ use std::{collections::HashMap, hash::Hash};
 
 use super::{
     AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, M4Macro, MayM4, Node, NodeId,
-    Parameter, VariableMap, Word, WordFragment,
+    Parameter, VariableMap, Word, WordFragment, Condition
 };
-
-use slab::Slab;
 
 #[derive(Debug, Clone, PartialEq, Eq, Ord, Hash)]
 pub(crate) struct Location {
@@ -22,58 +20,60 @@ impl PartialOrd for Location {
 
 /// Struct represents various types of variable names used in assignments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum LValue {
+pub(crate) enum Identifier {
     /// String literal. Direct variable reference.
-    Lit(String),
+    Name(String),
     /// Variable name. Indirect variable reference.
-    Var(String, Location),
+    Indirect(String, Location),
     /// Dynamically constructed variable name. Indirect variable reference.
-    Concat(Vec<LValue>),
+    Concat(Vec<Identifier>),
 }
 
 /// Struct represents various types of values assigned to variables.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) enum RValue {
+pub(crate) enum ValueExpr {
     /// String literal. It could be used in lhs or rhs.
     Lit(String),
-    /// Variable referenece. It could used in lhs or rhs.
+    /// Values referenced via a variable. It could used in lhs or rhs.
     Var(String, Location),
     /// String literal represented as a concatenation of rvalues
-    Concat(Vec<RValue>),
+    Concat(Vec<ValueExpr>),
     /// Dynamically constructed variable name.
     /// e.g. \"\$${var1}_${var2}_suffix\" becomes Ref([Var(var1), Lit(_), Var(var2), Lit(_suffix)])
-    Ref(Vec<RValue>),
+    DynName(Vec<ValueExpr>),
     /// Arbitrary shell commands applied to emit values
     /// (shell_string, depending_variables)
-    Shell(String, Vec<RValue>),
+    Shell(String, Vec<ValueExpr>),
 }
 
-impl RValue {
+impl ValueExpr {
     pub(crate) fn vars(&self) -> Option<Vec<(String, Location)>> {
         match self {
-            RValue::Lit(_) => None,
-            RValue::Var(s, loc) => Some(vec![(s.to_owned(), loc.clone())]),
-            RValue::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
-            RValue::Ref(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
-            RValue::Shell(_, v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            ValueExpr::Lit(_) => None,
+            ValueExpr::Var(s, loc) => Some(vec![(s.to_owned(), loc.clone())]),
+            ValueExpr::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            ValueExpr::DynName(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            ValueExpr::Shell(_, v) => {
+                Some(v.iter().map(|e| e.vars()).flatten().flatten().collect())
+            }
         }
     }
 }
 
-impl Into<Option<LValue>> for &RValue {
-    fn into(self) -> Option<LValue> {
+impl Into<Option<Identifier>> for &ValueExpr {
+    fn into(self) -> Option<Identifier> {
         match self {
-            RValue::Lit(_) => None,
-            RValue::Var(name, _loc) => Some(LValue::Lit(name.to_owned())),
-            RValue::Ref(rvalues) => Some(LValue::Concat({
+            ValueExpr::Lit(_) => None,
+            ValueExpr::Var(name, _loc) => Some(Identifier::Name(name.to_owned())),
+            ValueExpr::DynName(rvalues) => Some(Identifier::Concat({
                 let mut lvalues = Vec::new();
                 for rvalue in rvalues {
                     match rvalue {
-                        RValue::Lit(lit) => {
-                            lvalues.push(LValue::Lit(lit.to_owned()));
+                        ValueExpr::Lit(lit) => {
+                            lvalues.push(Identifier::Name(lit.to_owned()));
                         }
-                        RValue::Var(name, loc) => {
-                            lvalues.push(LValue::Var(name.to_owned(), loc.clone()));
+                        ValueExpr::Var(name, loc) => {
+                            lvalues.push(Identifier::Indirect(name.to_owned(), loc.clone()));
                         }
                         _ => return None,
                     }
@@ -88,8 +88,6 @@ impl Into<Option<LValue>> for &RValue {
 #[derive(Debug)]
 pub(super) struct VariableAnalyzer<'a> {
     analyzer: &'a mut Analyzer,
-    pub defines: HashMap<NodeId, HashMap<String, Vec<Location>>>,
-    pub uses: HashMap<NodeId, HashMap<String, Vec<Location>>>,
     cursor: Option<NodeId>,
 }
 
@@ -98,8 +96,6 @@ impl<'a> VariableAnalyzer<'a> {
     pub fn analyze_variables(analyzer: &'a mut Analyzer) {
         let mut s = Self {
             analyzer,
-            defines: HashMap::new(),
-            uses: HashMap::new(),
             cursor: None,
         };
 
@@ -109,11 +105,14 @@ impl<'a> VariableAnalyzer<'a> {
 
         // collect recorded definitions
         let var_definitions: VariableMap = s
-            .defines
-            .into_iter()
-            .flat_map(|(_, map)| map)
-            .fold(HashMap::new(), |mut acc: VariableMap, (name, mut locs)| {
-                acc.entry(name).or_default().append(&mut locs);
+            .analyzer
+            .pool
+            .nodes
+            .iter()
+            .map(|(_, n)| n.info.defines.iter())
+            .flatten()
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
+                acc.entry(name.clone()).or_default().extend(locs.clone());
                 acc
             })
             .into_iter()
@@ -125,11 +124,14 @@ impl<'a> VariableAnalyzer<'a> {
 
         // collect recorded usages
         let var_usages: VariableMap = s
-            .uses
-            .into_iter()
-            .flat_map(|(_, map)| map)
-            .fold(HashMap::new(), |mut acc: VariableMap, (name, mut locs)| {
-                acc.entry(name).or_default().append(&mut locs);
+            .analyzer
+            .pool
+            .nodes
+            .iter()
+            .map(|(_, n)| n.info.uses.iter())
+            .flatten()
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
+                acc.entry(name.clone()).or_default().extend(locs.clone());
                 acc
             })
             .into_iter()
@@ -156,10 +158,6 @@ impl<'a> VariableAnalyzer<'a> {
 }
 
 impl<'a> VariableAnalyzer<'a> {
-    pub fn analyze(&mut self, node_id: NodeId) {
-        self.visit_top(node_id);
-    }
-
     fn current_location(&self) -> Location {
         Location {
             node_id: self.cursor.unwrap(),
@@ -169,30 +167,32 @@ impl<'a> VariableAnalyzer<'a> {
     }
 
     fn record_variable_definition(&mut self, name: &str) {
-        let id = self.cursor.unwrap();
+        let node_id = self.cursor.unwrap();
         let loc = self.current_location();
-        self.defines
-            .entry(id)
-            .or_default()
+        self.analyzer
+            .get_node_mut(node_id)
+            .info
+            .defines
             .entry(name.to_owned())
-            .or_insert(Vec::new())
+            .or_default()
             .push(loc.clone());
     }
 
     fn record_variable_usage(&mut self, name: &str) {
-        let id = self.cursor.unwrap();
+        let node_id = self.cursor.unwrap();
         let loc = self.current_location();
-        self.uses
-            .entry(id)
-            .or_default()
+        self.analyzer
+            .get_node_mut(node_id)
+            .info
+            .uses
             .entry(name.to_owned())
-            .or_insert(Vec::new())
+            .or_default()
             .push(loc.clone());
     }
 
     /// parse a body of eval assignment. It is expected to take `word` as a concatenated word fragments
     /// currently we don't support mixed lhs value (eigther single literal or single variable)
-    fn parse_eval_assignment(&self, frags: &[AcWordFragment]) -> (LValue, Option<RValue>) {
+    fn parse_eval_assignment(&self, frags: &[AcWordFragment]) -> (Identifier, Option<ValueExpr>) {
         let mut lhs = Vec::new();
         let mut rhs = Vec::new();
         let mut is_lhs = true;
@@ -206,32 +206,32 @@ impl<'a> VariableAnalyzer<'a> {
                     is_ref = true;
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if is_lhs => {
-                    lhs.push(LValue::Var(s.to_owned(), loc.clone()));
+                    lhs.push(Identifier::Indirect(s.to_owned(), loc.clone()));
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if !is_lhs => {
-                    rhs.push(RValue::Var(s.to_owned(), loc.clone()));
+                    rhs.push(ValueExpr::Var(s.to_owned(), loc.clone()));
                 }
                 Shell(WordFragment::Literal(s)) if is_lhs => {
                     if s.contains("=") {
                         let mut split = s.split("=");
                         if let Some(lit) = split.next() {
                             if !lit.is_empty() {
-                                lhs.push(LValue::Lit(lit.to_owned()));
+                                lhs.push(Identifier::Name(lit.to_owned()));
                             }
                         }
                         if let Some(lit) = split.next() {
                             if !lit.is_empty() {
-                                rhs.push(RValue::Lit(lit.to_owned()));
+                                rhs.push(ValueExpr::Lit(lit.to_owned()));
                             }
                         }
                         is_lhs = false;
                     } else {
-                        lhs.push(LValue::Lit(s.to_owned()));
+                        lhs.push(Identifier::Name(s.to_owned()));
                     }
                 }
                 Shell(WordFragment::Literal(s)) if !is_lhs => {
                     let s = s.strip_prefix("=").unwrap_or(s).to_owned();
-                    rhs.push(RValue::Lit(s));
+                    rhs.push(ValueExpr::Lit(s));
                 }
                 Shell(WordFragment::DoubleQuoted(inner_frags)) if !is_lhs => {
                     for inner_frag in inner_frags {
@@ -240,10 +240,10 @@ impl<'a> VariableAnalyzer<'a> {
                                 is_ref = true;
                             }
                             WordFragment::Literal(s) => {
-                                rhs.push(RValue::Lit(s.to_owned()));
+                                rhs.push(ValueExpr::Lit(s.to_owned()));
                             }
                             WordFragment::Param(Parameter::Var(s)) => {
-                                rhs.push(RValue::Var(s.to_owned(), loc.clone()));
+                                rhs.push(ValueExpr::Var(s.to_owned(), loc.clone()));
                             }
                             _ => (),
                         }
@@ -255,15 +255,15 @@ impl<'a> VariableAnalyzer<'a> {
         let lhs = if lhs.len() <= 1 {
             lhs.pop().unwrap()
         } else {
-            LValue::Concat(lhs)
+            Identifier::Concat(lhs)
         };
         if is_ref {
-            rhs = vec![RValue::Ref(rhs)];
+            rhs = vec![ValueExpr::DynName(rhs)];
         }
         if rhs.len() <= 1 {
             (lhs, rhs.pop())
         } else {
-            (lhs, Some(RValue::Concat(rhs)))
+            (lhs, Some(ValueExpr::Concat(rhs)))
         }
     }
 }
@@ -276,10 +276,6 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     fn visit_top(&mut self, node_id: NodeId) {
         self.cursor.replace(node_id);
         self.walk_node(node_id);
-        self.analyzer.get_node_mut(node_id).info.defines =
-            self.defines.get(&node_id).cloned().unwrap_or_default();
-        self.analyzer.get_node_mut(node_id).info.uses =
-            self.uses.get(&node_id).cloned().unwrap_or_default();
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
@@ -288,11 +284,6 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         // Walk
         if !self.get_node(node_id).info.is_top_node() {
             self.walk_node(node_id);
-            // Assign collected variable to the node
-            self.analyzer.get_node_mut(node_id).info.defines =
-                self.defines.get(&node_id).cloned().unwrap_or_default();
-            self.analyzer.get_node_mut(node_id).info.uses =
-                self.uses.get(&node_id).cloned().unwrap_or_default();
         }
         // Recover
         self.cursor = saved_cursor;
