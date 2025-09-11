@@ -148,8 +148,8 @@ impl<'a> VariableAnalyzer<'a> {
         // Calculate dependency edges
         for (user_id, node) in &s.analyzer.pool.nodes {
             for var in node.info.uses.keys() {
-                if let Some(def_id) = s.analyzer.get_dominant_definition(var, user_id) {
-                    def_use_edges.push((def_id, user_id, var.to_owned()));
+                if let Some(def_loc) = s.analyzer.get_dominant_definition(var, user_id) {
+                    def_use_edges.push((def_loc.node_id, user_id, var.to_owned()));
                 }
             }
         }

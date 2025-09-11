@@ -2,26 +2,20 @@
 //! in a shell script or autoconf file.
 
 use crate::analyzer::Analyzer;
-use std::collections::HashSet;
-use std::fs::File;
-use std::io::Write;
 use std::path::Path;
 
 pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     // Read file contents
     let path = std::path::absolute(path).unwrap();
-    let contents = std::fs::read_to_string(&path)?;
-    let fixed = [(
-        "srcdir".to_owned(),
-        path.parent().unwrap().to_str().unwrap().to_owned(),
-    )];
+
     // Initialize the lexer and parser
-    let mut analyzer = Analyzer::new(&contents, None, Some(fixed.into()));
+    let mut analyzer = Analyzer::new(&path, None);
     let top_ids = analyzer.get_top_ids();
 
     analyzer.prune_platform_branch();
     analyzer.run_value_set_analysis();
     analyzer.run_build_option_analysis();
+    analyzer.run_type_inference();
 
     /*
 

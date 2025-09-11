@@ -72,7 +72,7 @@ pub(super) struct TypeInferrer<'a> {
 
 impl Analyzer {
     /// run value set analysis to obtain value candidates of variables appeared in eval statements.
-    pub fn run_type_analysis(&self) -> HashMap<String, (HashSet<TypeHint>, DataType)> {
+    pub fn run_type_inference(&self) -> HashMap<String, (HashSet<TypeHint>, DataType)> {
         TypeInferrer::run_type_inference(&self)
     }
 }

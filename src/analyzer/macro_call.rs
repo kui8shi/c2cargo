@@ -1,6 +1,9 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    path::PathBuf,
+};
 
-use super::{Analyzer, AstVisitor, M4Macro, Node, NodeId};
+use super::{as_literal, as_shell, Analyzer, AstVisitor, M4Macro, Node, NodeId};
 
 /// Visitor to find case statements branching given variables.
 #[derive(Debug)]
@@ -55,6 +58,28 @@ impl<'a> MacroHandler<'a> {
 
         for subst_macro_name in ["AC_SUBST", "AM_SUBST_NOTMAKE"] {
             for (id, _) in s.found.get(subst_macro_name).into_iter().flatten() {
+                s.analyzer.remove_node(*id);
+            }
+        }
+
+        if let Some(v) = s.found.get("AC_CONFIG_FILES") {
+            for (id, macro_call) in v {
+                for word in macro_call.get_arg_as_array(0).unwrap() {
+                    if let Some(lit) = as_shell(&word).and_then(as_literal) {
+                        let path = {
+                            let mut buf = PathBuf::from(lit);
+                            if buf.ends_with("Makefile") {
+                                buf.set_extension("am");
+                            } else {
+                                buf.set_extension("in");
+                            }
+                            s.analyzer.project_info.project_dir.join(buf)
+                        };
+                        if path.exists() {
+                            s.analyzer.project_info.subst_files.push(path);
+                        }
+                    }
+                }
                 s.analyzer.remove_node(*id);
             }
         }

@@ -10,7 +10,7 @@ use autotools_parser::{
         Arithmetic, MayM4, Parameter, Redirect,
     },
     lexer::Lexer,
-    parse::autoconf::NodeParser,
+    parse::autoconf::{self, NodeParser},
 };
 use build_option::BuildOptionInfo;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
@@ -18,6 +18,7 @@ use macro_call::MacroHandler;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    path::{Path, PathBuf},
 };
 
 use eval::DividedIdentifier;
@@ -530,6 +531,13 @@ struct AnalyzerOptions {
     flatten_threshold: usize,
 }
 
+#[derive(Debug, Default)]
+struct ProjectInfo {
+    project_dir: PathBuf,
+    subst_files: Vec<PathBuf>,
+    config_header: PathBuf,
+}
+
 /// Analyzer which conducts various kinds of analyses:
 /// 1. construction of a dependency graph by tracking variable usages
 /// 2. flattening of large commands
@@ -571,6 +579,8 @@ pub struct Analyzer {
     subst_vars: HashSet<String>,
     /// options of this analyzer
     options: AnalyzerOptions,
+    /// information about paths in the project
+    project_info: ProjectInfo,
 }
 
 impl Analyzer {
@@ -582,12 +592,16 @@ impl Analyzer {
     }
 
     /// Analyze commands and build the dependency graph
-    pub fn new<S: AsRef<str>>(
-        contents: S,
-        flatten_threshold: Option<usize>,
-        fixed: Option<HashMap<String, String>>,
-    ) -> Self {
-        let lexer = Lexer::new(contents.as_ref().chars());
+    pub fn new(path: &Path, flatten_threshold: Option<usize>) -> Self {
+        let contents = autotools_parser::preprocess::partial_expansion(path)
+            .expect("Partial Expansion of configure.ac has failed.");
+        std::fs::read_to_string(&path).unwrap();
+        let project_dir = path.parent().unwrap().to_owned();
+        let fixed = [(
+            "srcdir".to_owned(),
+            project_dir.to_str().unwrap().to_owned(),
+        )];
+        let lexer = Lexer::new(contents.chars());
         let (nodes, top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
         let nodes = nodes
             .into_iter()
@@ -600,7 +614,7 @@ impl Analyzer {
         let pool = AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node())));
 
         let mut s = Self {
-            lines: contents.as_ref().lines().map(|s| s.to_string()).collect(),
+            lines: contents.lines().map(|s| s.to_string()).collect(),
             pool,
             build_option_info: BuildOptionInfo::default(),
             top_ids,
@@ -611,13 +625,17 @@ impl Analyzer {
             defines_per_top: HashMap::new(),
             uses_per_top: HashMap::new(),
             blocks: Slab::new(),
-            fixed: fixed.unwrap_or_default(),
+            fixed: HashMap::from(fixed),
             resolved_values: HashMap::new(),
             divided_vars: HashMap::new(),
             macro_calls: HashMap::new(),
             subst_vars: HashSet::new(),
             options: AnalyzerOptions {
                 flatten_threshold: flatten_threshold.unwrap_or(200),
+            },
+            project_info: ProjectInfo {
+                project_dir,
+                ..Default::default()
             },
         };
         GuardAnalyzer::analyze_blocks(&mut s);
@@ -689,7 +707,7 @@ impl Analyzer {
     }
 
     /// Get command that defines a variable before, with consideration for the condition
-    pub fn get_dominant_definition(&self, var_name: &str, node_id: NodeId) -> Option<NodeId> {
+    pub fn get_dominant_definition(&self, var_name: &str, node_id: NodeId) -> Option<Location> {
         if let Some(node) = self.pool.get(node_id) {
             if let Some(user_loc) = node.info.uses.get(var_name).map(|v| v.first()).flatten() {
                 return self.var_definitions.get(var_name).and_then(|v| {
@@ -703,7 +721,7 @@ impl Analyzer {
                             )
                             .is_none_or(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
                                 && loc <= user_loc)
-                                .then_some(loc.node_id)
+                                .then_some(loc.clone())
                         })
                         .next()
                 });

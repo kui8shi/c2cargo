@@ -176,25 +176,29 @@ impl Analyzer {
 
         // Helper function to check if a variable is used outside this chunk
         let is_used_outside_chunk = |var_name: &String| -> bool {
-            self.var_usages
+            self.var_usages.get(var_name).is_some_and(|locs| {
+                locs.iter()
+                    .find(|loc| **loc > chunk_end_loc)
+                    .is_some_and(|loc| {
+                        self.get_dominant_definition(var_name, loc.node_id)
+                            .is_none_or(|dominant_loc| dominant_loc <= chunk_end_loc)
+                    })
+            }) || self
+                .var_indirect_usages
                 .get(var_name)
                 .is_some_and(|locs| locs.iter().any(|loc| *loc > chunk_end_loc))
-                || self
-                    .var_indirect_usages
-                    .get(var_name)
-                    .is_some_and(|locs| locs.iter().any(|loc| *loc > chunk_end_loc))
                 || self.subst_vars.contains(var_name)
+                    && self
+                        .project_info
+                        .subst_files
+                        .iter()
+                        .any(|path| std::fs::read_to_string(path).unwrap().contains(var_name))
         };
 
         // Exported variables: defined in chunk and used outside the chunk
         let exported: HashSet<String> = chunk_defines
             .iter()
-            .filter(|var_name| {
-                if var_name.as_str() == "HAVE_STACK_T_01" {
-                    dbg!(is_used_outside_chunk(var_name));
-                }
-                is_used_outside_chunk(var_name)
-            })
+            .filter(|var_name| is_used_outside_chunk(var_name))
             .cloned()
             .collect();
 
