@@ -304,22 +304,28 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
     // dbg!(analyzer.run_type_analysis());
 
     // === Out-of-scope variables ===
-    for (i, chunk) in analyzer.fuse_chunks(Some(5), true).iter().enumerate() {
-        println!("+++++++++++++++++++++++++++++++++++++++++++++");
-        println!("CHUNK {}: {} nodes", i, chunk.len());
-        for &id in chunk {
-            println!("{}", &analyzer.display_node(id));
-        }
-        let (imported, exported) = analyzer.examine_chunk_io(chunk);
-        println!(
-            "CHUNK {}: imported={:?}, exported={:?}",
-            i, imported, exported
-        );
-    }
+    // for (i, chunk) in analyzer.construct_chunks(Some(5), true).iter().enumerate() {
+    //     println!("+++++++++++++++++++++++++++++++++++++++++++++");
+    //     println!("CHUNK {}: {} nodes", i, chunk.len());
+    //     for &id in chunk {
+    //         println!("{}", &analyzer.display_node(id));
+    //     }
+    //     let (imported, exported) = analyzer.examine_chunk_io(chunk);
+    //     println!(
+    //         "CHUNK {}: imported={:?}, exported={:?}",
+    //         i, imported, exported
+    //     );
+    // }
 
     // === Build Option Analysis ===
     // analyzer.run_extra_build_option_analysis().await;
     // dbg!(analyzer.find_macro_calls().keys().collect::<Vec<_>>());
+
+    // === Translation Analysis Debug ===
+    println!("\n=== DEBUG: Testing Analyzer::translate ===");
+    println!("Calling analyzer.translate()...");
+    analyzer.translate();
+    println!("translate() completed successfully");
 
     Ok(())
 }

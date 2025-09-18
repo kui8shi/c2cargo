@@ -1,18 +1,34 @@
 //! LLM analysis module for argument analysis
-use futures::StreamExt;
-use llm::{
-    builder::{LLMBackend, LLMBuilder},
-    chat::{ChatMessage, Usage},
-};
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, option, time::Duration};
-use tokio::time::sleep;
+use serde::{ser::SerializeStruct, Deserialize, Serialize};
+use std::collections::HashMap;
+
+use crate::utils::llm_analysis::{LLMAnalysis, LLMAnalysisInput, LLMAnalysisOutput};
 
 use super::BuildOption;
 
-// ----- Data types for structured output -----
+// ----- Data types for input/output -----
 
-#[derive(Debug, Serialize, Deserialize)]
+impl Serialize for BuildOption {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let mut state = serializer.serialize_struct("build_option", 4)?;
+        state.serialize_field("name", &self.option_name)?;
+        state.serialize_field("declaration", &self.declaration)?;
+        state.serialize_field("fragments", &self.context)?;
+        state.serialize_field("candidates", &self.candidates)?;
+        state.end()
+    }
+}
+
+impl LLMAnalysisInput<Vec<String>> for BuildOption {
+    fn get_evidence_for_validation(&self) -> &Vec<String> {
+        &self.candidates
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct BuildOptionLLMAnalysisResult {
     #[serde(default)]
     /// Distinct literals except yes/no/empty and paths.
@@ -26,9 +42,15 @@ pub(super) struct BuildOptionLLMAnalysisResult {
 }
 
 impl BuildOptionLLMAnalysisResult {
+    fn normalize(&mut self) {
+        self.representatives.sort();
+    }
+}
+
+impl LLMAnalysisOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
     /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
-    fn validate(&self, values: &[String]) -> Result<(), Vec<String>> {
+    fn validate(&self, values: &Vec<String>) -> Result<(), Vec<String>> {
         use std::collections::HashSet;
 
         let mut errors = Vec::new();
@@ -197,16 +219,21 @@ impl BuildOptionLLMAnalysisResult {
             Err(errors)
         }
     }
-
-    fn normalize(&mut self) {
-        self.representatives.sort();
-    }
 }
 
-// ----- Static schema and prompt (reuse the previous prompt verbatim) -----
+pub(super) struct LLMUser {}
 
-fn schema_text() -> &'static str {
-    r#"{
+impl LLMAnalysis for LLMUser {
+    type Evidence = Vec<String>;
+    type Input = BuildOption;
+    type Output = BuildOptionLLMAnalysisResult;
+
+    fn new() -> Self {
+        Self {}
+    }
+
+    fn schema_text(&self) -> &'static str {
+        r#"{
   "type": "object",
   "required": [
     "representatives",
@@ -227,10 +254,10 @@ fn schema_text() -> &'static str {
   },
   "additionalProperties": false
 }"#
-}
+    }
 
-fn extraction_prompt() -> String {
-    r#"
+    fn extraction_prompt(&self) -> &'static str {
+        r#"
 You will be given Autotools fragments (configure.ac/configure shell, m4 macros, Makefile.am snippets, and related variable logic). For each build option, extract only the minimal facts below and return JSON conforming exactly to the schema. Output JSON only.
 
 Definitions:
@@ -273,195 +300,6 @@ Strictness:
 - Return exactly one top-level, minified JSON object.
 - No comments or extra keys.
 - Output must validate against the schema.
-"#.to_string()
-}
-
-const MODEL: &str = "gpt-5-nano";
-
-/// Package the schema + prompt + user fragments into one user message.
-fn compose_user_content(
-    name: String,
-    declaration: String,
-    fragments: &[String],
-    candidates: &[String],
-) -> String {
-    serde_json::json!({
-        "schema": serde_json::from_str::<serde_json::Value>(schema_text()).unwrap(),
-        "instruction": extraction_prompt(),
-        "input": { "name": name, "declaration": declaration, "fragments": fragments, "candidates": candidates }
-    })
-    .to_string()
-}
-
-fn compose_user_content_with_feedback(
-    option_name: String,
-    declaration: String,
-    contexts: &[String],
-    candidates: &[String],
-    prev_json: Option<&str>,
-    errors: Option<&[String]>,
-) -> String {
-    let base = compose_user_content(option_name, declaration, contexts, candidates);
-
-    let mut extra = String::new();
-    if let Some(j) = prev_json {
-        extra.push_str("\n\n# PreviousInvalidJSON\n");
-        extra.push_str(j);
-        extra.push('\n');
+"#
     }
-    if let Some(errs) = errors {
-        extra.push_str("\n\n# ValidationErrors\n");
-        for e in errs {
-            extra.push_str("- ");
-            extra.push_str(e);
-            extra.push('\n');
-        }
-    }
-
-    format!("{base}{extra}")
-}
-
-async fn make_api_request_with_retry(
-    build_option: &BuildOption,
-) -> Result<BuildOptionLLMAnalysisResult, String> {
-    const MAX_RETRIES: usize = 3;
-    const RETRY_DELAY_MS: u64 = 1000;
-
-    let api_key = std::env::var("OPENAI_API_KEY").unwrap_or("sk-TESTKEY".into());
-
-    // Keep last errors and raw JSON to feed back into the next retry
-    let mut last_errors: Option<Vec<String>> = None;
-    let mut last_raw_json: Option<String> = None;
-
-    for attempt in 0..MAX_RETRIES {
-        let llm = LLMBuilder::new()
-            .backend(LLMBackend::OpenAI)
-            .api_key(api_key.clone())
-            .model(MODEL)
-            .stream(false)
-            .build()
-            .map_err(|e| format!("Failed to build LLM client: {}", e))?;
-
-        // Add validation feedback and previous invalid JSON if available
-        let prompt = compose_user_content_with_feedback(
-            build_option.option_name.clone(),
-            build_option.declaration.clone(),
-            &build_option.context,
-            &build_option.candidates,
-            last_raw_json.as_deref(),
-            last_errors.as_deref(),
-        );
-        let msg = ChatMessage::user().content(prompt).build();
-
-        match llm.chat(&[msg]).await {
-            Ok(response) => {
-                let text = response.text().ok_or("No text in response")?;
-                // println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
-                // if let Some(usage) = response.usage() {
-                //     show_cost(usage);
-                // }
-
-                match serde_json::from_str::<BuildOptionLLMAnalysisResult>(&text) {
-                    Ok(mut result) => match result.validate(&build_option.candidates) {
-                        Ok(()) => {
-                            result.normalize();
-                            return Ok(result);
-                        }
-                        Err(errs) => {
-                            last_errors = Some(errs);
-                            last_raw_json = Some(text);
-                            if attempt < MAX_RETRIES - 1 {
-                                // eprintln!("Validation failed; retrying in {}ms...", RETRY_DELAY_MS);
-                                sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                                continue;
-                            } else {
-                                return Err(format!(
-                                    "Validation failed after {} attempts: {:?}",
-                                    MAX_RETRIES, last_errors
-                                ));
-                            }
-                        }
-                    },
-                    Err(e) => {
-                        last_errors = Some(vec![format!("JSON parse error: {}", e)]);
-                        last_raw_json = Some(text);
-                        if attempt < MAX_RETRIES - 1 {
-                            // eprintln!("JSON parse error; retrying in {}ms...", RETRY_DELAY_MS);
-                            sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                            continue;
-                        } else {
-                            return Err(format!(
-                                "Failed to parse JSON after {} attempts: {}",
-                                MAX_RETRIES, e
-                            ));
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                /*
-                eprintln!(
-                    "API request error on attempt {} for option '{}': {}",
-                    attempt + 1,
-                    build_option.option_name,
-                    e
-                );
-                */
-                if attempt < MAX_RETRIES - 1 {
-                    // eprintln!("Retrying in {}ms...", RETRY_DELAY_MS);
-                    sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                } else {
-                    return Err(format!(
-                        "API request failed after {} attempts: {}",
-                        MAX_RETRIES, e
-                    ));
-                }
-            }
-        }
-    }
-
-    unreachable!()
-}
-
-/// Analyze various properties of build options using LLMs
-pub(super) async fn analyze_build_options<'a, I: Iterator<Item = &'a BuildOption>>(
-    build_options: I,
-) -> Vec<BuildOptionLLMAnalysisResult> {
-    futures::stream::iter(
-        build_options.map(|build_option| make_api_request_with_retry(build_option)),
-    )
-    .buffer_unordered(10)
-    .then(|result| async move {
-        match result {
-            Ok(analysis) => Some(analysis),
-            Err(e) => {
-                eprintln!("Failed to analyze build option: {}", e);
-                None
-            }
-        }
-    })
-    .filter_map(|opt| async move { opt })
-    .collect()
-    .await
-}
-
-fn show_cost(usage: Usage) {
-    // Show usage and rough cost estimation
-
-    eprintln!(
-        "Usage: prompt={} completion={} total={}",
-        usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
-    );
-
-    const M: f64 = 1_000_000.;
-    // Simple cost estimation (adjust rates to your provider/model)
-    let (prompt_rate, completion_rate) = match MODEL {
-        // (input, output) USD per 1M token
-        "gpt-5" => (1.25, 10.),
-        "gpt-5-mini" => (0.25, 2.),
-        _ => (0.05, 0.40), // gpt5-nano
-    };
-    let cost = (usage.prompt_tokens as f64) / M * prompt_rate
-        + (usage.completion_tokens as f64) / M * completion_rate;
-    eprintln!("Estimated cost: ${:.6}", cost);
 }

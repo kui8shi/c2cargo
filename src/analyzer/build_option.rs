@@ -5,9 +5,10 @@ use super::{
     Analyzer, NodeId,
 };
 use crate::utils::glob::glob_enumerate;
+use crate::utils::llm_analysis::LLMAnalysis;
 use heck::ToSnakeCase;
 
-mod llm_analysis;
+mod use_llm;
 
 /// doc
 #[derive(Debug, Clone)]
@@ -54,9 +55,10 @@ impl Analyzer {
     /// Analyze various properties of build options using LLMs
     pub(crate) async fn run_extra_build_option_analysis(&self) {
         // conduct llm analysis
-        let results =
-            llm_analysis::analyze_build_options(self.build_option_info.build_options.values())
-                .await;
+        let mut user = use_llm::LLMUser::new();
+        let results = user
+            .run_llm_analysis(self.build_option_info.build_options.values())
+            .await;
 
         for res in results {
             let build_option = self
