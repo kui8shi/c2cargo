@@ -10,18 +10,21 @@ use autotools_parser::{
         Arithmetic, MayM4, Parameter, Redirect,
     },
     lexer::Lexer,
-    parse::autoconf::{self, NodeParser},
+    parse::autoconf::NodeParser,
 };
 use build_option::BuildOptionInfo;
+use chunk::{Chunk, ChunkId, Scope};
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
+use itertools::Itertools;
 use macro_call::MacroHandler;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
 };
+use type_inference::{DataType, TypeHint};
 
-use eval::DividedIdentifier;
+use eval::IdentifierDivision;
 use flatten::Flattener;
 use variable::{Identifier, Location, ValueExpr, VariableAnalyzer};
 
@@ -31,6 +34,7 @@ mod build_option;
 mod case;
 mod chunk;
 mod eval;
+mod dictionary;
 mod flatten;
 mod guard;
 mod macro_call;
@@ -488,14 +492,18 @@ pub(crate) struct NodeInfo {
     pub node_id: NodeId,
     /// Node ID of the top-most parent node
     pub top_id: Option<NodeId>,
+    /// Chunk ID of the node
+    pub chunk_id: Option<ChunkId>,
     /// trailing comments
     // pub comment: Option<AcWord>,
     /// Range of line numbers where the body is effectively referenced.
     // pub ranges: Vec<(usize, usize)>,
     /// Body of commands referenced by this node.
     // pub cmd: AcCommand,
-    /// Node ID of the parent node, and Block ID of the block where the node resides
-    pub parent: Option<(NodeId, BlockId)>,
+    /// Node ID of the parent node
+    pub parent: Option<NodeId>,
+    /// Block ID of the block where the node resides
+    pub block: Option<BlockId>,
     /// Block IDs of the child branches
     /// The indexes correspond to the branch indexes of if/case statements
     pub branches: Vec<BlockId>,
@@ -567,12 +575,13 @@ pub struct Analyzer {
     build_option_info: BuildOptionInfo,
     /// Set of variable maps that is fixed to a certain value
     fixed: HashMap<String, String>,
-    /// Set of variables which are used in eval statements
-    evals: HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>,
+    /// Set of variables which are used in eval assignments
+    eval_assigns: HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>,
     /// State filed used for recording resolved rvalues of variables
     resolved_values: HashMap<Identifier, BTreeMap<Location, HashSet<String>>>,
     /// dynamically divided identifiers
-    divided_vars: HashMap<String, DividedIdentifier>,
+    /// The value of entry is a map from eval location to division info
+    divided_vars: HashMap<String, HashMap<Location, IdentifierDivision>>,
     /// all m4 macro calls
     macro_calls: HashMap<String, Vec<(NodeId, M4Macro)>>,
     /// all susbstitued variables
@@ -581,6 +590,12 @@ pub struct Analyzer {
     options: AnalyzerOptions,
     /// information about paths in the project
     project_info: ProjectInfo,
+    /// Chunks of nodes
+    chunks: Slab<Chunk>,
+    /// Scopes of variables
+    scopes: HashMap<String, Vec<Scope>>,
+    /// Inferred Types
+    inferred_types: HashMap<String, (HashSet<TypeHint>, DataType)>,
 }
 
 impl Analyzer {
@@ -593,8 +608,16 @@ impl Analyzer {
 
     /// Analyze commands and build the dependency graph
     pub fn new(path: &Path, flatten_threshold: Option<usize>) -> Self {
-        let contents = autotools_parser::preprocess::partial_expansion(path)
-            .expect("Partial Expansion of configure.ac has failed.");
+        let contents = if path.file_name().is_some_and(|os_str| {
+            os_str
+                .to_str()
+                .is_some_and(|file_name| file_name == "configure.ac")
+        }) {
+            autotools_parser::preprocess::partial_expansion(path)
+                .expect("Partial Expansion of configure.ac has failed.")
+        } else {
+            std::fs::read_to_string(path).expect("Reading a file has failed.")
+        };
         std::fs::read_to_string(&path).unwrap();
         let project_dir = path.parent().unwrap().to_owned();
         let fixed = [(
@@ -618,7 +641,7 @@ impl Analyzer {
             pool,
             build_option_info: BuildOptionInfo::default(),
             top_ids,
-            evals: HashMap::new(),
+            eval_assigns: HashMap::new(),
             var_definitions: HashMap::new(),
             var_usages: HashMap::new(),
             var_indirect_usages: HashMap::new(),
@@ -630,6 +653,8 @@ impl Analyzer {
             divided_vars: HashMap::new(),
             macro_calls: HashMap::new(),
             subst_vars: HashSet::new(),
+            chunks: Slab::new(),
+            scopes: HashMap::new(),
             options: AnalyzerOptions {
                 flatten_threshold: flatten_threshold.unwrap_or(200),
             },
@@ -637,10 +662,12 @@ impl Analyzer {
                 project_dir,
                 ..Default::default()
             },
+            inferred_types: HashMap::new(),
         };
         GuardAnalyzer::analyze_blocks(&mut s);
 
-        Flattener::flatten(&mut s, flatten_threshold.unwrap_or(200));
+        // Create a VariableAnalyzer to extract both defined and used variables
+        VariableAnalyzer::analyze_variables(&mut s);
 
         // Collect
         for id in &s.top_ids {
@@ -649,11 +676,11 @@ impl Analyzer {
             s.uses_per_top.insert(*id, uses);
         }
 
-        // Create a VariableAnalyzer to extract both defined and used variables
-        VariableAnalyzer::analyze_variables(&mut s);
-
         // Record all m4 macro calls
         MacroHandler::handle_macro_calls(&mut s);
+
+        // Flatten nodes
+        Flattener::flatten(&mut s, flatten_threshold.unwrap_or(200));
 
         s
     }
@@ -665,7 +692,12 @@ impl Analyzer {
 
     /// Get guard conditions of given variable location
     fn guard_of_location(&self, location: &Location) -> Vec<Guard> {
-        if let Some((_, block_id)) = self.get_node(location.node_id).info.parent {
+        if let Some(block_id) = self.get_node(location.node_id).info.block {
+            self.blocks[block_id].guards.clone()
+        } else if let Some(block_id) = self
+            .get_parent(location.node_id)
+            .and_then(|parent| self.get_node(parent).info.block)
+        {
             self.blocks[block_id].guards.clone()
         } else {
             Vec::new()
@@ -684,7 +716,7 @@ impl Analyzer {
 
     /// Get block ID of the block where the node resides
     fn block_of_node(&self, node_id: NodeId) -> Option<&Block> {
-        if let Some((_, block_id)) = self.get_node(node_id).info.parent {
+        if let Some(block_id) = self.get_node(node_id).info.block {
             self.blocks.get(block_id)
         } else {
             None
@@ -710,21 +742,32 @@ impl Analyzer {
     pub fn get_dominant_definition(&self, var_name: &str, node_id: NodeId) -> Option<Location> {
         if let Some(node) = self.pool.get(node_id) {
             if let Some(user_loc) = node.info.uses.get(var_name).map(|v| v.first()).flatten() {
-                return self.var_definitions.get(var_name).and_then(|v| {
-                    v.iter()
-                        .rev()
-                        .filter_map(|loc| {
-                            // dumb heulistic to compare two guard conditions
-                            (guard::cmp_guards(
-                                &self.guard_of_location(loc),
-                                &self.guard_of_location(user_loc),
-                            )
-                            .is_none_or(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
-                                && loc <= user_loc)
-                                .then_some(loc.clone())
-                        })
-                        .next()
-                });
+                let defs = self
+                    .var_definitions
+                    .get(var_name)
+                    .into_iter()
+                    .flat_map(|defs| defs.iter());
+
+                let eval_defs = self
+                    .eval_assigns
+                    .get(&Identifier::Name(var_name.to_owned()))
+                    .into_iter()
+                    .flat_map(|entries| entries.iter().map(|(_, loc)| loc));
+
+                return defs
+                    .chain(eval_defs)
+                    .sorted()
+                    .rev()
+                    .filter(|def_loc| def_loc <= &user_loc)
+                    .filter(|def_loc| {
+                        guard::cmp_guards(
+                            &self.guard_of_location(def_loc),
+                            &self.guard_of_location(user_loc),
+                        )
+                        .is_none_or(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
+                    })
+                    .next()
+                    .cloned();
             }
         }
         None
@@ -819,7 +862,16 @@ impl Analyzer {
     }
 
     pub fn get_parent(&self, node_id: NodeId) -> Option<NodeId> {
-        self.get_node(node_id).info.parent.map(|(nid, _)| nid)
+        self.get_node(node_id).info.parent
+    }
+
+    fn link_body_to_parent(&mut self, node_id: NodeId, parent: NodeId, block: BlockId) {
+        self.get_node_mut(node_id).info.parent = Some(parent);
+        self.get_node_mut(node_id).info.block = Some(block);
+    }
+
+    fn link_pre_body_to_parent(&mut self, node_id: NodeId, parent: NodeId) {
+        self.get_node_mut(node_id).info.parent = Some(parent);
     }
 
     pub fn get_children(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
@@ -951,6 +1003,14 @@ impl Analyzer {
         let new_id = self.blocks.insert(block);
         self.get_block_mut(new_id).block_id = new_id;
         new_id
+    }
+
+    fn add_pre_body_node(&mut self, parent: NodeId, pre_body_node_id: NodeId) {
+        self.get_node_mut(parent)
+            .info
+            .pre_body_nodes
+            .push(pre_body_node_id);
+        self.link_pre_body_to_parent(pre_body_node_id, parent);
     }
 
     fn collect_descendant_nodes(

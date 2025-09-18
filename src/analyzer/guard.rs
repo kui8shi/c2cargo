@@ -74,7 +74,7 @@ impl Guard {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Atom {
+pub(crate) enum Atom {
     ArchGlob(String),  // glob string
     OsAbiGlob(String), // glob string
     Arch(String),
@@ -97,7 +97,7 @@ pub enum Atom {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VarCond {
+pub(crate) enum VarCond {
     Yes,
     No,
     Empty,
@@ -113,7 +113,7 @@ pub enum VarCond {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum VoL {
+pub(crate) enum VoL {
     Var(String),
     Lit(String),
 }
@@ -128,7 +128,7 @@ fn as_vol(value: &WordFragment<AcWord>) -> Option<VoL> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CompilerCheck {
+pub(crate) enum CompilerCheck {
     Func(String),
     Symbol { name: String, lib: Option<String> },
     Sizeof(String),
@@ -189,7 +189,7 @@ impl Analyzer {
 }
 
 impl<'a> GuardAnalyzer<'a> {
-    pub fn analyze_blocks(analyzer: &'a mut Analyzer) {
+    pub(crate) fn analyze_blocks(analyzer: &'a mut Analyzer) {
         let mut s = Self {
             analyzer,
             cursor: None,
@@ -213,7 +213,7 @@ impl<'a> GuardAnalyzer<'a> {
         // record parent-child relation ships
         for &id in node_ids {
             assert!(self.get_node(parent).range.len() > 0);
-            self.analyzer.get_node_mut(id).info.parent = Some((parent, new_block_id));
+            self.analyzer.link_body_to_parent(id, parent, new_block_id);
 
             if self.get_node(id).range.is_empty() {
                 // propagate ranges information if child doesn't know its range.
@@ -331,11 +331,7 @@ impl<'a> GuardAnalyzer<'a> {
             Condition::Eval(cmd) | Condition::ReturnZero(cmd) => {
                 let parent = self.cursor.unwrap();
                 let cmd = **cmd;
-                self.analyzer
-                    .get_node_mut(parent)
-                    .info
-                    .pre_body_nodes
-                    .push(cmd);
+                self.analyzer.add_pre_body_node(parent, cmd);
                 if self.analyzer.get_node(cmd).range.is_empty() {
                     self.analyzer.get_node_mut(cmd).range =
                         self.analyzer.get_node(parent).range.clone();
@@ -685,11 +681,9 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
             let node_id = self.cursor.unwrap();
             if let WordFragment::Subst(subst) = w {
                 if let ParameterSubstitution::Command(cmds) = subst.as_ref() {
-                    self.analyzer
-                        .get_node_mut(node_id)
-                        .info
-                        .pre_body_nodes
-                        .extend(cmds)
+                    for cmd in cmds {
+                        self.analyzer.add_pre_body_node(node_id, *cmd);
+                    }
                 }
             }
         }

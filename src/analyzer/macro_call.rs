@@ -54,6 +54,13 @@ impl<'a> MacroHandler<'a> {
                     .into_iter()
                     .flatten()
             })
+            .filter(|var_name| {
+                s.analyzer
+                    .project_info
+                    .subst_files
+                    .iter()
+                    .any(|path| std::fs::read_to_string(path).unwrap().contains(var_name))
+            })
             .collect::<HashSet<String>>();
 
         for subst_macro_name in ["AC_SUBST", "AM_SUBST_NOTMAKE"] {

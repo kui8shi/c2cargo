@@ -1,5 +1,39 @@
+use itertools::Itertools;
+
 use super::{Analyzer, Location, MayM4, NodeId, ShellCommand};
 use std::collections::HashSet;
+
+pub(crate) type ChunkId = usize;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Scope {
+    /// parental chunk, None if global.
+    parent: Option<ChunkId>,
+    /// ID of the chunk that defines the variable first.
+    /// None if the variable is environmental (can be given by user).
+    first_def: Option<ChunkId>,
+    /// IDs of the chunks that overwrites the variable
+    overwrites: Vec<ChunkId>,
+    /// IDs of the chunks that read the variable
+    reads: Vec<ChunkId>,
+}
+
+impl Scope {
+    fn is_global(&self) -> bool {
+        self.parent.is_none()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Chunk {
+    pub nodes: Vec<NodeId>,
+    pub chunk_id: ChunkId,
+    pub parent: Option<ChunkId>,
+    pub children: Vec<ChunkId>,
+    pub range: (usize, usize),
+    pub imported: HashSet<String>,
+    pub exported: HashSet<String>,
+}
 
 impl Analyzer {
     /// Check if any node in a chunk is related to any node within a window of nodes.
@@ -50,16 +84,11 @@ impl Analyzer {
         }
     }
 
-    /// Perform chunk fusing with speculative lookahead window.
+    /// Perform node fusing with speculative lookahead window.
     /// When window > 0, speculatively adds next `window` nodes and reverts if no relations found.
     /// When disrespect_assignment is true, assignment nodes are looked through without consuming window depth.
-    pub fn fuse_chunks(
-        &self,
-        window: Option<usize>,
-        disrespect_assignment: bool,
-    ) -> Vec<Vec<NodeId>> {
+    pub(crate) fn construct_chunks(&mut self, window: Option<usize>, disrespect_assignment: bool) {
         let window = window.unwrap_or(0);
-        let mut chunks = Vec::new();
         let mut current_chunk = Vec::new();
         let mut i = 0;
         while i < self.top_ids.len() {
@@ -123,7 +152,7 @@ impl Analyzer {
                     } else {
                         // No relation found in lookahead - cut here and start new chunk
                         if !current_chunk.is_empty() {
-                            chunks.push(current_chunk.clone());
+                            self.add_chunk(current_chunk.clone());
                             current_chunk.clear();
                         }
                         current_chunk.push(current_id);
@@ -131,7 +160,7 @@ impl Analyzer {
                 } else {
                     // No window - cut here and start new chunk
                     if !current_chunk.is_empty() {
-                        chunks.push(current_chunk.clone());
+                        self.add_chunk(current_chunk.clone());
                         current_chunk.clear();
                     }
                     current_chunk.push(current_id);
@@ -142,15 +171,44 @@ impl Analyzer {
 
         // Add the last chunk if not empty
         if !current_chunk.is_empty() {
-            chunks.push(current_chunk);
+            self.add_chunk(current_chunk);
         }
+    }
 
-        chunks
+    fn add_chunk(&mut self, nodes: Vec<NodeId>) -> ChunkId {
+        let parent = self
+            .get_node(*nodes.first().unwrap())
+            .info
+            .parent
+            .map(|parent| self.get_node(parent).info.chunk_id)
+            .flatten();
+        let range = (
+            self.get_node(*nodes.first().unwrap())
+                .range_start()
+                .unwrap(),
+            self.get_node(*nodes.last().unwrap()).range_end().unwrap(),
+        );
+        let (imported, exported) = self.examine_chunk_io(&nodes);
+        let new_chunk_id = self.chunks.insert(Chunk {
+            nodes: nodes.to_vec(),
+            parent,
+            range,
+            imported,
+            exported,
+            ..Default::default()
+        });
+        self.chunks[new_chunk_id].chunk_id = new_chunk_id;
+        for id in nodes.iter() {
+            self.get_node_mut(*id).info.chunk_id.replace(new_chunk_id);
+        }
+        parent.map(|id| self.chunks[id].children.push(new_chunk_id));
+
+        new_chunk_id
     }
 
     /// enumerate out-of-scope variables
-    pub(crate) fn examine_chunk_io(&self, chunk: &[NodeId]) -> (HashSet<String>, HashSet<String>) {
-        let chunk_end_loc = chunk
+    fn examine_chunk_io(&self, nodes: &[NodeId]) -> (HashSet<String>, HashSet<String>) {
+        let chunk_end_loc = nodes
             .iter()
             .map(|id| Location {
                 node_id: *id,
@@ -164,7 +222,7 @@ impl Analyzer {
         let mut chunk_defines = HashSet::new();
         let mut chunk_uses = HashSet::new();
 
-        for &id in chunk {
+        for &id in nodes {
             // Get variables from all descendant nodes in the chunk
             let (defines, uses) = self.collect_variables(id);
             chunk_defines.extend(defines.into_keys());
@@ -188,11 +246,6 @@ impl Analyzer {
                 .get(var_name)
                 .is_some_and(|locs| locs.iter().any(|loc| *loc > chunk_end_loc))
                 || self.subst_vars.contains(var_name)
-                    && self
-                        .project_info
-                        .subst_files
-                        .iter()
-                        .any(|path| std::fs::read_to_string(path).unwrap().contains(var_name))
         };
 
         // Exported variables: defined in chunk and used outside the chunk
@@ -205,13 +258,5 @@ impl Analyzer {
         (imported, exported)
     }
 
-    pub(crate) fn classify_chunk(&self, chunk: &[NodeId]) {
-        let content = chunk
-            .iter()
-            .map(|id| self.display_node(*id))
-            .collect::<Vec<_>>()
-            .join("\n");
-        println!("============={:?}============", chunk);
-        println!("{}", content);
-    }
+    pub(crate) fn init_scopes(&mut self) {}
 }

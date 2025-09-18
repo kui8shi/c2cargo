@@ -1,6 +1,6 @@
+//! Structs & Methods for Value Set Analysis
 use super::{
     guard::cmp_guards,
-    type_inference::DataType,
     variable::{Identifier, Location, ValueExpr},
     AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
 };
@@ -39,30 +39,11 @@ impl Chain {
 
 /// Saving information how an identifier is divided via eval statements.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DividedIdentifier {
+pub(crate) struct IdentifierDivision {
     /// components of the divided identifier
-    pub components: Vec<ValueExpr>,
+    pub division: Identifier,
     /// variable to value map
     pub map: HashMap<String, String>,
-    /// The location where divided identifier is constructed.
-    pub ref_loc: Location,
-}
-
-/// Represents the operation on the dictionary types
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum DictionaryOperation {
-    Read,
-    Write,
-}
-
-/// Saving the result of dictionary type inference.
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) struct DictionaryAccess {
-    operation: DictionaryOperation,
-    keys: HashMap<String, String>,
-    name: String,
-    full_name: String,
-    value_type: DataType,
 }
 
 fn enumerate_combinations(combos: Vec<HashSet<String>>) -> Vec<Vec<String>> {
@@ -78,7 +59,7 @@ impl Analyzer {
     pub(crate) fn run_value_set_analysis(&mut self) {
         // we assume variable enumeration is already completed.
         let mut evals = self
-            .evals
+            .eval_assigns
             .iter()
             .flat_map(|(l, v)| v.iter().zip(std::iter::repeat(l)))
             .map(|((r, loc), l)| (l.clone(), r.clone(), loc.clone()))
@@ -92,19 +73,20 @@ impl Analyzer {
         for (name, divided) in self.divided_vars.iter() {
             if let Some(def_locs) = self.var_definitions.get(name) {
                 for def_loc in def_locs {
-                    def_use_edges.push((def_loc.node_id, divided.ref_loc.node_id, name.to_owned()));
-                    self.var_indirect_usages
-                        .entry(name.to_owned())
-                        .or_default()
-                        .push(divided.ref_loc.clone());
+                    for (ref_loc, _) in divided {
+                        def_use_edges.push((def_loc.node_id, ref_loc.node_id, name.to_owned()));
+                        self.var_indirect_usages
+                            .entry(name.to_owned())
+                            .or_default()
+                            .push(ref_loc.clone());
+                    }
                 }
             }
         }
         self.apply_def_use_edges(def_use_edges);
-        dbg!(&self.evals);
+        dbg!(&self.eval_assigns);
         dbg!(&self.resolved_values);
         dbg!(&self.divided_vars);
-        // dbg!(self.infer_dictionary_types());
     }
 
     /// collect literals of a var
@@ -115,87 +97,25 @@ impl Analyzer {
             )
     }
 
-    /// run type inference only for dictionary types based on the result of value set analysis.
-    /// returns a map from location to accesses to variable as dictionary
-    pub(crate) fn infer_dictionary_types(&self) -> HashMap<Location, DictionaryAccess> {
-        use DictionaryOperation::*;
-        let mut ret = HashMap::new();
-        let strip_underscore = |s: &str| -> String {
-            let s = s.strip_prefix("_").unwrap_or(s);
-            let s = s.strip_suffix("_").unwrap_or(s);
-            s.to_owned()
-        };
-        for (full_name, divided) in self.divided_vars.iter() {
-            let name = divided
-                .components
-                .iter()
-                .filter_map(|r| {
-                    if let ValueExpr::Lit(lit) = r {
-                        Some(strip_underscore(lit))
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join("_");
-            let keys = divided
-                .map
-                .iter()
-                .map(|(k, v)| (k.to_owned(), strip_underscore(v)))
-                .collect::<HashMap<_, _>>();
-            if let Some(def_locs) = self.get_all_definition(full_name.as_str(), None) {
-                for loc in def_locs {
-                    ret.insert(
-                        loc,
-                        DictionaryAccess {
-                            operation: Read,
-                            keys: keys.clone(),
-                            name: name.clone(),
-                            full_name: full_name.clone(),
-                            value_type: DataType::Literal,
-                        },
-                    );
-                }
-            }
-            if let Some(use_locs) = self.get_all_usages_before(full_name.as_str(), None) {
-                for loc in use_locs {
-                    ret.insert(
-                        loc,
-                        DictionaryAccess {
-                            operation: Write,
-                            keys: keys.clone(),
-                            name: name.clone(),
-                            full_name: full_name.clone(),
-                            value_type: DataType::Literal,
-                        },
-                    );
-                }
-            }
-        }
-        ret
-    }
-
-    fn record_identifier_division(&mut self, values: Vec<ValueExpr>, resolved: Vec<String>) {
+    fn record_identifier_division(
+        &mut self,
+        values: Vec<Identifier>,
+        resolved: Vec<String>,
+        ref_loc: Location,
+    ) {
         let name = resolved.concat();
         if self.var_definitions.contains_key(name.as_str()) {
-            let mut ref_loc = None; // FIXME: so dirty data flow.
-            let components = values.clone();
             let mut map = HashMap::new();
-            for (r, v) in values.into_iter().zip(resolved.iter()) {
-                if let ValueExpr::Var(name, loc) = r {
+            for (k, v) in values.clone().into_iter().zip(resolved.iter()) {
+                if let Identifier::Indirect(name) = k {
                     map.insert(name, v.to_owned());
-                    ref_loc.replace(loc);
                 }
             }
-            let ref_loc = ref_loc.unwrap();
-            self.divided_vars.insert(
-                name,
-                DividedIdentifier {
-                    components,
-                    map,
-                    ref_loc,
-                },
-            );
+            let division = Identifier::Concat(values);
+            self.divided_vars
+                .entry(name)
+                .or_default()
+                .insert(ref_loc, IdentifierDivision { division, map });
         }
     }
 
@@ -215,13 +135,13 @@ impl Analyzer {
     }
 
     /// construct chain of value flows in backward order and resolve them.
-    fn resolve_eval(&mut self, l: &Identifier, r: &Option<ValueExpr>, loc: &Location) {
-        if let Some(r) = r {
-            let rhs = self.resolve_value_expression(r, loc);
-            for var_name in self.resolve_identifier(l, loc) {
+    fn resolve_eval(&mut self, lhs: &Identifier, rhs: &Option<ValueExpr>, loc: &Location) {
+        if let Some(rhs) = rhs {
+            let rhs = self.resolve_value_expression(rhs, loc);
+            for var_name in self.resolve_identifier(lhs, loc) {
                 self.record_resolved_values(Identifier::Name(var_name), loc.clone(), rhs.clone());
             }
-            self.record_resolved_values(l.clone(), loc.clone(), rhs.clone());
+            self.record_resolved_values(lhs.clone(), loc.clone(), rhs.clone());
         } else {
             // rhs is empty
         }
@@ -233,22 +153,24 @@ impl Analyzer {
             Identifier::Name(lit) => {
                 result.insert(lit.to_owned());
             }
-            Identifier::Indirect(name, loc) => {
+            Identifier::Indirect(name) => {
                 if let Some(chain) = self.construct_chain(name, loc) {
                     result.extend(self.resolve_chain(chain))
                 }
             }
-            Identifier::Concat(lvalues) => {
-                let resolved = lvalues
+            Identifier::Concat(values) => {
+                let resolved = values
                     .iter()
                     .map(|l| self.resolve_identifier(l, loc))
                     .collect();
                 // enumerate combinations
-                result.extend(
-                    enumerate_combinations(resolved)
-                        .into_iter()
-                        .map(|words| words.concat()),
-                );
+                let combos = enumerate_combinations(resolved);
+                for combo in combos.iter() {
+                    self.record_identifier_division(values.clone(), combo.clone(), loc.clone());
+                }
+                for name in combos.into_iter().map(|words| words.concat()) {
+                    result.insert(name);
+                }
             }
         }
         result
@@ -256,6 +178,8 @@ impl Analyzer {
 
     fn resolve_value_expression(&mut self, value: &ValueExpr, loc: &Location) -> HashSet<String> {
         let mut result = HashSet::new();
+        // Add an empty string to the result for safety
+        result.insert(String::new());
         if let Some(identifier) = value.into() {
             if let Some(resolved) = self.get_last_resolved_values(&identifier, loc) {
                 return resolved;
@@ -294,12 +218,14 @@ impl Analyzer {
                     .iter()
                     .map(|r| self.resolve_value_expression(r, loc))
                     .collect();
+                let values = values
+                    .iter()
+                    .map(|v| Into::<Option<Identifier>>::into(v).unwrap())
+                    .collect::<Vec<_>>();
+                // enumerate combinations
                 let combos = enumerate_combinations(resolved);
                 for combo in combos.iter() {
-                    self.record_identifier_division(
-                        values.iter().cloned().collect(),
-                        combo.clone(),
-                    );
+                    self.record_identifier_division(values.clone(), combo.clone(), loc.clone());
                 }
                 for name in combos.into_iter().map(|words| words.concat()) {
                     if let Some(chain) = self.construct_chain(&name, loc) {
@@ -317,7 +243,7 @@ impl Analyzer {
                 // cf. RValue::concretize
                 let var_names = vars
                     .iter()
-                    .flat_map(|r| r.vars().into_iter().map(|v| v.first().unwrap().0.clone()));
+                    .flat_map(|r| r.vars().into_iter().map(|v| v.first().unwrap().clone()));
                 for vals in enumerate_combinations(resolved) {
                     let env_pairs: Vec<_> = var_names.clone().zip(vals.clone()).collect();
                     let output = std::process::Command::new("sh")
@@ -408,9 +334,11 @@ impl Analyzer {
             let cmd = &self.get_node(nid).cmd.0;
             match cmd.clone() {
                 MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) if lhs == name => {
-                    let vals = self.inspect_word(&rhs, &def_loc);
-                    let found_dominant_initialization = (vals.is_empty()
-                        || vals.iter().all(|v| matches!(v, ValueExpr::Lit(_))))
+                    let ifs = self.current_internal_field_separator(&def_loc);
+                    let vals = self.inspect_word(&rhs, &def_loc, ifs);
+                    let is_rhs_concrete =
+                        vals.is_empty() || vals.iter().all(|v| matches!(v, ValueExpr::Lit(_)));
+                    let found_dominant_initialization = is_rhs_concrete
                         && matches!(
                             cmp_guards(
                                 &self.guard_of_location(&def_loc),
@@ -431,8 +359,9 @@ impl Analyzer {
                     words,
                     body: _,
                 }) if var == name => {
+                    let ifs = self.current_internal_field_separator(&def_loc);
                     for word in words {
-                        let vals = self.inspect_word(&word, &def_loc);
+                        let vals = self.inspect_word(&word, &def_loc, ifs);
                         for val in vals {
                             match val {
                                 ValueExpr::Lit(lit) => {
@@ -455,14 +384,21 @@ impl Analyzer {
         Some(chain)
     }
 
-    fn inspect_word(&self, word: &AcWord, loc: &Location) -> Vec<ValueExpr> {
+    fn inspect_word(
+        &self,
+        word: &AcWord,
+        loc: &Location,
+        internal_field_separator: Option<char>,
+    ) -> Vec<ValueExpr> {
         let mut values = Vec::new();
         match &word.0 {
-            Word::Single(word) => values.extend(self.inspect_word_fragment(word, loc)),
+            Word::Single(word) => {
+                values.extend(self.inspect_word_fragment(word, loc, internal_field_separator))
+            }
             Word::Concat(words) => values.push(ValueExpr::Concat(
                 words
                     .iter()
-                    .flat_map(|w| self.inspect_word_fragment(w, loc))
+                    .flat_map(|w| self.inspect_word_fragment(w, loc, internal_field_separator))
                     .collect(),
             )),
             Word::Empty => values.push(ValueExpr::Lit(String::new())),
@@ -470,28 +406,45 @@ impl Analyzer {
         values
     }
 
-    fn inspect_word_fragment(&self, word: &AcWordFragment, loc: &Location) -> Vec<ValueExpr> {
+    fn inspect_word_fragment(
+        &self,
+        word: &AcWordFragment,
+        loc: &Location,
+        internal_field_separator: Option<char>,
+    ) -> Vec<ValueExpr> {
         let mut values = Vec::new();
         use MayM4::*;
         match word {
             Shell(WordFragment::Literal(lit)) => {
                 values.extend(
-                    lit.split_whitespace()
-                        .filter_map(|s| (!s.is_empty()).then_some(ValueExpr::Lit(s.to_owned()))),
+                    self.split_literal_with_internal_field_separator(lit, internal_field_separator)
+                        .into_iter()
+                        .map(|s| ValueExpr::Lit(s)),
                 );
             }
             Shell(WordFragment::DoubleQuoted(frags)) => {
                 for f in frags {
                     match f {
                         WordFragment::Literal(lit) => {
-                            values.extend(lit.split_whitespace().filter_map(|s| {
-                                (!s.is_empty()).then_some(ValueExpr::Lit(s.to_owned()))
-                            }));
+                            values.extend(
+                                self.split_literal_with_internal_field_separator(
+                                    lit,
+                                    internal_field_separator,
+                                )
+                                .into_iter()
+                                .map(|s| ValueExpr::Lit(s)),
+                            );
                         }
                         WordFragment::Param(Parameter::Var(var)) => {
                             values.push(ValueExpr::Var(var.to_owned(), loc.clone()));
                         }
                         WordFragment::Escaped(s) if s == "\n" => (),
+                        w if internal_field_separator.is_some_and(|ifs| {
+                            ifs.to_string() == self.pool.shell_word_to_string(w)
+                        }) =>
+                        {
+                            ()
+                        }
                         _ => todo!("{:?}", f),
                     }
                 }
@@ -514,10 +467,47 @@ impl Analyzer {
                 _ => todo!(),
             },
             Shell(w) => {
-                values.push(ValueExpr::Lit(self.pool.shell_word_to_string(w)));
+                let lit = self.pool.shell_word_to_string(w);
+                if internal_field_separator.is_some_and(|ifs| ifs.to_string() == lit) {
+                    ()
+                } else {
+                    values.push(ValueExpr::Lit(lit));
+                }
             }
             _ => todo!(),
         }
         values
+    }
+
+    fn current_internal_field_separator(&self, loc: &Location) -> Option<char> {
+        let mut internal_field_separator = None;
+        if let Some(ifs_loc) = self.get_dominant_definition("IFS", loc.node_id) {
+            if let MayM4::Shell(ShellCommand::Assignment(_, rhs)) =
+                &self.get_node(ifs_loc.node_id).cmd.0
+            {
+                if let ValueExpr::Lit(lit) = self.inspect_word(rhs, &ifs_loc, None).pop().unwrap() {
+                    internal_field_separator.replace(lit.chars().next().unwrap());
+                }
+            }
+        }
+        internal_field_separator
+    }
+
+    fn split_literal_with_internal_field_separator(
+        &self,
+        literal: &String,
+        internal_field_separator: Option<char>,
+    ) -> Vec<String> {
+        if let Some(ifs) = internal_field_separator {
+            literal
+                .split(ifs)
+                .filter_map(|s| (!s.is_empty()).then_some(s.to_owned()))
+                .collect()
+        } else {
+            literal
+                .split_whitespace()
+                .filter_map(|s| (!s.is_empty()).then_some(s.to_owned()))
+                .collect()
+        }
     }
 }

@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use super::{
     as_literal, as_shell, AcCommand, AcWord, Analyzer, AstVisitor, Block, BlockId, GuardBodyPair,
     Node, NodeId, NodeInfo, PatternBodyPair, ShellCommand,
@@ -128,7 +126,8 @@ impl<'a> Flattener<'a> {
                     .branches
                     .insert(branch_idx, new_block_id);
                 for &node_id in nodes {
-                    self.get_node_mut(node_id).info.parent = Some((parent_id, new_block_id));
+                    self.analyzer
+                        .link_body_to_parent(node_id, parent_id, new_block_id);
                 }
             }
         }
@@ -182,7 +181,7 @@ impl<'a> Flattener<'a> {
     fn _block_id_of_nodes(&self, nodes: &[NodeId]) -> BlockId {
         let mut id = nodes
             .iter()
-            .map(|id| self.get_node(*id).info.parent.unwrap().1)
+            .map(|id| self.get_node(*id).info.block.unwrap())
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -221,12 +220,14 @@ impl<'a> Flattener<'a> {
             nodes: vec![new_node_id],
             guards: self.get_block(old_block_id).guards.clone(),
         });
-        self.get_node_mut(new_node_id).info.parent = Some((parent, new_block_id));
+        self.analyzer
+            .link_body_to_parent(new_node_id, parent, new_block_id);
 
         // update original children & their block
         self.get_block_mut(old_block_id).parent = new_node_id;
         for &child in children {
-            self.get_node_mut(child).info.parent = Some((new_node_id, old_block_id));
+            self.analyzer
+                .link_body_to_parent(child, new_node_id, old_block_id);
         }
 
         // update parent

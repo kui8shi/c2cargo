@@ -1,17 +1,16 @@
-use std::collections::HashSet;
-
 use super::{Analyzer, BlockId, Condition, GuardBodyPair, MayM4, NodeId, ShellCommand};
 
 impl Analyzer {
     /// Remove a node, children nodes, and empty parent nodes recursively
     pub(super) fn remove_node(&mut self, node_id: NodeId) {
         // Get parent information before removing the node
-        let parent_info = self.get_node(node_id).info.parent;
+        let parent = self.get_node(node_id).info.parent;
+        let block = self.get_node(node_id).info.block;
 
         self.remove_node_and_children(node_id);
 
         // Clean up parent references
-        if let Some((parent, block_id)) = parent_info {
+        if let (Some(parent), Some(block_id)) = (parent, block) {
             self.cleanup_parent(parent, node_id, block_id);
         }
     }
@@ -196,9 +195,6 @@ impl Analyzer {
 
     /// Check if all children are effectively empty (either actually empty or only contain echo/AC_MSG_RESULT)
     fn is_body_effectively_empty(&self, body: &[NodeId]) -> bool {
-        body.is_empty()
-            || body
-                .iter()
-                .all(|&id| self.is_effectively_empty_node(id))
+        body.is_empty() || body.iter().all(|&id| self.is_effectively_empty_node(id))
     }
 }

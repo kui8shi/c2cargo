@@ -2,7 +2,7 @@ use std::{collections::HashMap, hash::Hash};
 
 use super::{
     AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, M4Macro, MayM4, Node, NodeId,
-    Parameter, VariableMap, Word, WordFragment, Condition
+    Parameter, VariableMap, Word, WordFragment,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Ord, Hash)]
@@ -24,9 +24,9 @@ pub(crate) enum Identifier {
     /// String literal. Direct variable reference.
     Name(String),
     /// Variable name. Indirect variable reference.
-    Indirect(String, Location),
+    Indirect(String),
     /// Dynamically constructed variable name. Indirect variable reference.
-    Concat(Vec<Identifier>),
+    Concat(Vec<Self>),
 }
 
 /// Struct represents various types of values assigned to variables.
@@ -39,23 +39,39 @@ pub(crate) enum ValueExpr {
     /// String literal represented as a concatenation of rvalues
     Concat(Vec<ValueExpr>),
     /// Dynamically constructed variable name.
-    /// e.g. \"\$${var1}_${var2}_suffix\" becomes Ref([Var(var1), Lit(_), Var(var2), Lit(_suffix)])
+    /// e.g. \"\$${var1}_${var2}_suffix\" becomes DynName([Var(var1), Lit(_), Var(var2), Lit(_suffix)])
     DynName(Vec<ValueExpr>),
     /// Arbitrary shell commands applied to emit values
     /// (shell_string, depending_variables)
     Shell(String, Vec<ValueExpr>),
 }
 
-impl ValueExpr {
-    pub(crate) fn vars(&self) -> Option<Vec<(String, Location)>> {
+impl Identifier {
+    pub(crate) fn is_indirect(&self) -> bool {
         match self {
-            ValueExpr::Lit(_) => None,
-            ValueExpr::Var(s, loc) => Some(vec![(s.to_owned(), loc.clone())]),
-            ValueExpr::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
-            ValueExpr::DynName(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
-            ValueExpr::Shell(_, v) => {
-                Some(v.iter().map(|e| e.vars()).flatten().flatten().collect())
-            }
+            Self::Concat(v) => v.iter().any(|i| i.is_indirect()),
+            Self::Indirect(_) => true,
+            Self::Name(_) => false,
+        }
+    }
+
+    pub(crate) fn vars(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Name(_) => None,
+            Self::Indirect(s) => Some(vec![s.to_owned()]),
+            Self::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+        }
+    }
+}
+
+impl ValueExpr {
+    pub(crate) fn vars(&self) -> Option<Vec<String>> {
+        match self {
+            Self::Lit(_) => None,
+            Self::Var(s, _) => Some(vec![s.to_owned()]),
+            Self::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            Self::DynName(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            Self::Shell(_, v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
         }
     }
 }
@@ -72,8 +88,8 @@ impl Into<Option<Identifier>> for &ValueExpr {
                         ValueExpr::Lit(lit) => {
                             lvalues.push(Identifier::Name(lit.to_owned()));
                         }
-                        ValueExpr::Var(name, loc) => {
-                            lvalues.push(Identifier::Indirect(name.to_owned(), loc.clone()));
+                        ValueExpr::Var(name, _) => {
+                            lvalues.push(Identifier::Indirect(name.to_owned()));
                         }
                         _ => return None,
                     }
@@ -206,7 +222,7 @@ impl<'a> VariableAnalyzer<'a> {
                     is_ref = true;
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if is_lhs => {
-                    lhs.push(Identifier::Indirect(s.to_owned(), loc.clone()));
+                    lhs.push(Identifier::Indirect(s.to_owned()));
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if !is_lhs => {
                     rhs.push(ValueExpr::Var(s.to_owned(), loc.clone()));
@@ -274,18 +290,16 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     }
 
     fn visit_top(&mut self, node_id: NodeId) {
+        if self.get_node(node_id).info.is_child_node() {
+            return;
+        }
         self.cursor.replace(node_id);
         self.walk_node(node_id);
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
-        // Save
         let saved_cursor = self.cursor.replace(node_id);
-        // Walk
-        if !self.get_node(node_id).info.is_top_node() {
-            self.walk_node(node_id);
-        }
-        // Recover
+        self.walk_node(node_id);
         self.cursor = saved_cursor;
     }
 
@@ -354,7 +368,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
                         is_left: true,
                     };
                     self.analyzer
-                        .evals
+                        .eval_assigns
                         .entry(lhs)
                         .or_default()
                         .push((rhs, loc.clone()));
