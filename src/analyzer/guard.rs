@@ -729,13 +729,25 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
 }
 
 fn analyze_path(word: &AcWord) -> (Vec<VoL>, bool) {
+    const SLASH: &'static str = "/";
+    let trim_slash = |w| {
+        if as_literal(w).is_some_and(|s| s.starts_with(SLASH)) {
+            let trimmed = as_literal(&w).unwrap()[0..].to_string();
+            vec![
+                WordFragment::Literal(SLASH.into()),
+                WordFragment::Literal(trimmed),
+            ]
+        } else {
+            vec![w.clone()]
+        }
+    };
     let mut words = match &word.0 {
         Word::Empty => panic!("unsupported syntax"),
         Word::Concat(words) => {
             let mut v = Vec::new();
             for w in words {
                 if let MayM4::Shell(w) = w {
-                    v.push(w);
+                    v.extend(trim_slash(w));
                 } else {
                     panic!("unsupported syntax");
                 }
@@ -744,7 +756,7 @@ fn analyze_path(word: &AcWord) -> (Vec<VoL>, bool) {
         }
         Word::Single(w) => {
             if let MayM4::Shell(w) = w {
-                vec![w]
+                trim_slash(w)
             } else {
                 panic!("unsupported syntax");
             }
@@ -754,7 +766,7 @@ fn analyze_path(word: &AcWord) -> (Vec<VoL>, bool) {
         if words
             .first()
             .and_then(|w| as_literal(w))
-            .is_some_and(|s| s == "\\")
+            .is_some_and(|s| s == SLASH)
         {
             words.remove(0);
             true
@@ -766,9 +778,10 @@ fn analyze_path(word: &AcWord) -> (Vec<VoL>, bool) {
         && !words[1..]
             .into_iter()
             .step_by(2)
-            .all(|w| as_literal(w).is_some_and(|s| s == "\\"))
+            .all(|w| as_literal(w).is_some_and(|s| s == SLASH))
     {
-        panic!("unsupported syntax");
+        dbg!(&words[1..].into_iter().step_by(2).collect::<Vec<_>>());
+        panic!("unsupported path syntax: {:?}", words);
     }
     let path = words.iter().step_by(2).filter_map(|w| as_vol(w)).collect();
     (path, is_absolute)

@@ -71,15 +71,15 @@ pub(super) struct TypeInferrer<'a> {
 }
 
 impl Analyzer {
-    /// run value set analysis to obtain value candidates of variables appeared in eval statements.
+    /// run type inference
     pub fn run_type_inference(&mut self) {
         self.inferred_types = TypeInferrer::run_type_inference(&self);
-        dbg!(&self.inferred_types);
+        self.dicts = self.make_dictionary_instances();
     }
 }
 
 impl<'a> TypeInferrer<'a> {
-    /// run value set analysis to obtain value candidates of variables appeared in eval statements.
+    /// run type inference
     pub fn run_type_inference(
         analyzer: &'a Analyzer,
     ) -> HashMap<String, (HashSet<TypeHint>, DataType)> {

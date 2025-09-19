@@ -4,6 +4,7 @@ use std::collections::HashMap;
 use itertools::Itertools;
 
 use super::{
+    eval::IdentifierDivision,
     type_inference::DataType,
     variable::{Identifier, Location, ValueExpr},
     Analyzer,
@@ -106,10 +107,11 @@ fn encode_identifier(ident: &Identifier) -> DictId {
 
 fn make_dictionary_variable_name(dict_id: &DictId) -> String {
     let s: String = dict_id.clone().into();
-    s.replace("@", "")
-        .split("_")
-        .filter(|s| !s.is_empty())
-        .join("_")
+    strip_underscore(s.replace("@", "").as_str())
+}
+
+fn strip_underscore(s: &str) -> String {
+    s.split("_").filter(|s| !s.is_empty()).join("_")
 }
 
 fn inspect_eval_assignment(
@@ -122,10 +124,9 @@ fn inspect_eval_assignment(
     Option<String>,
     Vec<String>,
 ) {
-    if let Some(rhs_as_ident) = rhs
-        .as_ref()
-        .and_then(|e| Into::<Option<Identifier>>::into(e))
-    {
+    let rhs: Option<Identifier> = rhs.as_ref().and_then(|e| e.into());
+    if rhs.as_ref().is_some_and(|ident| ident.is_indirect()) {
+        let rhs_as_ident = rhs.unwrap();
         let dict_id = encode_identifier(&rhs_as_ident);
 
         let operation = if lhs.is_indirect() {
@@ -192,7 +193,7 @@ impl Analyzer {
             // add candidates of the dictionary name
             for candidate in name_candidates {
                 if !candidate.is_empty() {
-                    if recipe.name_candidates.contains(&candidate) {
+                    if !recipe.name_candidates.contains(&candidate) {
                         recipe.name_candidates.push(candidate);
                     }
                 }
@@ -243,36 +244,39 @@ impl Analyzer {
             .iter()
             .map(|(id, r)| (id, &r.name_candidates))
             .collect::<HashMap<_, _>>();
-        for (key, name_candidates) in name_candidates
+        for (dict_id, name_candidates) in name_candidates
             .into_iter()
             .sorted_by_key(|(_, candidates)| candidates.len())
         {
-            let name = if !name_candidates.is_empty() {
-                if let Some(mut unique_name) = name_candidates
-                    .iter()
-                    .find(|name| !confirmed_names.contains_key(name.as_str()))
-                    .cloned()
-                {
-                    if self.var_definitions.contains_key(&unique_name) {
-                        // alternative strategy 1: "_dict" suffix for already defined names
-                        // e.g. eval "found_${var}=yes" -> Get a unique name: "found_dict"
-                        unique_name.push_str("_dict");
-                    }
+            let name = {
+                let alternative_suffixes = ["", "_dict", "_map"];
+                if let Some(unique_name) = alternative_suffixes.into_iter().find_map(|suffix| {
+                    name_candidates
+                        .iter()
+                        .map(|name| {
+                            // alternative strategy 1: put suffix for already defined names
+                            // e.g. found=no; eval "found_${var}=yes" -> Get a unique name: "found_dict"
+                            [name, suffix].concat()
+                        })
+                        .find(|name| {
+                            !confirmed_names.contains_key(name.as_str())
+                                && !self.var_definitions.contains_key(name.as_str())
+                        })
+                }) {
+                    // unique dictionary name was found.
                     unique_name
                 } else {
-                    // alternative strategy 2: "_0" suffix to avoid collisions b/w dictionaries
-                    let prefix = name_candidates.first().unwrap();
-                    let name = format!("{}_{}", prefix, spare_name_index);
+                    // alternative strategy 2: default names for anonymous dictionaries
+                    let name = format!("dict_{}", spare_name_index);
+
+                    // if such a weird name is already defined, just give up.
+                    assert!(!self.var_definitions.contains_key(name.as_str()));
+
                     spare_name_index += 1;
                     name
                 }
-            } else {
-                // alternative strategy 3: default names for anonymous dictionaries
-                let name = format!("dict_{}", spare_name_index);
-                spare_name_index += 1;
-                name
             };
-            confirmed_names.insert(name, key.clone());
+            confirmed_names.insert(name, dict_id.clone());
         }
         for (name, dict_id) in confirmed_names {
             recipes
@@ -295,19 +299,17 @@ impl Analyzer {
             assert!(idents.iter().all_equal());
             let dict_id = idents.pop().unwrap();
             assert!(!divided.is_empty());
-            let keys_for_evals = divided
+            let mut keys_for_evals = divided
                 .iter()
-                .map(|(loc, div)| (loc, div.map.values().collect::<Vec<_>>()))
-                .collect::<HashMap<&Location, Vec<&String>>>();
-            assert!(!keys_for_evals.is_empty());
-            let dict_keys = if !keys_for_evals.values().all_equal() {
+                .map(|(_, div)| div.mapping.iter().map(|(_, v)| v).collect::<Vec<_>>());
+            let dict_keys = if !keys_for_evals.clone().all_equal() {
                 // Detected omission of keys. We need to find what keys are omitted.
                 let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
-                self.fill_up_omissions_of_dictionary_keys(accesses, keys_for_evals)
+                self.fill_up_omissions_of_dictionary_keys(accesses, &divided)
             } else {
-                let keys = keys_for_evals.values().next().unwrap().clone();
+                let keys = keys_for_evals.next().unwrap().clone();
                 keys.into_iter()
-                    .map(|v| DictionaryKey::Lit(v.to_owned()))
+                    .map(|v| DictionaryKey::Lit(strip_underscore(v)))
                     .collect::<Vec<_>>()
             };
             let def_locs = self.get_all_definition(full_name.as_str(), None);
@@ -366,32 +368,35 @@ impl Analyzer {
     fn fill_up_omissions_of_dictionary_keys(
         &self,
         accesses: &mut HashMap<Location, DictionaryAccessRecipe>,
-        keys_for_evals: HashMap<&Location, Vec<&String>>,
+        division: &HashMap<Location, IdentifierDivision>,
     ) -> Vec<DictionaryKey> {
         // The idea is that there must be a division where a key is evaluated to an empty string.
-        let num_keys = keys_for_evals.values().map(|v| v.len()).max().unwrap();
+        let num_keys = division.values().map(|d| d.mapping.len()).max().unwrap();
         // take keys with maximum size as standard
-        let keys_without_omission = keys_for_evals
+        let vals_without_omission = division
             .values()
-            .filter(|v| v.len() == num_keys)
+            .filter_map(|d| {
+                (d.mapping.len() == num_keys)
+                    .then_some(d.mapping.iter().map(|(_, v)| v).collect::<Vec<_>>())
+            })
             .next()
             .unwrap()
             .clone();
-        let omitted_key_indexes = keys_without_omission
+        let omitted_indexes = vals_without_omission
             .iter()
             .enumerate()
-            .filter_map(|(pos, key)| key.is_empty().then_some(pos))
+            .filter_map(|(pos, v)| v.is_empty().then_some(pos))
             .collect::<Vec<_>>();
-        for (eval_loc, mut keys_with_omission) in keys_for_evals
-            .into_iter()
-            .filter(|(_, v)| v.len() < num_keys)
-        {
+        for (eval_loc, div) in division.iter().filter(|(_, d)| d.mapping.len() < num_keys) {
             let mut filled_up_keys = Vec::new();
+            let mut div_idx = 0;
             for idx in 0..num_keys {
-                let key = if omitted_key_indexes.contains(&idx) {
+                let key = if omitted_indexes.contains(&idx) {
                     DictionaryKey::Lit("".into())
                 } else {
-                    DictionaryKey::Var(keys_with_omission.remove(0).clone())
+                    let var = div.mapping[div_idx].0.clone();
+                    div_idx += 1;
+                    DictionaryKey::Var(var)
                 };
                 filled_up_keys.push(key);
             }
@@ -401,9 +406,9 @@ impl Analyzer {
                 .keys
                 .replace(filled_up_keys);
         }
-        keys_without_omission
+        vals_without_omission
             .into_iter()
-            .map(|v| DictionaryKey::Lit(v.to_owned()))
+            .map(|v| DictionaryKey::Lit(strip_underscore(v)))
             .collect::<Vec<_>>()
     }
 
@@ -440,5 +445,23 @@ impl Analyzer {
         }
 
         DataType::Literal
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    #[test]
+    fn dicitionary_variable_name() {
+        let ident = Identifier::Concat(vec![
+            Identifier::Name("prefix_".into()),
+            Identifier::Indirect("var".into()),
+            Identifier::Name("_suffix".into()),
+        ]);
+        let dict_id = encode_identifier(&ident);
+        assert_eq!(dict_id, DictId("prefix_@_suffix".into()));
+        let name = make_dictionary_variable_name(&dict_id);
+        assert_eq!(name, "prefix_suffix".to_owned());
     }
 }

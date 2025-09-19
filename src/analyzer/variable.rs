@@ -36,7 +36,7 @@ pub(crate) enum ValueExpr {
     Lit(String),
     /// Values referenced via a variable. It could used in lhs or rhs.
     Var(String, Location),
-    /// String literal represented as a concatenation of rvalues
+    /// String literal represented as a concatenation of values
     Concat(Vec<ValueExpr>),
     /// Dynamically constructed variable name.
     /// e.g. \"\$${var1}_${var2}_suffix\" becomes DynName([Var(var1), Lit(_), Var(var2), Lit(_suffix)])
@@ -62,6 +62,14 @@ impl Identifier {
             Self::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
         }
     }
+
+    pub(crate) fn positional_vars(&self) -> Vec<Option<String>> {
+        match self {
+            Self::Name(_) => vec![None],
+            Self::Indirect(s) => vec![Some(s.to_owned())],
+            Self::Concat(v) => v.iter().map(|e| e.positional_vars()).flatten().collect(),
+        }
+    }
 }
 
 impl ValueExpr {
@@ -81,21 +89,25 @@ impl Into<Option<Identifier>> for &ValueExpr {
         match self {
             ValueExpr::Lit(_) => None,
             ValueExpr::Var(name, _loc) => Some(Identifier::Name(name.to_owned())),
-            ValueExpr::DynName(rvalues) => Some(Identifier::Concat({
-                let mut lvalues = Vec::new();
-                for rvalue in rvalues {
-                    match rvalue {
+            ValueExpr::DynName(values) => {
+                let mut concat = Vec::new();
+                for val in values {
+                    match val {
                         ValueExpr::Lit(lit) => {
-                            lvalues.push(Identifier::Name(lit.to_owned()));
+                            concat.push(Identifier::Name(lit.to_owned()));
                         }
                         ValueExpr::Var(name, _) => {
-                            lvalues.push(Identifier::Indirect(name.to_owned()));
+                            concat.push(Identifier::Indirect(name.to_owned()));
                         }
                         _ => return None,
                     }
                 }
-                lvalues
-            })),
+                if concat.len() <= 1 {
+                    concat.pop()
+                } else {
+                    Some(Identifier::Concat(concat))
+                }
+            }
             _ => None,
         }
     }

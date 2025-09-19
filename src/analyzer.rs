@@ -14,6 +14,7 @@ use autotools_parser::{
 };
 use build_option::BuildOptionInfo;
 use chunk::{Chunk, ChunkId, Scope};
+use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
 use macro_call::MacroHandler;
@@ -33,8 +34,8 @@ use slab::Slab;
 mod build_option;
 mod case;
 mod chunk;
-mod eval;
 mod dictionary;
+mod eval;
 mod flatten;
 mod guard;
 mod macro_call;
@@ -596,6 +597,8 @@ pub struct Analyzer {
     scopes: HashMap<String, Vec<Scope>>,
     /// Inferred Types
     inferred_types: HashMap<String, (HashSet<TypeHint>, DataType)>,
+    /// Dictionary Instances
+    dicts: Vec<DictionaryInstance>,
 }
 
 impl Analyzer {
@@ -663,6 +666,7 @@ impl Analyzer {
                 ..Default::default()
             },
             inferred_types: HashMap::new(),
+            dicts: Vec::new(),
         };
         GuardAnalyzer::analyze_blocks(&mut s);
 

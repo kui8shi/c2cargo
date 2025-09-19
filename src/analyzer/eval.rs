@@ -42,8 +42,8 @@ impl Chain {
 pub(crate) struct IdentifierDivision {
     /// components of the divided identifier
     pub division: Identifier,
-    /// variable to value map
-    pub map: HashMap<String, String>,
+    /// vector of variable to value mappings
+    pub mapping: Vec<(String, String)>,
 }
 
 fn enumerate_combinations(combos: Vec<HashSet<String>>) -> Vec<Vec<String>> {
@@ -84,9 +84,6 @@ impl Analyzer {
             }
         }
         self.apply_def_use_edges(def_use_edges);
-        dbg!(&self.eval_assigns);
-        dbg!(&self.resolved_values);
-        dbg!(&self.divided_vars);
     }
 
     /// collect literals of a var
@@ -99,23 +96,27 @@ impl Analyzer {
 
     fn record_identifier_division(
         &mut self,
-        values: Vec<Identifier>,
+        identifier: Identifier,
         resolved: Vec<String>,
         ref_loc: Location,
     ) {
         let name = resolved.concat();
         if self.var_definitions.contains_key(name.as_str()) {
-            let mut map = HashMap::new();
-            for (k, v) in values.clone().into_iter().zip(resolved.iter()) {
-                if let Identifier::Indirect(name) = k {
-                    map.insert(name, v.to_owned());
+            let mut mapping = Vec::new();
+            for (k, v) in identifier
+                .positional_vars()
+                .into_iter()
+                .zip(resolved.into_iter())
+            {
+                if let Some(var) = k {
+                    mapping.push((var, v));
                 }
             }
-            let division = Identifier::Concat(values);
+            let division = identifier;
             self.divided_vars
                 .entry(name)
                 .or_default()
-                .insert(ref_loc, IdentifierDivision { division, map });
+                .insert(ref_loc, IdentifierDivision { division, mapping });
         }
     }
 
@@ -139,7 +140,13 @@ impl Analyzer {
         if let Some(rhs) = rhs {
             let rhs = self.resolve_value_expression(rhs, loc);
             for var_name in self.resolve_identifier(lhs, loc) {
-                self.record_resolved_values(Identifier::Name(var_name), loc.clone(), rhs.clone());
+                if !var_name.is_empty() {
+                    self.record_resolved_values(
+                        Identifier::Name(var_name),
+                        loc.clone(),
+                        rhs.clone(),
+                    );
+                }
             }
             self.record_resolved_values(lhs.clone(), loc.clone(), rhs.clone());
         } else {
@@ -158,7 +165,7 @@ impl Analyzer {
                     result.extend(self.resolve_chain(chain))
                 }
             }
-            Identifier::Concat(values) => {
+            ident @ Identifier::Concat(values) => {
                 let resolved = values
                     .iter()
                     .map(|l| self.resolve_identifier(l, loc))
@@ -166,7 +173,7 @@ impl Analyzer {
                 // enumerate combinations
                 let combos = enumerate_combinations(resolved);
                 for combo in combos.iter() {
-                    self.record_identifier_division(values.clone(), combo.clone(), loc.clone());
+                    self.record_identifier_division(ident.clone(), combo.clone(), loc.clone());
                 }
                 for name in combos.into_iter().map(|words| words.concat()) {
                     result.insert(name);
@@ -178,8 +185,6 @@ impl Analyzer {
 
     fn resolve_value_expression(&mut self, value: &ValueExpr, loc: &Location) -> HashSet<String> {
         let mut result = HashSet::new();
-        // Add an empty string to the result for safety
-        result.insert(String::new());
         if let Some(identifier) = value.into() {
             if let Some(resolved) = self.get_last_resolved_values(&identifier, loc) {
                 return resolved;
@@ -213,19 +218,16 @@ impl Analyzer {
                 );
             }
 
-            ValueExpr::DynName(values) => {
+            v @ ValueExpr::DynName(values) => {
                 let resolved = values
                     .iter()
                     .map(|r| self.resolve_value_expression(r, loc))
                     .collect();
-                let values = values
-                    .iter()
-                    .map(|v| Into::<Option<Identifier>>::into(v).unwrap())
-                    .collect::<Vec<_>>();
+                let ident = Into::<Option<Identifier>>::into(v).unwrap();
                 // enumerate combinations
                 let combos = enumerate_combinations(resolved);
                 for combo in combos.iter() {
-                    self.record_identifier_division(values.clone(), combo.clone(), loc.clone());
+                    self.record_identifier_division(ident.clone(), combo.clone(), loc.clone());
                 }
                 for name in combos.into_iter().map(|words| words.concat()) {
                     if let Some(chain) = self.construct_chain(&name, loc) {
