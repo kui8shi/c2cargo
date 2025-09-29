@@ -1,3 +1,4 @@
+use itertools::Itertools;
 use std::collections::HashSet;
 
 use serde::{Deserialize, Serialize};
@@ -11,21 +12,42 @@ impl Analyzer {
     pub fn translate(&mut self) {
         println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
 
-        self.construct_chunks(Some(5), true);
         println!("Constructed {} chunks", self.chunks.len());
 
         let mut exported = HashSet::new();
         // First, collect I/O for all chunks
         for (i, chunk) in self.chunks.iter() {
             exported.extend(chunk.exported.clone());
+            let last_id = *chunk.nodes.last().unwrap();
             println!(
-                "Chunk {}: {} commands, imports {:?}, exports {:?}",
+                "Chunk {}: nodes {:?} , exit {:?}: imports {:?}, exports {:?}, bounds: {:?}",
                 i,
-                chunk.nodes.len(),
+                chunk
+                    .nodes
+                    .iter()
+                    .map(|id| (
+                        *id,
+                        self.collect_descendant_nodes_per_node(*id, true, false)
+                    ))
+                    .map(|(id, nodes)| (
+                        id,
+                        nodes
+                            .into_iter()
+                            .map(|i| self.get_node(i).unwrap().info.exec_id)
+                            .sorted()
+                            .collect::<Vec<_>>()
+                    ))
+                    .collect::<Vec<_>>(),
+                self.get_node(last_id).unwrap().info.exit,
                 chunk.imported,
-                chunk.exported
+                chunk.exported,
+                chunk.bounded,
             );
+            for &id in chunk.nodes.iter() {
+                println!("{}", &self.display_node(id));
+            }
         }
+        dbg!(&self.scopes);
     }
 }
 

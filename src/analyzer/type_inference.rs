@@ -71,10 +71,17 @@ pub(super) struct TypeInferrer<'a> {
 }
 
 impl Analyzer {
+    pub(crate) fn get_inferred_type(
+        &self,
+        var_name: &str,
+    ) -> Option<&(HashSet<TypeHint>, DataType)> {
+        self.inferred_types.as_ref().unwrap().get(var_name)
+    }
+
     /// run type inference
-    pub fn run_type_inference(&mut self) {
-        self.inferred_types = TypeInferrer::run_type_inference(&self);
-        self.dicts = self.make_dictionary_instances();
+    pub(crate) fn run_type_inference(&mut self) {
+        self.inferred_types
+            .replace(TypeInferrer::run_type_inference(&self));
     }
 }
 
@@ -206,7 +213,7 @@ impl<'a> TypeInferrer<'a> {
 }
 
 impl<'a> AstVisitor for TypeInferrer<'a> {
-    fn get_node(&self, node_id: NodeId) -> &Node {
+    fn get_node(&self, node_id: NodeId) -> Option<&Node> {
         self.analyzer.get_node(node_id)
     }
 
@@ -216,13 +223,18 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
-        let saved_cursor = self.cursor.replace(node_id);
+        if self.get_node(node_id).is_some() {
+            let saved_cursor = self.cursor.replace(node_id);
 
-        if !self.get_node(node_id).info.is_top_node() {
-            self.walk_node(node_id);
+            if self
+                .get_node(node_id)
+                .is_some_and(|n| !n.info.is_top_node())
+            {
+                self.walk_node(node_id);
+            }
+
+            self.cursor = saved_cursor;
         }
-
-        self.cursor = saved_cursor;
     }
 
     fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {

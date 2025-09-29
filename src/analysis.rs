@@ -12,10 +12,8 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
     let mut analyzer = Analyzer::new(&path, None);
     let top_ids = analyzer.get_top_ids();
 
-    analyzer.prune_platform_branch();
-    analyzer.run_value_set_analysis();
-    analyzer.run_build_option_analysis();
-    analyzer.run_type_inference();
+    // analyzer.run_build_option_analysis();
+    // analyzer.run_type_inference();
 
     /*
 

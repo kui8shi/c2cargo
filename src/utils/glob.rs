@@ -30,7 +30,7 @@ impl std::fmt::Display for GlobError {
 impl std::error::Error for GlobError {}
 
 #[derive(Clone, Debug)]
-enum Node {
+enum GlobNode {
     Literal(String),      // sequence of literal chars
     AnyChar,              // '?'
     CharClass(Vec<char>), // explicit set (already resolved incl. ranges/negation)
@@ -38,7 +38,7 @@ enum Node {
 }
 
 #[derive(Clone, Debug)]
-struct Ast(Vec<Node>);
+struct GlobAst(Vec<GlobNode>);
 
 /// Enumerate all strings matching the AST.
 /// Asterisk is not supported.
@@ -65,14 +65,14 @@ pub(crate) fn glob_match(pattern: &str, text: &str) -> bool {
 /// Parse a glob into AST.
 /// Supports: literals, '?', '[...]' (ranges, escapes, [!...] / [^...]), '*'.
 /// Backslash works as escape both outside and inside classes.
-fn parse_glob(pattern: &str) -> Result<Ast, GlobError> {
+fn parse_glob(pattern: &str) -> Result<GlobAst, GlobError> {
     let mut it = pattern.chars().peekable();
-    let mut nodes = Vec::<Node>::new();
+    let mut nodes = Vec::<GlobNode>::new();
     let mut lit_buf = String::new();
 
-    fn flush_lit(buf: &mut String, nodes: &mut Vec<Node>) {
+    fn flush_lit(buf: &mut String, nodes: &mut Vec<GlobNode>) {
         if !buf.is_empty() {
-            nodes.push(Node::Literal(std::mem::take(buf)));
+            nodes.push(GlobNode::Literal(std::mem::take(buf)));
         }
     }
 
@@ -80,11 +80,11 @@ fn parse_glob(pattern: &str) -> Result<Ast, GlobError> {
         match c {
             '*' => {
                 flush_lit(&mut lit_buf, &mut nodes);
-                nodes.push(Node::Asterisk);
+                nodes.push(GlobNode::Asterisk);
             }
             '?' => {
                 flush_lit(&mut lit_buf, &mut nodes);
-                nodes.push(Node::AnyChar);
+                nodes.push(GlobNode::AnyChar);
             }
             '\\' => {
                 // Escape outside class: take next char as literal
@@ -167,12 +167,12 @@ fn parse_glob(pattern: &str) -> Result<Ast, GlobError> {
                     if comp.is_empty() {
                         return Err(GlobError::EmptyClass);
                     }
-                    nodes.push(Node::CharClass(comp));
+                    nodes.push(GlobNode::CharClass(comp));
                 } else {
                     if elems.is_empty() {
                         return Err(GlobError::EmptyClass);
                     }
-                    nodes.push(Node::CharClass(elems));
+                    nodes.push(GlobNode::CharClass(elems));
                 }
             }
             _ => {
@@ -181,23 +181,23 @@ fn parse_glob(pattern: &str) -> Result<Ast, GlobError> {
         }
     }
     flush_lit(&mut lit_buf, &mut nodes);
-    Ok(Ast(nodes))
+    Ok(GlobAst(nodes))
 }
 
 /// Compute total combinations (product of choice counts).
-fn combinations_count(ast: &Ast, wildcard_alphabet_len: u128) -> u128 {
+fn combinations_count(ast: &GlobAst, wildcard_alphabet_len: u128) -> u128 {
     ast.0.iter().fold(1u128, |acc, n| {
         let m = match n {
-            Node::Literal(s) => {
+            GlobNode::Literal(s) => {
                 if s.is_empty() {
                     1
                 } else {
                     1
                 }
             }
-            Node::AnyChar => wildcard_alphabet_len,
-            Node::CharClass(v) => v.len() as u128,
-            Node::Asterisk => return u128::MAX, // Signal infinite combinations
+            GlobNode::AnyChar => wildcard_alphabet_len,
+            GlobNode::CharClass(v) => v.len() as u128,
+            GlobNode::Asterisk => return u128::MAX, // Signal infinite combinations
         };
         acc.saturating_mul(m)
     })
@@ -207,12 +207,13 @@ fn combinations_count(ast: &Ast, wildcard_alphabet_len: u128) -> u128 {
 /// - `wildcard_alphabet` is used for '?'
 /// - `max_combinations` is a safety cap
 fn enumerate(
-    ast: &Ast,
+    ast: &GlobAst,
     wildcard_alphabet: &[char],
     max_combinations: u128,
 ) -> Result<Vec<String>, GlobError> {
     // Check for asterisks first
-    if ast.0.iter().any(|node| matches!(node, Node::Asterisk)) {
+    if ast.0.iter().any(|node| matches!(node, GlobNode::Asterisk)) {
+        // we do not support enumeration of '*'.
         return Err(GlobError::AsteriskInEnumeration);
     }
 
@@ -225,7 +226,7 @@ fn enumerate(
     let mut out = Vec::<String>::with_capacity(total.min(1_000_000) as usize);
 
     fn push_cartesian(
-        nodes: &[Node],
+        nodes: &[GlobNode],
         idx: usize,
         cur: &mut String,
         out: &mut Vec<String>,
@@ -236,7 +237,7 @@ fn enumerate(
             return;
         }
         match &nodes[idx] {
-            Node::Literal(s) => {
+            GlobNode::Literal(s) => {
                 cur.push_str(s);
                 push_cartesian(nodes, idx + 1, cur, out, wc);
                 // pop back s.len() chars
@@ -244,21 +245,21 @@ fn enumerate(
                     cur.pop();
                 }
             }
-            Node::AnyChar => {
+            GlobNode::AnyChar => {
                 for &c in wc {
                     cur.push(c);
                     push_cartesian(nodes, idx + 1, cur, out, wc);
                     cur.pop();
                 }
             }
-            Node::CharClass(v) => {
+            GlobNode::CharClass(v) => {
                 for &c in v {
                     cur.push(c);
                     push_cartesian(nodes, idx + 1, cur, out, wc);
                     cur.pop();
                 }
             }
-            Node::Asterisk => {
+            GlobNode::Asterisk => {
                 // This should never be reached due to the check at the start of enumerate()
                 unreachable!("Asterisk should be caught by enumerate() validation")
             }
@@ -280,12 +281,12 @@ fn ascii_lowercase() -> Vec<char> {
     ('a'..='z').collect()
 }
 
-fn match_ast(ast: &Ast, text: &str) -> bool {
+fn match_ast(ast: &GlobAst, text: &str) -> bool {
     let text_chars: Vec<char> = text.chars().collect();
     match_nodes(&ast.0, &text_chars, 0, 0)
 }
 
-fn match_nodes(nodes: &[Node], text_chars: &[char], node_idx: usize, text_idx: usize) -> bool {
+fn match_nodes(nodes: &[GlobNode], text_chars: &[char], node_idx: usize, text_idx: usize) -> bool {
     if node_idx == nodes.len() {
         return text_idx == text_chars.len();
     }
@@ -295,7 +296,7 @@ fn match_nodes(nodes: &[Node], text_chars: &[char], node_idx: usize, text_idx: u
     }
 
     match &nodes[node_idx] {
-        Node::Literal(s) => {
+        GlobNode::Literal(s) => {
             let pattern_chars: Vec<char> = s.chars().collect();
             if text_idx + pattern_chars.len() > text_chars.len() {
                 return false;
@@ -314,13 +315,13 @@ fn match_nodes(nodes: &[Node], text_chars: &[char], node_idx: usize, text_idx: u
                 text_idx + pattern_chars.len(),
             )
         }
-        Node::AnyChar => {
+        GlobNode::AnyChar => {
             if text_idx >= text_chars.len() {
                 return false;
             }
             match_nodes(nodes, text_chars, node_idx + 1, text_idx + 1)
         }
-        Node::CharClass(allowed_chars) => {
+        GlobNode::CharClass(allowed_chars) => {
             if text_idx >= text_chars.len() {
                 return false;
             }
@@ -332,7 +333,7 @@ fn match_nodes(nodes: &[Node], text_chars: &[char], node_idx: usize, text_idx: u
 
             match_nodes(nodes, text_chars, node_idx + 1, text_idx + 1)
         }
-        Node::Asterisk => {
+        GlobNode::Asterisk => {
             // Try matching 0 characters (skip the asterisk)
             if match_nodes(nodes, text_chars, node_idx + 1, text_idx) {
                 return true;

@@ -1,22 +1,12 @@
-use std::{collections::HashMap, hash::Hash};
-
-use super::{
-    AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, M4Macro, MayM4, Node, NodeId,
-    Parameter, VariableMap, Word, WordFragment,
+use std::{
+    collections::{HashMap, HashSet},
+    hash::Hash,
 };
 
-#[derive(Debug, Clone, PartialEq, Eq, Ord, Hash)]
-pub(crate) struct Location {
-    pub node_id: NodeId,
-    pub line: usize,
-    pub is_left: bool,
-}
-
-impl PartialOrd for Location {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((self.line, self.is_left).cmp(&(other.line, other.is_left)))
-    }
-}
+use super::{
+    location::Location, AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, ExecId, M4Macro,
+    MayM4, Node, NodeId, Parameter, ShellCommand, VariableMap, Word, WordFragment,
+};
 
 /// Struct represents various types of variable names used in assignments.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -117,105 +107,138 @@ impl Into<Option<Identifier>> for &ValueExpr {
 pub(super) struct VariableAnalyzer<'a> {
     analyzer: &'a mut Analyzer,
     cursor: Option<NodeId>,
+    order: usize,
+    exec_id: ExecId,
 }
 
 impl<'a> VariableAnalyzer<'a> {
     /// Create a new VariableAnalyzer and visit the given command.
     pub fn analyze_variables(analyzer: &'a mut Analyzer) {
+        analyzer.eval_assigns.replace(Default::default());
+
         let mut s = Self {
             analyzer,
             cursor: None,
+            order: 0,
+            exec_id: 0,
         };
 
         for id in s.analyzer.get_top_ids() {
             s.visit_top(id);
         }
-
-        // collect recorded definitions
-        let var_definitions: VariableMap = s
-            .analyzer
-            .pool
-            .nodes
-            .iter()
-            .map(|(_, n)| n.info.defines.iter())
-            .flatten()
-            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
-                acc.entry(name.clone()).or_default().extend(locs.clone());
-                acc
-            })
-            .into_iter()
-            .map(|(name, mut locs)| {
-                locs.sort();
-                (name, locs)
-            })
-            .collect();
-
-        // collect recorded usages
-        let var_usages: VariableMap = s
-            .analyzer
-            .pool
-            .nodes
-            .iter()
-            .map(|(_, n)| n.info.uses.iter())
-            .flatten()
-            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
-                acc.entry(name.clone()).or_default().extend(locs.clone());
-                acc
-            })
-            .into_iter()
-            .map(|(name, mut locs)| {
-                locs.sort();
-                (name, locs)
-            })
-            .collect();
-
-        s.analyzer.var_definitions = var_definitions;
-        s.analyzer.var_usages = var_usages;
-
-        let mut def_use_edges = Vec::new();
-        // Calculate dependency edges
-        for (user_id, node) in &s.analyzer.pool.nodes {
-            for var in node.info.uses.keys() {
-                if let Some(def_loc) = s.analyzer.get_dominant_definition(var, user_id) {
-                    def_use_edges.push((def_loc.node_id, user_id, var.to_owned()));
-                }
-            }
-        }
-        s.analyzer.apply_def_use_edges(def_use_edges);
     }
 }
 
 impl<'a> VariableAnalyzer<'a> {
+    fn increment_order(&mut self) {
+        self.order += 1;
+    }
+
+    fn clear_order(&mut self) {
+        self.order = 0;
+    }
+
     fn current_location(&self) -> Location {
+        let node_id = self.cursor.unwrap();
+        let node = self.get_node(node_id).unwrap();
+        let exec_id = node.info.exec_id;
+        let order = self.order;
+        let line = node.range_start().unwrap();
         Location {
-            node_id: self.cursor.unwrap(),
-            line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
-            is_left: true,
+            node_id,
+            exec_id,
+            order,
+            line,
         }
+    }
+
+    fn record_exec_id(&mut self) {
+        let node_id = self.cursor.unwrap();
+        self.analyzer.get_node_mut(node_id).unwrap().info.exec_id = self.exec_id;
+        self.exec_id += 1;
+    }
+
+    fn record_exit(&mut self) {
+        let node_id = self.cursor.unwrap();
+        self.analyzer.get_node_mut(node_id).unwrap().info.exit = self.exec_id;
     }
 
     fn record_variable_definition(&mut self, name: &str) {
         let node_id = self.cursor.unwrap();
-        let loc = self.current_location();
+        let def_loc = self.current_location();
         self.analyzer
             .get_node_mut(node_id)
+            .unwrap()
             .info
-            .defines
+            .definitions
             .entry(name.to_owned())
             .or_default()
-            .push(loc.clone());
+            .push(def_loc);
+        self.increment_order();
     }
 
     fn record_variable_usage(&mut self, name: &str) {
         let node_id = self.cursor.unwrap();
-        let loc = self.current_location();
+        let ref_loc = self.current_location();
         self.analyzer
             .get_node_mut(node_id)
+            .unwrap()
             .info
-            .uses
+            .usages
             .entry(name.to_owned())
             .or_default()
-            .push(loc.clone());
+            .push(ref_loc);
+        self.increment_order();
+    }
+
+    fn record_variable_bind(&mut self, name: &str) {
+        let node_id = self.cursor.unwrap();
+        let bind_loc = self.current_location();
+        self.analyzer
+            .get_node_mut(node_id)
+            .unwrap()
+            .info
+            .bounds
+            .entry(name.to_owned())
+            .or_default()
+            .push(bind_loc);
+        self.increment_order();
+    }
+
+
+    fn check_propagation(&mut self) {
+        let node_id = self.cursor.unwrap();
+        let def_loc = self.current_location();
+        let branches = &self.analyzer.get_node(node_id).unwrap().info.branches;
+        if branches.len() > 1 {
+            // FIXME this is incorrect. checking !else_branch.is_empty is more strict
+            let vars_defined_across_all_branches = branches
+                .iter()
+                .filter(|block_id| !self.analyzer.get_block(**block_id).error_out)
+                .map(|block_id| {
+                    self.analyzer
+                        .get_block(*block_id)
+                        .nodes
+                        .iter()
+                        .map(|id| self.analyzer.get_node(*id).unwrap().info.definitions.keys())
+                        .flatten()
+                        .cloned()
+                        .collect::<HashSet<_>>()
+                })
+                .reduce(|a, b| &a & &b)
+                .unwrap_or_default();
+            for var in vars_defined_across_all_branches {
+                self.analyzer
+                    .get_node_mut(node_id)
+                    .unwrap()
+                    .info
+                    .propagated_definitions
+                    .entry(var.to_owned())
+                    .or_default()
+                    .push(def_loc.clone());
+            }
+        }
+        self.increment_order();
     }
 
     /// parse a body of eval assignment. It is expected to take `word` as a concatenated word fragments
@@ -225,7 +248,7 @@ impl<'a> VariableAnalyzer<'a> {
         let mut rhs = Vec::new();
         let mut is_lhs = true;
         let mut is_ref = false;
-        let loc = self.current_location();
+        let ref_loc = self.current_location();
         for frag in frags.iter() {
             use MayM4::*;
             match frag {
@@ -237,7 +260,7 @@ impl<'a> VariableAnalyzer<'a> {
                     lhs.push(Identifier::Indirect(s.to_owned()));
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if !is_lhs => {
-                    rhs.push(ValueExpr::Var(s.to_owned(), loc.clone()));
+                    rhs.push(ValueExpr::Var(s.to_owned(), ref_loc.clone()));
                 }
                 Shell(WordFragment::Literal(s)) if is_lhs => {
                     if s.contains("=") {
@@ -271,7 +294,7 @@ impl<'a> VariableAnalyzer<'a> {
                                 rhs.push(ValueExpr::Lit(s.to_owned()));
                             }
                             WordFragment::Param(Parameter::Var(s)) => {
-                                rhs.push(ValueExpr::Var(s.to_owned(), loc.clone()));
+                                rhs.push(ValueExpr::Var(s.to_owned(), ref_loc.clone()));
                             }
                             _ => (),
                         }
@@ -297,39 +320,47 @@ impl<'a> VariableAnalyzer<'a> {
 }
 
 impl<'a> AstVisitor for VariableAnalyzer<'a> {
-    fn get_node(&self, node_id: NodeId) -> &Node {
+    fn get_node(&self, node_id: NodeId) -> Option<&Node> {
         self.analyzer.get_node(node_id)
     }
 
     fn visit_top(&mut self, node_id: NodeId) {
-        if self.get_node(node_id).info.is_child_node() {
+        if self
+            .get_node(node_id)
+            .is_none_or(|n| n.info.is_child_node())
+        {
             return;
         }
-        self.cursor.replace(node_id);
-        self.walk_node(node_id);
+        self.visit_node(node_id)
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
+        if self.get_node(node_id).is_none() {
+            return;
+        }
         let saved_cursor = self.cursor.replace(node_id);
+        self.clear_order();
+        self.record_exec_id();
         self.walk_node(node_id);
+        self.record_exit();
+        self.check_propagation();
         self.cursor = saved_cursor;
     }
 
     fn visit_assignment(&mut self, name: &str, word: &AcWord) {
-        self.record_variable_definition(name);
         self.walk_assignment(name, word);
+        self.record_variable_definition(name);
     }
 
     fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
-        self.record_variable_definition(var);
-        self.walk_for(var, words, body);
-    }
-
-    fn visit_word_fragment(&mut self, f: &AcWordFragment) {
-        if let MayM4::Shell(WordFragment::Param(Parameter::Var(name))) = f {
-            self.record_variable_usage(name);
+        for word in words {
+            self.visit_word(word);
         }
-        self.walk_word_fragment(f);
+        self.record_variable_definition(var);
+        self.record_variable_bind(var);
+        for cmd in body {
+            self.visit_node(*cmd);
+        }
     }
 
     fn visit_arithmetic(&mut self, arith: &Arithmetic<String>) {
@@ -374,13 +405,14 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
             if is_eval(first) {
                 if let Some(Word::Concat(frags)) = cmd_words.get(1).map(|t| &t.0) {
                     let (lhs, rhs) = self.parse_eval_assignment(frags);
-                    let loc = Location {
-                        node_id: self.cursor.unwrap(),
-                        line: self.get_node(self.cursor.unwrap()).range_start().unwrap(),
-                        is_left: true,
-                    };
+                    let loc = self.current_location();
+                    if let Identifier::Name(name) = &lhs {
+                        self.record_variable_definition(name);
+                    }
                     self.analyzer
                         .eval_assigns
+                        .as_mut()
+                        .unwrap()
                         .entry(lhs)
                         .or_default()
                         .push((rhs, loc.clone()));
@@ -399,5 +431,112 @@ fn is_eval(word: &AcWord) -> bool {
                 && matches!(&frags[0], MayM4::Shell(WordFragment::Literal(t)) if t == "eval")
         }
         _ => false,
+    }
+}
+
+impl Analyzer {
+    pub(super) fn remove_unused_variables(&mut self) {
+        let unused_vars = self
+            .var_definitions
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|(var, locs)| {
+                let var = var.as_str();
+                let no_usage = locs
+                    .iter()
+                    .all(|loc| self.get_all_usages_after(var, Some(loc), true).is_empty());
+                let no_subst = !self.is_substituted(var);
+
+                no_usage && no_subst
+            })
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect::<HashSet<_>>();
+
+        for (unused_var, locs) in unused_vars {
+            for loc in locs {
+                if self.get_node(loc.node_id).is_some_and(|n| {
+                    matches!(&n.cmd.0, MayM4::Shell(ShellCommand::Assignment(_, _)))
+                }) {
+                    dbg!(&unused_var);
+                    self.remove_node(loc.node_id);
+                    self.var_definitions
+                        .as_mut()
+                        .unwrap()
+                        .remove(unused_var.as_str());
+                }
+            }
+        }
+    }
+
+    pub(super) fn aggregate_def_use(&mut self) {
+        // collect recorded definitions
+        let var_definitions: VariableMap = self
+            .pool
+            .nodes
+            .iter()
+            .map(|(_, n)| n.info.definitions.iter())
+            .flatten()
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
+                acc.entry(name.clone()).or_default().extend(locs.clone());
+                acc
+            })
+            .into_iter()
+            .map(|(name, mut locs)| {
+                locs.sort();
+                (name, locs)
+            })
+            .collect();
+
+        let var_propagated_definitions: VariableMap = self
+            .pool
+            .nodes
+            .iter()
+            .map(|(_, n)| n.info.propagated_definitions.iter())
+            .flatten()
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
+                acc.entry(name.clone()).or_default().extend(locs.clone());
+                acc
+            })
+            .into_iter()
+            .map(|(name, mut locs)| {
+                locs.sort();
+                (name, locs)
+            })
+            .collect();
+
+        // collect recorded usages
+        let var_usages: VariableMap = self
+            .pool
+            .nodes
+            .iter()
+            .map(|(_, n)| n.info.usages.iter())
+            .flatten()
+            .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
+                acc.entry(name.clone()).or_default().extend(locs.clone());
+                acc
+            })
+            .into_iter()
+            .map(|(name, mut locs)| {
+                locs.sort();
+                (name, locs)
+            })
+            .collect();
+
+        self.var_definitions.replace(var_definitions);
+        self.var_propagated_definitions
+            .replace(var_propagated_definitions);
+        self.var_usages.replace(var_usages);
+
+        let mut def_use_edges = Vec::new();
+        // Calculate dependency edges
+        for (user_id, node) in &self.pool.nodes {
+            for var in node.info.usages.keys() {
+                if let Some(def_loc) = self.get_dominant_definition(var, user_id) {
+                    def_use_edges.push((def_loc.node_id, user_id, var.to_owned()));
+                }
+            }
+        }
+        self.apply_def_use_edges(def_use_edges);
     }
 }

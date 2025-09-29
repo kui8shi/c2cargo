@@ -18,12 +18,13 @@ pub(super) enum Guard {
 
 pub(super) type BlockId = usize;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct Block {
     pub block_id: BlockId,
     pub parent: NodeId,
     pub nodes: Vec<NodeId>,
     pub guards: Vec<Guard>,
+    pub error_out: bool,
 }
 
 impl Guard {
@@ -139,7 +140,7 @@ pub(crate) enum CompilerCheck {
 
 /// Compare two conditions.
 pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp::Ordering> {
-    for (l, r) in lhs.iter().rev().zip(rhs.iter().rev()) {
+    for (l, r) in lhs.iter().zip(rhs.iter()) {
         if l != r {
             // not comparable.
             return None;
@@ -157,6 +158,7 @@ pub(super) struct GuardAnalyzer<'a> {
     cursor: Option<NodeId>,
     range: Option<Vec<(usize, usize)>>,
     guard_stack: Vec<Guard>,
+    removing_blocks: Vec<NodeId>,
 }
 
 impl Analyzer {
@@ -195,36 +197,53 @@ impl<'a> GuardAnalyzer<'a> {
             cursor: None,
             range: None,
             guard_stack: Vec::new(),
+            removing_blocks: Vec::new(),
         };
-        for id in s.analyzer.get_top_ids() {
-            s.visit_top(id);
+        for node_id in s.analyzer.get_top_ids() {
+            s.visit_top(node_id);
+        }
+        for block_id in s.removing_blocks {
+            if s.analyzer.blocks.contains(block_id) {
+                let block = &s.analyzer.blocks[block_id];
+                if s.analyzer.pool.nodes.contains(block.parent) {
+                    for child in block.nodes.clone().into_iter() {
+                        if s.analyzer.pool.nodes.contains(child) {
+                            s.analyzer.remove_node(child);
+                        }
+                    }
+                }
+            }
         }
     }
 
-    fn record_block(&mut self, node_ids: &[NodeId]) {
+    fn record_block(&mut self, node_ids: &[NodeId]) -> BlockId {
         let parent = self.cursor.unwrap();
         let new_block_id = self.analyzer.add_block(Block {
-            block_id: 0,
             parent,
             nodes: node_ids.to_vec(),
             guards: self.guard_stack.clone(),
+            ..Default::default()
         });
 
         // record parent-child relation ships
         for &id in node_ids {
-            assert!(self.get_node(parent).range.len() > 0);
+            assert!(self.get_node(parent).unwrap().range.len() > 0);
             self.analyzer.link_body_to_parent(id, parent, new_block_id);
 
-            if self.get_node(id).range.is_empty() {
+            if self.get_node(id).unwrap().range.is_empty() {
                 // propagate ranges information if child doesn't know its range.
-                self.analyzer.get_node_mut(id).range = self.get_node(parent).range.clone();
+                self.analyzer.get_node_mut(id).unwrap().range =
+                    self.get_node(parent).unwrap().range.clone();
             }
         }
         self.analyzer
             .get_node_mut(parent)
+            .unwrap()
             .info
             .branches
             .push(new_block_id);
+
+        new_block_id
     }
 
     fn negate_last_guard(&mut self) {
@@ -332,9 +351,9 @@ impl<'a> GuardAnalyzer<'a> {
                 let parent = self.cursor.unwrap();
                 let cmd = **cmd;
                 self.analyzer.add_pre_body_node(parent, cmd);
-                if self.analyzer.get_node(cmd).range.is_empty() {
-                    self.analyzer.get_node_mut(cmd).range =
-                        self.analyzer.get_node(parent).range.clone();
+                if self.analyzer.get_node(cmd).unwrap().range.is_empty() {
+                    self.analyzer.get_node_mut(cmd).unwrap().range =
+                        self.analyzer.get_node(parent).unwrap().range.clone();
                 }
                 Guard::N(true, Atom::Cmd(cmd))
             }
@@ -578,12 +597,15 @@ impl<'a> GuardAnalyzer<'a> {
 }
 
 impl<'a> AstVisitor for GuardAnalyzer<'a> {
-    fn get_node(&self, node_id: NodeId) -> &Node {
+    fn get_node(&self, node_id: NodeId) -> Option<&Node> {
         self.analyzer.get_node(node_id)
     }
 
     fn visit_top(&mut self, node_id: NodeId) {
-        if self.get_node(node_id).info.is_child_node() {
+        if self
+            .get_node(node_id)
+            .is_none_or(|n| n.info.is_child_node())
+        {
             return;
         }
         self.cursor.replace(node_id);
@@ -591,6 +613,9 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
     }
 
     fn visit_node(&mut self, node_id: NodeId) {
+        if self.get_node(node_id).is_none() {
+            return;
+        }
         let saved_cursor = self.cursor.replace(node_id);
         self.walk_node(node_id);
         self.cursor = saved_cursor;
@@ -677,6 +702,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
 
     fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         let saved_stack = self.guard_stack.clone();
+        let mut is_platform_branch = false;
         if let Some(w) = as_shell(word) {
             let node_id = self.cursor.unwrap();
             if let WordFragment::Subst(subst) = w {
@@ -686,9 +712,12 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     }
                 }
             }
+            if let Some("host") = as_var(w) {
+                is_platform_branch = true;
+            }
         }
         for arm in arms {
-            let guard = Guard::make_or(
+            let mut guard = Guard::make_or(
                 arm.patterns
                     .iter()
                     .map(|pattern| {
@@ -697,8 +726,28 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     })
                     .collect(),
             );
+            let unsupported_platform_branch_found = if is_platform_branch {
+                if let Some(converted) = self
+                    .analyzer
+                    .platform_support
+                    .check_supported_platform(&guard)
+                {
+                    guard = converted;
+                    false
+                } else {
+                    true
+                }
+            } else {
+                false
+            };
+            let block_id = self.record_block(&arm.body);
+            if unsupported_platform_branch_found {
+                // why not remove the nodes in the arm immediately?
+                // because `remove_node` depends on the block structure.
+                // it looks dirty but work well for now.
+                self.removing_blocks.push(block_id);
+            }
             self.guard_stack.push(guard);
-            self.record_block(&arm.body);
             for c in &arm.body {
                 self.visit_node(*c);
             }

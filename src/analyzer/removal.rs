@@ -1,11 +1,11 @@
-use super::{Analyzer, BlockId, Condition, GuardBodyPair, MayM4, NodeId, ShellCommand};
+use super::{Analyzer, BlockId, Condition, GuardBodyPair, M4Argument, MayM4, NodeId, ShellCommand};
 
 impl Analyzer {
     /// Remove a node, children nodes, and empty parent nodes recursively
     pub(super) fn remove_node(&mut self, node_id: NodeId) {
         // Get parent information before removing the node
-        let parent = self.get_node(node_id).info.parent;
-        let block = self.get_node(node_id).info.block;
+        let parent = self.get_node(node_id).unwrap().info.parent;
+        let block = self.get_node(node_id).unwrap().info.block;
 
         self.remove_node_and_children(node_id);
 
@@ -35,17 +35,27 @@ impl Analyzer {
         self.top_ids.retain(|&id| id != node_id);
 
         // Clean up any references in other data structures
-        self.var_definitions.retain(|_, locations| {
-            locations.retain(|loc| loc.node_id != node_id);
-            !locations.is_empty()
+        self.var_definitions.as_mut().map(|v| {
+            v.retain(|_, locations| {
+                locations.retain(|loc| loc.node_id != node_id);
+                !locations.is_empty()
+            })
         });
-        self.var_usages.retain(|_, locations| {
-            locations.retain(|loc| loc.node_id != node_id);
-            !locations.is_empty()
+        self.var_propagated_definitions.as_mut().map(|v| {
+            v.retain(|_, locations| {
+                locations.retain(|loc| loc.node_id != node_id);
+                !locations.is_empty()
+            })
+        });
+        self.var_usages.as_mut().map(|v| {
+            v.retain(|_, locations| {
+                locations.retain(|loc| loc.node_id != node_id);
+                !locations.is_empty()
+            })
         });
 
         // Remove the node's child blocks
-        for block_id in self.get_node(node_id).info.branches.clone() {
+        for block_id in self.get_node(node_id).unwrap().info.branches.clone() {
             if self.blocks.contains(block_id) {
                 self.blocks.remove(block_id);
             }
@@ -82,7 +92,7 @@ impl Analyzer {
 
     fn prune_block(&mut self, parent_id: NodeId, block_id: BlockId) {
         let branch_index = self.get_branch_index(parent_id, block_id).unwrap();
-        if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).cmd.0 {
+        if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).unwrap().cmd.0 {
             match cmd {
                 ShellCommand::If {
                     conditionals,
@@ -114,6 +124,7 @@ impl Analyzer {
         }
         // Unlink parent to block relationship
         self.get_node_mut(parent_id)
+            .unwrap()
             .info
             .branches
             .retain(|id| *id != block_id);
@@ -121,8 +132,8 @@ impl Analyzer {
 
     fn prune_command(&mut self, parent_id: NodeId, node_id: NodeId, block_id: BlockId) {
         let branch_index = self.get_branch_index(parent_id, block_id).unwrap();
-        if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).cmd.0 {
-            match cmd {
+        match &mut self.get_node_mut(parent_id).unwrap().cmd.0 {
+            MayM4::Shell(cmd) => match cmd {
                 ShellCommand::If {
                     conditionals,
                     else_branch,
@@ -153,6 +164,16 @@ impl Analyzer {
                     body.retain(|id| *id != node_id);
                 }
                 _ => unreachable!(),
+            },
+            MayM4::Macro(m4_macro) => {
+                for arg in m4_macro.args.iter_mut() {
+                    match arg {
+                        M4Argument::Commands(cmds) => {
+                            cmds.retain(|id| *id != node_id);
+                        }
+                        _ => (),
+                    }
+                }
             }
         }
     }

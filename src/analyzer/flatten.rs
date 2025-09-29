@@ -33,7 +33,7 @@ struct ParentInfo {
 impl<'a> Flattener<'a> {
     /// Checks if a command is a 'break'/'continue' command
     fn is_loop_interruption_cmd(&self, node_id: NodeId) -> bool {
-        let node = self.get_node(node_id);
+        let node = self.get_node(node_id).unwrap();
         if let super::MayM4::Shell(ShellCommand::Cmd(words)) = &node.cmd.0 {
             if let Some(first_word) = words.first() {
                 if let Some(shell_word) = as_shell(first_word) {
@@ -56,7 +56,7 @@ impl<'a> Flattener<'a> {
         use super::MayM4::*;
         use ShellCommand::*;
 
-        match &self.get_node(node_id).cmd.0 {
+        match &self.get_node(node_id).unwrap().cmd.0 {
             Shell(While(_)) | Shell(Until(_)) => {
                 // Don't traverse into nested loops as breaks there don't affect current scope
                 false
@@ -116,10 +116,10 @@ impl<'a> Flattener<'a> {
                 .remove(branch_idx);
             for (nodes, _) in blocks.iter().rev() {
                 let new_block_id = self.analyzer.add_block(Block {
-                    block_id: 0,
                     parent: parent_id,
                     nodes: nodes.clone(),
                     guards: old_block.guards.clone(),
+                    ..Default::default()
                 });
                 self.get_node_mut(parent_id)
                     .info
@@ -162,6 +162,7 @@ impl<'a> Flattener<'a> {
     /// A node is considered large if its line span exceeds the threshold
     fn is_large(&self, node_id: NodeId) -> bool {
         self.get_node(node_id)
+            .unwrap()
             .range
             .first()
             .is_some_and(|(start, end)| end - start > self.threshold)
@@ -181,7 +182,7 @@ impl<'a> Flattener<'a> {
     fn _block_id_of_nodes(&self, nodes: &[NodeId]) -> BlockId {
         let mut id = nodes
             .iter()
-            .map(|id| self.get_node(*id).info.block.unwrap())
+            .map(|id| self.get_node(*id).unwrap().info.block.unwrap())
             .collect::<HashSet<_>>()
             .into_iter()
             .collect::<Vec<_>>();
@@ -202,7 +203,7 @@ impl<'a> Flattener<'a> {
             comment: None,
             range: children
                 .iter()
-                .flat_map(|id| self.get_node(*id).range.clone())
+                .flat_map(|id| self.get_node(*id).unwrap().range.clone())
                 .collect::<Vec<_>>(),
             cmd: AcCommand::new_cmd(ShellCommand::Brace(children.to_vec())),
             // FIXME: this brace's block id is strage
@@ -215,10 +216,10 @@ impl<'a> Flattener<'a> {
         self.get_node_mut(new_node_id).info.top_id = Some(new_node_id);
         // crate a new block
         let new_block_id = self.analyzer.add_block(Block {
-            block_id: 0,
             parent,
             nodes: vec![new_node_id],
             guards: self.get_block(old_block_id).guards.clone(),
+            ..Default::default()
         });
         self.analyzer
             .link_body_to_parent(new_node_id, parent, new_block_id);
@@ -245,14 +246,22 @@ impl<'a> Flattener<'a> {
         if body.is_empty() {
             None
         } else {
-            let body_start = self.get_node(*body.first().unwrap()).range_start().unwrap();
-            let body_end = self.get_node(*body.last().unwrap()).range_end().unwrap();
+            let body_start = self
+                .get_node(*body.first().unwrap())
+                .unwrap()
+                .range_start()
+                .unwrap();
+            let body_end = self
+                .get_node(*body.last().unwrap())
+                .unwrap()
+                .range_end()
+                .unwrap();
             Some((body_start, body_end))
         }
     }
 
     fn get_node_mut(&mut self, node_id: NodeId) -> &mut Node {
-        self.analyzer.get_node_mut(node_id)
+        self.analyzer.get_node_mut(node_id).unwrap()
     }
 
     fn get_block(&self, block_id: BlockId) -> &Block {
@@ -265,7 +274,7 @@ impl<'a> Flattener<'a> {
 }
 
 impl<'a> AstVisitor for Flattener<'a> {
-    fn get_node(&self, node_id: NodeId) -> &Node {
+    fn get_node(&self, node_id: NodeId) -> Option<&Node> {
         self.analyzer.get_node(node_id)
     }
 
@@ -280,11 +289,14 @@ impl<'a> AstVisitor for Flattener<'a> {
     /// Sets up parent-child relationships and determines the top_id for each node
     /// based on whether it's being flattened or not
     fn visit_node(&mut self, node_id: NodeId) {
+        if self.get_node(node_id).is_none() {
+            return;
+        }
         let is_large = self.is_large(node_id);
 
         // Assign the top_id for this node - this determines which top-level node
         // this node belongs to in the flattened structure
-        self.get_node_mut(node_id).info.top_id = Some(if is_large {
+        let top_id = if is_large {
             // Large nodes become their own top-level nodes
             node_id
         } else {
@@ -323,10 +335,11 @@ impl<'a> AstVisitor for Flattener<'a> {
                     })
                 })
                 .unwrap_or(top_most) // Fallback: if no flattened ancestors, use topmost
-        });
+        };
+        self.get_node_mut(node_id).info.top_id.replace(top_id);
         #[cfg(debug_assertions)]
         {
-            self.last_range_start = self.get_node(node_id).range.first().map(|r| r.0);
+            self.last_range_start = self.get_node(node_id).unwrap().range.first().map(|r| r.0);
         }
 
         // Push this node onto the parent stack with its flattening status
@@ -357,10 +370,14 @@ impl<'a> AstVisitor for Flattener<'a> {
         if let Some(cur) = self.will_flatten() {
             #[cfg(debug_assertions)]
             {
-                let start = self.get_node(cur).range_start().unwrap();
+                let start = self.get_node(cur).unwrap().range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
                     if !(prev <= start) {
-                        dbg!(&self.get_node(cur).range, cur, self.last_range_start);
+                        dbg!(
+                            &self.get_node(cur).unwrap().range,
+                            cur,
+                            self.last_range_start
+                        );
                         panic!();
                     }
                 }
@@ -378,36 +395,30 @@ impl<'a> AstVisitor for Flattener<'a> {
 
             // Step 4: Check sizes and flatten only eligible blocks
             let mut new_body = Vec::new();
-            let mut gaps = Vec::new();
+            let gaps = Vec::new();
 
             for (node_ids, is_marked) in split_blocks {
                 if node_ids.is_empty() {
                     continue;
                 }
 
-                let block_start = self
-                    .get_node(*node_ids.first().unwrap())
-                    .range_start()
-                    .unwrap();
-                let block_end = self
-                    .get_node(*node_ids.last().unwrap())
-                    .range_end()
-                    .unwrap();
-                let block_size = block_end - block_start;
-
-                if !is_marked && block_size > self.threshold {
+                let (block_start, block_end) = self.body_range(&node_ids).unwrap();
+                if !is_marked && block_end - block_start > self.threshold {
                     // Large unmarked block: promote to top-level
-                    let brace_id = self.insert_brace(cur, &node_ids);
-                    new_body.push(brace_id);
-                    gaps.push((block_start + 1, block_end));
-                    self.parent_stack.push(ParentInfo {
-                        node_id: brace_id,
-                        flatten: false,
-                    });
+                    new_body.extend(&node_ids);
+                    self.flattened_top_ids.extend(&node_ids);
                     self.walk_body(&node_ids);
-                    self.parent_stack.pop();
+                    // let brace_id = self.insert_brace(cur, &node_ids);
+                    // new_body.push(brace_id);
+                    // gaps.push((block_start + 1, block_end));
+                    // self.parent_stack.push(ParentInfo {
+                    //     node_id: brace_id,
+                    //     flatten: false,
+                    // });
+                    // self.walk_body(&node_ids);
+                    // self.parent_stack.pop();
                 } else {
-                    // Small block or marked block: leave them as they were
+                    // Small or marked block: leave them as they were
                     new_body.extend(node_ids.iter());
                 }
             }
@@ -439,7 +450,7 @@ impl<'a> AstVisitor for Flattener<'a> {
         if let Some(cur) = self.will_flatten() {
             #[cfg(debug_assertions)]
             {
-                let start = self.get_node(cur).range_start().unwrap();
+                let start = self.get_node(cur).unwrap().range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
                     if !(prev <= start) {
                         dbg!(cur, self.last_range_start);
@@ -509,7 +520,7 @@ impl<'a> AstVisitor for Flattener<'a> {
         if let Some(cur) = self.will_flatten() {
             #[cfg(debug_assertions)]
             {
-                let start = self.get_node(cur).range_start().unwrap();
+                let start = self.get_node(cur).unwrap().range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
                     if !(prev <= start) {
                         dbg!(cur, self.last_range_start);
@@ -525,7 +536,7 @@ impl<'a> AstVisitor for Flattener<'a> {
                 .filter(|body| !body.is_empty())
                 .map(|body| self.body_range(body))
                 .collect::<Vec<_>>();
-            self.analyzer.get_node_mut(cur).range = gap_range(
+            self.analyzer.get_node_mut(cur).unwrap().range = gap_range(
                 self.get_node_mut(cur).range.pop().unwrap(),
                 gaps.into_iter().flatten(),
             );
@@ -573,7 +584,7 @@ impl<'a> AstVisitor for Flattener<'a> {
                 }
             }
             // Update the if statement to use the new structure
-            self.analyzer.get_node_mut(cur).cmd = AcCommand::new_cmd(ShellCommand::If {
+            self.analyzer.get_node_mut(cur).unwrap().cmd = AcCommand::new_cmd(ShellCommand::If {
                 conditionals: new_conditionals,
                 else_branch: new_else_branch,
             });

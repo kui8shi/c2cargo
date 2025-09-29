@@ -1,12 +1,14 @@
 //! Structs & Methods for Making Dictionary Instances
 use std::collections::HashMap;
 
+use autotools_parser::ast::node::NodeId;
 use itertools::Itertools;
 
 use super::{
     eval::IdentifierDivision,
+    location::Location,
     type_inference::DataType,
-    variable::{Identifier, Location, ValueExpr},
+    variable::{Identifier, ValueExpr},
     Analyzer,
 };
 
@@ -43,7 +45,7 @@ pub(crate) struct DictionaryInstance {
     // It should not collide with any other dictionary instances.
     name: String,
     // Represent the behaviors of access to the instance.
-    accesses: HashMap<Location, DictionaryAccess>,
+    accesses: HashMap<NodeId, DictionaryAccess>,
     // The inferred type of the values
     value_type: DataType,
 }
@@ -73,7 +75,7 @@ struct DictionaryAccessRecipe {
 
 #[derive(Debug, Default)]
 struct DictionaryInstanceRecipe {
-    accesses: HashMap<Location, DictionaryAccessRecipe>,
+    accesses: HashMap<NodeId, DictionaryAccessRecipe>,
     name_candidates: Vec<String>,
     confirmed_name: Option<String>,
     value_type: Option<DataType>,
@@ -114,7 +116,7 @@ fn strip_underscore(s: &str) -> String {
     s.split("_").filter(|s| !s.is_empty()).join("_")
 }
 
-fn inspect_eval_assignment(
+fn find_dictionary_from_eval_assignment(
     lhs: &Identifier,
     rhs: &Option<ValueExpr>,
 ) -> (
@@ -171,21 +173,25 @@ fn inspect_eval_assignment(
 }
 
 impl Analyzer {
-    pub(crate) fn make_dictionary_instances(&self) -> Vec<DictionaryInstance> {
+    pub(crate) fn make_dictionary_instances(&mut self) {
+        self.dicts.replace(self._make_dictionary_instances());
+    }
+
+    fn _make_dictionary_instances(&self) -> Vec<DictionaryInstance> {
         let mut recipes: HashMap<DictId, DictionaryInstanceRecipe> = Default::default();
         // inspect analyzed eval statements
         for (identifier, (expr, eval_loc)) in self
-            .eval_assigns
+            .eval_assigns()
             .iter()
             .flat_map(|(ident, evals)| std::iter::repeat(ident).zip(evals.into_iter()))
         {
             let (dict_id, operation, keys, assigned_to, name_candidates) =
-                inspect_eval_assignment(identifier, expr);
+                find_dictionary_from_eval_assignment(identifier, expr);
             assert!(!dict_id.0.is_empty());
 
             let recipe = recipes.entry(dict_id.clone()).or_default();
 
-            let access = recipe.accesses.entry(eval_loc.clone()).or_default();
+            let access = recipe.accesses.entry(eval_loc.node_id).or_default();
             access.operation.replace(operation);
             access.keys.replace(keys);
             access.assigned_to = assigned_to;
@@ -201,10 +207,10 @@ impl Analyzer {
         }
 
         // confirm names of dictionaries
-        self.confirm_name_of_directories(&mut recipes);
+        self.confirm_names_of_directories(&mut recipes);
 
         // enumerate dictionary access
-        self.enumerate_dictionary_access(&mut recipes);
+        self.enumerate_dictionary_accesses(&mut recipes);
 
         // infer dictionary value types
         self.infer_dictionary_value_types(&mut recipes);
@@ -237,7 +243,10 @@ impl Analyzer {
             .collect()
     }
 
-    fn confirm_name_of_directories(&self, recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>) {
+    fn confirm_names_of_directories(
+        &self,
+        recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
+    ) {
         let mut confirmed_names: HashMap<String, DictId> = Default::default();
         let mut spare_name_index = 0;
         let name_candidates = recipes
@@ -249,7 +258,7 @@ impl Analyzer {
             .sorted_by_key(|(_, candidates)| candidates.len())
         {
             let name = {
-                let alternative_suffixes = ["", "_dict", "_map"];
+                let alternative_suffixes = ["", "_map", "_dict"];
                 if let Some(unique_name) = alternative_suffixes.into_iter().find_map(|suffix| {
                     name_candidates
                         .iter()
@@ -260,7 +269,7 @@ impl Analyzer {
                         })
                         .find(|name| {
                             !confirmed_names.contains_key(name.as_str())
-                                && !self.var_definitions.contains_key(name.as_str())
+                                && !self.has_definition(name.as_str())
                         })
                 }) {
                     // unique dictionary name was found.
@@ -270,7 +279,7 @@ impl Analyzer {
                     let name = format!("dict_{}", spare_name_index);
 
                     // if such a weird name is already defined, just give up.
-                    assert!(!self.var_definitions.contains_key(name.as_str()));
+                    assert!(!self.has_definition(name.as_str()));
 
                     spare_name_index += 1;
                     name
@@ -289,8 +298,11 @@ impl Analyzer {
     }
 
     /// returns a map from location to accesses to variable as dictionary
-    fn enumerate_dictionary_access(&self, recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>) {
-        for (full_name, divided) in self.divided_vars.iter() {
+    fn enumerate_dictionary_accesses(
+        &self,
+        recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
+    ) {
+        for (full_name, divided) in self.divided_vars.as_ref().unwrap().iter() {
             let mut idents = divided
                 .values()
                 .map(|div| encode_identifier(&div.division))
@@ -313,13 +325,33 @@ impl Analyzer {
                     .collect::<Vec<_>>()
             };
             let def_locs = self.get_all_definition(full_name.as_str(), None);
-            let use_locs = self.get_all_usages_before(full_name.as_str(), None);
+            let use_locs = self.get_all_usages_before(full_name.as_str(), None, false);
 
-            if let Some(def_locs) = def_locs {
-                for loc in def_locs {
+            for loc in def_locs {
+                let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
+                accesses.insert(
+                    loc.node_id,
+                    DictionaryAccessRecipe {
+                        operation: Some(DictionaryOperation::Write),
+                        keys: Some(dict_keys.clone()),
+                        raw_name: Some(full_name.to_owned()),
+                        assigned_to: None,
+                    },
+                );
+            }
+
+            for use_loc in use_locs {
+                if let Some(access) = recipes
+                    .get_mut(&dict_id)
+                    .unwrap()
+                    .accesses
+                    .get_mut(&use_loc.node_id)
+                {
+                    access.operation.replace(DictionaryOperation::Append);
+                } else {
                     let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
                     accesses.insert(
-                        loc,
+                        use_loc.node_id,
                         DictionaryAccessRecipe {
                             operation: Some(DictionaryOperation::Read),
                             keys: Some(dict_keys.clone()),
@@ -327,29 +359,6 @@ impl Analyzer {
                             assigned_to: None,
                         },
                     );
-                }
-            }
-            if let Some(use_locs) = use_locs {
-                for loc in use_locs {
-                    if let Some(access) = {
-                        let mut loc_as_def = loc.clone();
-                        loc_as_def.is_left = true;
-                        let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
-                        accesses.get_mut(&loc_as_def)
-                    } {
-                        access.operation.replace(DictionaryOperation::Append);
-                    } else {
-                        let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
-                        accesses.insert(
-                            loc,
-                            DictionaryAccessRecipe {
-                                operation: Some(DictionaryOperation::Write),
-                                keys: Some(dict_keys.clone()),
-                                raw_name: Some(full_name.to_owned()),
-                                assigned_to: None,
-                            },
-                        );
-                    }
                 }
             }
         }
@@ -367,7 +376,7 @@ impl Analyzer {
 
     fn fill_up_omissions_of_dictionary_keys(
         &self,
-        accesses: &mut HashMap<Location, DictionaryAccessRecipe>,
+        accesses: &mut HashMap<NodeId, DictionaryAccessRecipe>,
         division: &HashMap<Location, IdentifierDivision>,
     ) -> Vec<DictionaryKey> {
         // The idea is that there must be a division where a key is evaluated to an empty string.
@@ -401,7 +410,7 @@ impl Analyzer {
                 filled_up_keys.push(key);
             }
             accesses
-                .get_mut(eval_loc)
+                .get_mut(&eval_loc.node_id)
                 .unwrap()
                 .keys
                 .replace(filled_up_keys);
@@ -433,13 +442,13 @@ impl Analyzer {
 
     fn infer_dictionary_value_type(&self, access: &DictionaryAccessRecipe) -> DataType {
         if let Some(raw_name) = &access.raw_name {
-            if let Some((_, ty)) = self.inferred_types.get(raw_name) {
+            if let Some((_, ty)) = self.get_inferred_type(raw_name) {
                 return ty.clone();
             }
         }
 
         if let Some(assigned_to) = &access.assigned_to {
-            if let Some((_, ty)) = self.inferred_types.get(assigned_to) {
+            if let Some((_, ty)) = self.get_inferred_type(assigned_to) {
                 return ty.clone();
             }
         }
@@ -456,7 +465,8 @@ mod test {
     fn dicitionary_variable_name() {
         let ident = Identifier::Concat(vec![
             Identifier::Name("prefix_".into()),
-            Identifier::Indirect("var".into()),
+            Identifier::Indirect("var1".into()),
+            Identifier::Indirect("var2".into()),
             Identifier::Name("_suffix".into()),
         ]);
         let dict_id = encode_identifier(&ident);

@@ -1,15 +1,21 @@
 //! Structs & Methods for Value Set Analysis
 use super::{
     guard::cmp_guards,
-    variable::{Identifier, Location, ValueExpr},
+    location::Location,
+    variable::{Identifier, ValueExpr},
     AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
 };
-use autotools_parser::ast::node::{AcWordFragment, NodePool};
+use autotools_parser::{
+    ast::node::{AcWordFragment, NodePool},
+    parse::shell,
+};
 use itertools::Itertools;
 use std::{
     cmp::Ordering,
-    collections::{HashMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
+    fmt::write,
 };
+use std::{io::Write, path::PathBuf};
 
 /// Saving the result of backward traversal
 #[derive(Debug, PartialEq, Eq)]
@@ -54,12 +60,29 @@ fn enumerate_combinations(combos: Vec<HashSet<String>>) -> Vec<Vec<String>> {
         .collect()
 }
 
+#[derive(Debug, Default)]
+pub(crate) struct VSACache {
+    resolved_identifiers: HashMap<Identifier, BTreeMap<Location, HashSet<String>>>,
+    resolved_value_expresssions: HashMap<ValueExpr, HashSet<String>>,
+}
+
 impl Analyzer {
+    pub(crate) fn eval_assigns(&self) -> &HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>> {
+        self.eval_assigns.as_ref().unwrap()
+    }
+
+    pub(crate) fn divided_vars(&self) -> &HashMap<String, HashMap<Location, IdentifierDivision>> {
+        self.divided_vars.as_ref().unwrap()
+    }
+
     /// run value set analysis to obtain value candidates of variables appeared in eval statements.
     pub(crate) fn run_value_set_analysis(&mut self) {
+        self.divided_vars.replace(Default::default());
+        self.var_indirect_usages.replace(Default::default());
+
         // we assume variable enumeration is already completed.
         let mut evals = self
-            .eval_assigns
+            .eval_assigns()
             .iter()
             .flat_map(|(l, v)| v.iter().zip(std::iter::repeat(l)))
             .map(|((r, loc), l)| (l.clone(), r.clone(), loc.clone()))
@@ -70,17 +93,26 @@ impl Analyzer {
         }
         // Add def use chains caused by dynamic identifier
         let mut def_use_edges = Vec::new();
-        for (name, divided) in self.divided_vars.iter() {
-            if let Some(def_locs) = self.var_definitions.get(name) {
+        let mut new_locs = Vec::new();
+        for (name, divided) in self.divided_vars().into_iter() {
+            if let Some(def_locs) = self.get_definition(name) {
                 for def_loc in def_locs {
                     for (ref_loc, _) in divided {
                         def_use_edges.push((def_loc.node_id, ref_loc.node_id, name.to_owned()));
-                        self.var_indirect_usages
-                            .entry(name.to_owned())
-                            .or_default()
-                            .push(ref_loc.clone());
+                        new_locs.push((name.to_owned(), ref_loc.clone()));
                     }
                 }
+            }
+        }
+        for (name, ref_loc) in new_locs {
+            let locs = self
+                .var_indirect_usages
+                .as_mut()
+                .unwrap()
+                .entry(name)
+                .or_default();
+            if !locs.contains(&ref_loc) {
+                locs.push(ref_loc);
             }
         }
         self.apply_def_use_edges(def_use_edges);
@@ -88,10 +120,12 @@ impl Analyzer {
 
     /// collect literals of a var
     pub(crate) fn resolve_var(&mut self, name: &str, loc: &Location) -> HashSet<String> {
-        self.get_last_resolved_values(&Identifier::Name(name.to_owned()), loc)
-            .unwrap_or(
-                self.resolve_value_expression(&ValueExpr::Var(name.to_owned(), loc.clone()), loc),
-            )
+        let v = ValueExpr::Var(name.to_owned(), loc.clone());
+        if let Some(cached) = self.get_cached_resolved_values(&v, loc) {
+            cached
+        } else {
+            self.resolve_value_expression(&v, loc)
+        }
     }
 
     fn record_identifier_division(
@@ -101,7 +135,7 @@ impl Analyzer {
         ref_loc: Location,
     ) {
         let name = resolved.concat();
-        if self.var_definitions.contains_key(name.as_str()) {
+        if self.has_definition(name.as_str()) || self.has_usage(name.as_str()) {
             let mut mapping = Vec::new();
             for (k, v) in identifier
                 .positional_vars()
@@ -114,25 +148,53 @@ impl Analyzer {
             }
             let division = identifier;
             self.divided_vars
+                .as_mut()
+                .unwrap()
                 .entry(name)
                 .or_default()
                 .insert(ref_loc, IdentifierDivision { division, mapping });
         }
     }
 
-    fn record_resolved_values(&mut self, l: Identifier, loc: Location, values: HashSet<String>) {
-        self.resolved_values
-            .entry(l)
-            .or_default()
-            .entry(loc)
-            .or_default()
-            .extend(values);
+    fn cache_resolved_values(
+        &mut self,
+        val_expr: ValueExpr,
+        loc: Location,
+        values: HashSet<String>,
+    ) {
+        if let Some(identifier) = (&val_expr).into() {
+            self.vsa_cache
+                .resolved_identifiers
+                .entry(identifier)
+                .or_default()
+                .entry(loc)
+                .or_default()
+                .extend(values);
+        } else if !matches!(val_expr, ValueExpr::Lit(_)) {
+            self.vsa_cache
+                .resolved_value_expresssions
+                .entry(val_expr)
+                .or_default()
+                .extend(values);
+        }
     }
 
-    fn get_last_resolved_values(&self, l: &Identifier, loc: &Location) -> Option<HashSet<String>> {
-        self.resolved_values
-            .get(l)
-            .and_then(|m| m.range(..=loc).next().map(|(_, s)| s.clone()))
+    fn get_cached_resolved_values(
+        &self,
+        val_expr: &ValueExpr,
+        loc: &Location,
+    ) -> Option<HashSet<String>> {
+        if let Some(identifier) = val_expr.into() {
+            self.vsa_cache
+                .resolved_identifiers
+                .get(&identifier)
+                .and_then(|m| m.range(..=loc).next().map(|(_, s)| s.clone()))
+        } else {
+            self.vsa_cache
+                .resolved_value_expresssions
+                .get(val_expr)
+                .cloned()
+        }
     }
 
     /// construct chain of value flows in backward order and resolve them.
@@ -141,14 +203,15 @@ impl Analyzer {
             let rhs = self.resolve_value_expression(rhs, loc);
             for var_name in self.resolve_identifier(lhs, loc) {
                 if !var_name.is_empty() {
-                    self.record_resolved_values(
-                        Identifier::Name(var_name),
+                    self.cache_resolved_values(
+                        ValueExpr::Var(var_name, loc.clone()),
                         loc.clone(),
                         rhs.clone(),
                     );
                 }
             }
-            self.record_resolved_values(lhs.clone(), loc.clone(), rhs.clone());
+            let value_expr = convert_identifier_to_value_expression(lhs.clone(), loc.clone());
+            self.cache_resolved_values(value_expr, loc.clone(), rhs.clone());
         } else {
             // rhs is empty
         }
@@ -169,7 +232,7 @@ impl Analyzer {
                 let resolved = values
                     .iter()
                     .map(|l| self.resolve_identifier(l, loc))
-                    .collect();
+                    .collect::<Vec<_>>();
                 // enumerate combinations
                 let combos = enumerate_combinations(resolved);
                 for combo in combos.iter() {
@@ -185,10 +248,8 @@ impl Analyzer {
 
     fn resolve_value_expression(&mut self, value: &ValueExpr, loc: &Location) -> HashSet<String> {
         let mut result = HashSet::new();
-        if let Some(identifier) = value.into() {
-            if let Some(resolved) = self.get_last_resolved_values(&identifier, loc) {
-                return resolved;
-            }
+        if let Some(resolved) = self.get_cached_resolved_values(&value, loc) {
+            return resolved;
         }
         match value {
             ValueExpr::Lit(lit) => {
@@ -209,20 +270,17 @@ impl Analyzer {
                 let resolved = values
                     .iter()
                     .map(|r| self.resolve_value_expression(r, loc))
-                    .collect();
+                    .collect::<Vec<_>>();
+                let combos = enumerate_combinations(resolved);
                 // enumerate combinations
-                result.extend(
-                    enumerate_combinations(resolved)
-                        .into_iter()
-                        .map(|words| words.concat()),
-                );
+                result.extend(combos.into_iter().map(|words| words.concat()));
             }
 
             v @ ValueExpr::DynName(values) => {
                 let resolved = values
                     .iter()
                     .map(|r| self.resolve_value_expression(r, loc))
-                    .collect();
+                    .collect::<Vec<_>>();
                 let ident = Into::<Option<Identifier>>::into(v).unwrap();
                 // enumerate combinations
                 let combos = enumerate_combinations(resolved);
@@ -243,26 +301,64 @@ impl Analyzer {
                     .collect();
                 // enumerate combinations & additoinal resolving with shell execution
                 // cf. RValue::concretize
-                let var_names = vars
+                let mut var_names = vars
                     .iter()
                     .flat_map(|r| r.vars().into_iter().map(|v| v.first().unwrap().clone()));
-                for vals in enumerate_combinations(resolved) {
-                    let env_pairs: Vec<_> = var_names.clone().zip(vals.clone()).collect();
+                let combos = enumerate_combinations(resolved);
+                if combos.first().is_some_and(|combo| combo.len() == 1)
+                    // FIXME: inprecise conditions on shell_string
+                    && shell_string.starts_with("sed")
+                    && !shell_string.contains("|")
+                {
+                    // in this setup, we can optimize the repetition of shell execution by
+                    // do the loop **inside** the shell environment.
+                    let var_name = var_names.next().unwrap();
+                    let vals = combos
+                        .into_iter()
+                        .map(|combo| combo.into_iter())
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    let mut tmp =
+                        tempfile::NamedTempFile::new().expect("Unable to create a temporary file");
+                    write!(tmp, "{}", vals.join("\n")).unwrap();
+                    let vals_path = tmp.path().to_str().unwrap();
+                    let var = &format!("\"${{{}}}\"", var_name);
+                    // TODO: refine this so that we can execute xargs commands more stably.
+                    let shell_string = shell_string.replace(var, "{}");
+                    let xargs_script = format!(
+                        "cat {} | xargs -I{{}} -P `nproc` sh -c \"{}\"",
+                        &vals_path, &shell_string
+                    );
+
                     let output = std::process::Command::new("sh")
                         .arg("-c")
-                        .arg(shell_string.clone())
-                        .envs(env_pairs)
+                        .arg(xargs_script.clone())
                         .output()
-                        .expect(&format!("Executing: {} has failed", shell_string));
-                    let stdout_str = String::from_utf8(output.stdout)
+                        .expect(&format!("Executing: {} has failed", xargs_script));
+                    let stdout_string = String::from_utf8(output.stdout)
                         .expect("Unable to convert utf-8 to String.");
-                    result.extend(stdout_str.split_whitespace().map(|s| s.to_owned()));
+                    if !stdout_string.is_empty() {
+                        result.extend(stdout_string.split_whitespace().map(|s| s.to_owned()));
+                    }
+                } else {
+                    for combo in combos {
+                        let env_pairs: Vec<_> = var_names.clone().zip(combo.clone()).collect();
+                        let output = std::process::Command::new("sh")
+                            .arg("-c")
+                            .arg(shell_string.clone())
+                            .envs(env_pairs)
+                            .output()
+                            .expect(&format!("Executing: {} has failed", shell_string));
+                        let stdout_string = String::from_utf8(output.stdout)
+                            .expect("Unable to convert utf-8 to String.");
+                        if !stdout_string.is_empty() {
+                            result.extend(stdout_string.split_whitespace().map(|s| s.to_owned()));
+                        }
+                    }
                 }
             }
         }
-        if let Some(identifier) = value.into() {
-            self.record_resolved_values(identifier, loc.clone(), result.clone());
-        }
+        self.cache_resolved_values(value.clone(), loc.clone(), result.clone());
         result
     }
 
@@ -288,9 +384,11 @@ impl Analyzer {
 
     /// Given a variable, traverse the script backward to construct chain of values
     fn construct_chain(&self, name: &str, loc: &Location) -> Option<Chain> {
-        let identifier = Identifier::Name(name.to_owned());
-        let mut chain = Chain::new(identifier.clone(), loc.clone());
-        if let Some(resolved) = self.get_last_resolved_values(&identifier, loc) {
+        let as_ident = Identifier::Name(name.to_owned());
+        let as_expr = ValueExpr::Var(name.to_owned(), loc.clone());
+
+        let mut chain = Chain::new(as_ident.clone(), loc.clone());
+        if let Some(resolved) = self.get_cached_resolved_values(&as_expr, loc) {
             chain.resolved.extend(resolved.clone());
             return Some(chain);
         }
@@ -311,12 +409,11 @@ impl Analyzer {
             }
             ValueExpr::Var(var, loc) => {
                 if var != name {
-                    if let Some(resolved) =
-                        self.get_last_resolved_values(&Identifier::Name(var.clone()), &loc)
-                    {
+                    let v = ValueExpr::Var(var.clone(), loc.clone());
+                    if let Some(resolved) = self.get_cached_resolved_values(&v, &loc) {
                         chain.resolved.extend(resolved);
                     } else {
-                        chain.unresolved.insert(ValueExpr::Var(var, loc));
+                        chain.unresolved.insert(v);
                     }
                 }
             }
@@ -324,16 +421,19 @@ impl Analyzer {
                 chain.unresolved.insert(r);
             }
         };
-        let def_locs = if let Some(mut locs) = self.get_all_definition(name, Some(loc)) {
-            locs.sort();
-            locs.reverse();
-            locs
-        } else {
-            return None;
+        let def_locs = {
+            let mut locs = self.get_all_definition(name, Some(loc));
+            if !locs.is_empty() {
+                locs.sort();
+                locs.reverse();
+                locs
+            } else {
+                return None;
+            }
         };
         for def_loc in def_locs {
             let nid = def_loc.node_id;
-            let cmd = &self.get_node(nid).cmd.0;
+            let cmd = &self.get_node(nid).unwrap().cmd.0;
             match cmd.clone() {
                 MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) if lhs == name => {
                     let ifs = self.current_internal_field_separator(&def_loc);
@@ -456,11 +556,16 @@ impl Analyzer {
             }
             Shell(WordFragment::Subst(subst)) => match &**subst {
                 ParameterSubstitution::Command(cmds) => {
-                    let node_id = cmds.first().unwrap().clone();
-                    let shell_string = self.display_node(node_id);
-                    let (_, uses) = self.collect_variables(node_id);
+                    let mut shell_strings = Vec::new();
+                    let mut uses = HashMap::new();
+                    for &node_id in cmds {
+                        let shell_string = self.display_node(node_id);
+                        let (_, u) = self.collect_variables(node_id);
+                        shell_strings.push(shell_string);
+                        uses.extend(u);
+                    }
                     values.push(ValueExpr::Shell(
-                        shell_string,
+                        shell_strings.join("\n"),
                         uses.keys()
                             .map(|name| ValueExpr::Var(name.to_owned(), loc.clone()))
                             .collect(),
@@ -485,7 +590,7 @@ impl Analyzer {
         let mut internal_field_separator = None;
         if let Some(ifs_loc) = self.get_dominant_definition("IFS", loc.node_id) {
             if let MayM4::Shell(ShellCommand::Assignment(_, rhs)) =
-                &self.get_node(ifs_loc.node_id).cmd.0
+                &self.get_node(ifs_loc.node_id).unwrap().cmd.0
             {
                 if let ValueExpr::Lit(lit) = self.inspect_word(rhs, &ifs_loc, None).pop().unwrap() {
                     internal_field_separator.replace(lit.chars().next().unwrap());
@@ -511,5 +616,22 @@ impl Analyzer {
                 .filter_map(|s| (!s.is_empty()).then_some(s.to_owned()))
                 .collect()
         }
+    }
+}
+
+fn convert_identifier_to_value_expression(ident: Identifier, loc: Location) -> ValueExpr {
+    match ident {
+        Identifier::Name(name) => ValueExpr::Var(name, loc),
+        Identifier::Indirect(name) => ValueExpr::DynName(vec![ValueExpr::Var(name, loc)]),
+        Identifier::Concat(concat) => ValueExpr::DynName(
+            concat
+                .into_iter()
+                .map(|ident| match ident {
+                    Identifier::Name(lit) => ValueExpr::Lit(lit),
+                    Identifier::Indirect(name) => ValueExpr::Var(name, loc.clone()),
+                    _ => unreachable!(),
+                })
+                .collect(),
+        ),
     }
 }

@@ -17,14 +17,14 @@ impl Serialize for BuildOption {
         state.serialize_field("name", &self.option_name)?;
         state.serialize_field("declaration", &self.declaration)?;
         state.serialize_field("fragments", &self.context)?;
-        state.serialize_field("candidates", &self.candidates)?;
+        state.serialize_field("candidates", &self.value_candidates)?;
         state.end()
     }
 }
 
 impl LLMAnalysisInput<Vec<String>> for BuildOption {
     fn get_evidence_for_validation(&self) -> &Vec<String> {
-        &self.candidates
+        &self.value_candidates
     }
 }
 

@@ -1,4 +1,5 @@
 //! Provides the higher level on-time analyses to improve parsing
+use automake::AutomakeAnalyzer;
 use autotools_parser::{
     ast::{
         minimal::Word,
@@ -18,28 +19,31 @@ use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
 use macro_call::MacroHandler;
+use platform_support::PlatformSupport;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 use type_inference::{DataType, TypeHint};
 
-use eval::IdentifierDivision;
+use eval::{IdentifierDivision, VSACache};
 use flatten::Flattener;
-use variable::{Identifier, Location, ValueExpr, VariableAnalyzer};
+use location::{ExecId, Location};
+use variable::{Identifier, ValueExpr, VariableAnalyzer};
 
 use slab::Slab;
 
+mod automake;
 mod build_option;
-mod case;
 mod chunk;
 mod dictionary;
 mod eval;
 mod flatten;
 mod guard;
+mod location;
 mod macro_call;
-mod platform_branch;
+mod platform_support;
 mod removal;
 mod translator;
 mod type_inference;
@@ -85,7 +89,7 @@ fn as_var(word: &WordFragment<AcWord>) -> Option<&str> {
 /// Visitor trait for walking over the AST nodes.
 pub trait AstVisitor: Sized {
     /// Return Node from NodeId
-    fn get_node(&self, node_id: NodeId) -> &Node;
+    fn get_node(&self, node_id: NodeId) -> Option<&Node>;
 
     /// Entry function for visiting a top-level AST node.
     fn visit_top(&mut self, node_id: NodeId) {
@@ -94,7 +98,10 @@ pub trait AstVisitor: Sized {
 
     /// Intermediate function for visiting an AST node.
     fn visit_node(&mut self, node_id: NodeId) {
-        if !self.get_node(node_id).info.is_top_node() {
+        if self
+            .get_node(node_id)
+            .is_some_and(|n| !n.info.is_top_node())
+        {
             self.walk_node(node_id);
         }
     }
@@ -200,32 +207,33 @@ pub trait AstVisitor: Sized {
 
     /// Walk a node: wrappper of arbitrary command.
     fn walk_node(&mut self, node_id: NodeId) {
-        let node = self.get_node(node_id);
         use autotools_parser::ast::node::ShellCommand::*;
         use MayM4::*;
-        match &node.cmd.0.clone() {
-            Shell(Assignment(name, word)) => self.visit_assignment(name, word),
-            Shell(Cmd(words)) => self.visit_command(words),
-            Shell(Brace(body)) => self.visit_brace(body),
-            Shell(Subshell(body)) => self.visit_subshell(body),
-            Shell(While(pair)) => self.visit_guard_body_pair(pair),
-            Shell(Until(pair)) => self.visit_guard_body_pair(pair),
-            Shell(If {
-                conditionals,
-                else_branch,
-            }) => {
-                self.visit_if(conditionals, else_branch);
-            }
-            Shell(For { var, words, body }) => self.visit_for(var, words, body),
-            Shell(Case { word, arms }) => self.visit_case(word, arms),
-            Shell(And(condition, cmd)) => self.visit_and_or(true, condition, *cmd),
-            Shell(Or(condition, cmd)) => self.visit_and_or(false, condition, *cmd),
-            Shell(Pipe(bang, cmds)) => self.visit_pipe(*bang, cmds),
-            Shell(Redirect(cmd, redirects)) => self.visit_redirect(*cmd, redirects),
-            Shell(Background(cmd)) => self.visit_background(*cmd),
-            Shell(FunctionDef { name, body }) => self.visit_function_definition(name, *body),
-            Macro(m4_macro) => self.visit_m4_macro(m4_macro),
-        };
+        if let Some(node) = self.get_node(node_id) {
+            match &node.cmd.0.clone() {
+                Shell(Assignment(name, word)) => self.visit_assignment(name, word),
+                Shell(Cmd(words)) => self.visit_command(words),
+                Shell(Brace(body)) => self.visit_brace(body),
+                Shell(Subshell(body)) => self.visit_subshell(body),
+                Shell(While(pair)) => self.visit_guard_body_pair(pair),
+                Shell(Until(pair)) => self.visit_guard_body_pair(pair),
+                Shell(If {
+                    conditionals,
+                    else_branch,
+                }) => {
+                    self.visit_if(conditionals, else_branch);
+                }
+                Shell(For { var, words, body }) => self.visit_for(var, words, body),
+                Shell(Case { word, arms }) => self.visit_case(word, arms),
+                Shell(And(condition, cmd)) => self.visit_and_or(true, condition, *cmd),
+                Shell(Or(condition, cmd)) => self.visit_and_or(false, condition, *cmd),
+                Shell(Pipe(bang, cmds)) => self.visit_pipe(*bang, cmds),
+                Shell(Redirect(cmd, redirects)) => self.visit_redirect(*cmd, redirects),
+                Shell(Background(cmd)) => self.visit_background(*cmd),
+                Shell(FunctionDef { name, body }) => self.visit_function_definition(name, *body),
+                Macro(m4_macro) => self.visit_m4_macro(m4_macro),
+            };
+        }
     }
 
     /// Walk an assignment statement.
@@ -493,8 +501,12 @@ pub(crate) struct NodeInfo {
     pub node_id: NodeId,
     /// Node ID of the top-most parent node
     pub top_id: Option<NodeId>,
-    /// Chunk ID of the node
+    /// ID of the chunk this node belongs to
     pub chunk_id: Option<ChunkId>,
+    /// Exec ID representing execution order of the node.
+    pub exec_id: ExecId,
+    /// Exec ID at the exit of the node
+    pub exit: ExecId,
     /// trailing comments
     // pub comment: Option<AcWord>,
     /// Range of line numbers where the body is effectively referenced.
@@ -516,9 +528,13 @@ pub(crate) struct NodeInfo {
     /// FIXME: this looks dirty so refine it if possible.
     pub pre_body_nodes: Vec<NodeId>,
     /// Variables defined by this command
-    pub defines: VariableMap,
+    pub definitions: VariableMap,
+    /// Variables bounded by this command (items are duplicated with `definitions`)
+    pub bounds: VariableMap,
+    /// Variables defined by all children of this command
+    pub propagated_definitions: VariableMap,
     /// Variables used by this command
-    pub uses: VariableMap,
+    pub usages: VariableMap,
     /// Commands this command depends on by variables
     pub dependencies: NodeDependencyMap,
     /// Commands that depend on this node by variables
@@ -540,10 +556,19 @@ struct AnalyzerOptions {
     flatten_threshold: usize,
 }
 
+impl Default for AnalyzerOptions {
+    fn default() -> Self {
+        Self {
+            flatten_threshold: 200,
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 struct ProjectInfo {
     project_dir: PathBuf,
     subst_files: Vec<PathBuf>,
+    am_files: Vec<PathBuf>,
     config_header: PathBuf,
 }
 
@@ -551,7 +576,7 @@ struct ProjectInfo {
 /// 1. construction of a dependency graph by tracking variable usages
 /// 2. flattening of large commands
 /// etc..
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Analyzer {
     /// Original contents of analyzed script
     lines: Vec<String>,
@@ -559,16 +584,16 @@ pub struct Analyzer {
     pool: AutoconfPool<NodeInfo>,
     /// Ids of top-level commands
     top_ids: Vec<NodeId>,
+    /// Whether the nodes are flattened or not
+    has_flattened_nodes: bool,
     /// Map of variable names to information of commands that define them
-    var_definitions: VariableMap,
+    var_definitions: Option<VariableMap>,
+    /// Map of variable names to information of commands whose all children define them
+    var_propagated_definitions: Option<VariableMap>,
     /// Map of variable names to information of commands that uses them
-    var_usages: VariableMap,
+    var_usages: Option<VariableMap>,
     /// Map of variable names to information of commands that indirectly uses them
-    var_indirect_usages: VariableMap,
-    /// Map of top node (chunk) ids to information of variables defined in the chunk
-    defines_per_top: HashMap<NodeId, VariableMap>,
-    /// Map of top node (chunk) ids to information of variables used in the chunk
-    uses_per_top: HashMap<NodeId, VariableMap>,
+    var_indirect_usages: Option<VariableMap>,
     /// Map of block ID to Block information
     /// The node ids vector preserves the sequence order of commands.
     blocks: Slab<Block>,
@@ -577,28 +602,34 @@ pub struct Analyzer {
     /// Set of variable maps that is fixed to a certain value
     fixed: HashMap<String, String>,
     /// Set of variables which are used in eval assignments
-    eval_assigns: HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>,
-    /// State filed used for recording resolved rvalues of variables
-    resolved_values: HashMap<Identifier, BTreeMap<Location, HashSet<String>>>,
+    eval_assigns: Option<HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>>,
+    /// Cache used inside Value Set Analysis. Mainly used for recording resolved values of variables
+    vsa_cache: VSACache,
     /// dynamically divided identifiers
     /// The value of entry is a map from eval location to division info
-    divided_vars: HashMap<String, HashMap<Location, IdentifierDivision>>,
+    divided_vars: Option<HashMap<String, HashMap<Location, IdentifierDivision>>>,
     /// all m4 macro calls
-    macro_calls: HashMap<String, Vec<(NodeId, M4Macro)>>,
+    macro_calls: Option<HashMap<String, Vec<(NodeId, M4Macro)>>>,
     /// all susbstitued variables
-    subst_vars: HashSet<String>,
+    subst_vars: Option<HashSet<String>>,
+    /// all variables that can recieve user-supplied values other than build options.
+    env_vars: Option<HashSet<String>>,
     /// options of this analyzer
     options: AnalyzerOptions,
     /// information about paths in the project
     project_info: ProjectInfo,
+    /// information about platform support of Rust.
+    platform_support: PlatformSupport,
     /// Chunks of nodes
     chunks: Slab<Chunk>,
     /// Scopes of variables
-    scopes: HashMap<String, Vec<Scope>>,
+    scopes: Option<HashMap<String, Vec<Scope>>>,
     /// Inferred Types
-    inferred_types: HashMap<String, (HashSet<TypeHint>, DataType)>,
+    inferred_types: Option<HashMap<String, (HashSet<TypeHint>, DataType)>>,
     /// Dictionary Instances
-    dicts: Vec<DictionaryInstance>,
+    dicts: Option<Vec<DictionaryInstance>>,
+    /// Analysis result of Automake files.
+    automake: Option<AutomakeAnalyzer>,
 }
 
 impl Analyzer {
@@ -607,6 +638,7 @@ impl Analyzer {
     /// which will affect behaviors of many analysis paths.
     pub fn flatten(&mut self) {
         Flattener::flatten(self, self.options.flatten_threshold);
+        self.has_flattened_nodes = true;
     }
 
     /// Analyze commands and build the dependency graph
@@ -622,10 +654,12 @@ impl Analyzer {
             std::fs::read_to_string(path).expect("Reading a file has failed.")
         };
         std::fs::read_to_string(&path).unwrap();
+        // Move to the project directory
         let project_dir = path.parent().unwrap().to_owned();
+        std::env::set_current_dir(&project_dir).expect("Unable to move to the project directory.");
         let fixed = [(
             "srcdir".to_owned(),
-            project_dir.to_str().unwrap().to_owned(),
+            ".".into(), // project_dir.to_str().unwrap().to_owned(),
         )];
         let lexer = Lexer::new(contents.chars());
         let (nodes, top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
@@ -642,22 +676,8 @@ impl Analyzer {
         let mut s = Self {
             lines: contents.lines().map(|s| s.to_string()).collect(),
             pool,
-            build_option_info: BuildOptionInfo::default(),
             top_ids,
-            eval_assigns: HashMap::new(),
-            var_definitions: HashMap::new(),
-            var_usages: HashMap::new(),
-            var_indirect_usages: HashMap::new(),
-            defines_per_top: HashMap::new(),
-            uses_per_top: HashMap::new(),
-            blocks: Slab::new(),
             fixed: HashMap::from(fixed),
-            resolved_values: HashMap::new(),
-            divided_vars: HashMap::new(),
-            macro_calls: HashMap::new(),
-            subst_vars: HashSet::new(),
-            chunks: Slab::new(),
-            scopes: HashMap::new(),
             options: AnalyzerOptions {
                 flatten_threshold: flatten_threshold.unwrap_or(200),
             },
@@ -665,26 +685,39 @@ impl Analyzer {
                 project_dir,
                 ..Default::default()
             },
-            inferred_types: HashMap::new(),
-            dicts: Vec::new(),
+            ..Default::default()
         };
+
         GuardAnalyzer::analyze_blocks(&mut s);
-
-        // Create a VariableAnalyzer to extract both defined and used variables
-        VariableAnalyzer::analyze_variables(&mut s);
-
-        // Collect
-        for id in &s.top_ids {
-            let (defs, uses) = s.collect_variables(*id);
-            s.defines_per_top.insert(*id, defs);
-            s.uses_per_top.insert(*id, uses);
-        }
 
         // Record all m4 macro calls
         MacroHandler::handle_macro_calls(&mut s);
 
+        // Create a VariableAnalyzer to extract both defined and used variables
+        VariableAnalyzer::analyze_variables(&mut s);
+
+        s.aggregate_def_use();
+
+        s.run_value_set_analysis();
+        s.run_type_inference();
+        s.make_dictionary_instances();
+        dbg!(&s.divided_vars);
+        dbg!(&s.dicts);
+
+        // Analyze automake files
+        s.analyze_automake_files();
+        s.aggregate_subst_vars();
+
+        s.remove_unused_variables();
+
         // Flatten nodes
-        Flattener::flatten(&mut s, flatten_threshold.unwrap_or(200));
+        s.flatten();
+
+        // Construct chunks & cut var scopes
+        s.construct_chunks(Some(5), true);
+        s.cut_variable_scopes_chunkwise();
+
+        s.aggregate_env_vars();
 
         s
     }
@@ -696,11 +729,11 @@ impl Analyzer {
 
     /// Get guard conditions of given variable location
     fn guard_of_location(&self, location: &Location) -> Vec<Guard> {
-        if let Some(block_id) = self.get_node(location.node_id).info.block {
+        if let Some(block_id) = self.get_node(location.node_id).unwrap().info.block {
             self.blocks[block_id].guards.clone()
         } else if let Some(block_id) = self
             .get_parent(location.node_id)
-            .and_then(|parent| self.get_node(parent).info.block)
+            .and_then(|parent| self.get_node(parent).unwrap().info.block)
         {
             self.blocks[block_id].guards.clone()
         } else {
@@ -710,6 +743,7 @@ impl Analyzer {
 
     fn get_branch_index(&self, parent_id: NodeId, block_id: BlockId) -> Option<usize> {
         self.get_node(parent_id)
+            .unwrap()
             .info
             .branches
             .iter()
@@ -720,7 +754,7 @@ impl Analyzer {
 
     /// Get block ID of the block where the node resides
     fn block_of_node(&self, node_id: NodeId) -> Option<&Block> {
-        if let Some(block_id) = self.get_node(node_id).info.block {
+        if let Some(block_id) = self.get_node(node_id).unwrap().info.block {
             self.blocks.get(block_id)
         } else {
             None
@@ -730,8 +764,8 @@ impl Analyzer {
     /// Get command that defines a variable before
     pub fn get_last_definition(&self, var_name: &str, node_id: NodeId) -> Option<NodeId> {
         if let Some(node) = self.pool.get(node_id) {
-            if let Some(user_loc) = node.info.uses.get(var_name).map(|v| v.first()).flatten() {
-                return self.var_definitions.get(var_name).and_then(|v| {
+            if let Some(user_loc) = node.info.usages.get(var_name).map(|v| v.first()).flatten() {
+                return self.get_definition(var_name).and_then(|v| {
                     v.iter()
                         .rev()
                         .filter_map(|loc| (loc <= user_loc).then_some(loc.node_id))
@@ -742,33 +776,79 @@ impl Analyzer {
         None
     }
 
+    pub(crate) fn get_definition(&self, var_name: &str) -> Option<&Vec<Location>> {
+        self.var_definitions.as_ref().unwrap().get(var_name)
+    }
+
+    pub(crate) fn has_definition(&self, var_name: &str) -> bool {
+        self.var_definitions
+            .as_ref()
+            .unwrap()
+            .contains_key(var_name)
+    }
+
+    pub(crate) fn get_propagated_definition(&self, var_name: &str) -> Option<&Vec<Location>> {
+        self.var_propagated_definitions
+            .as_ref()
+            .unwrap()
+            .get(var_name)
+    }
+
+    pub(crate) fn has_propagated_definition(&self, var_name: &str) -> bool {
+        self.var_propagated_definitions
+            .as_ref()
+            .unwrap()
+            .contains_key(var_name)
+    }
+
+    pub(crate) fn get_usage(&self, var_name: &str) -> Option<&Vec<Location>> {
+        self.var_usages.as_ref().unwrap().get(var_name)
+    }
+
+    pub(crate) fn has_usage(&self, var_name: &str) -> bool {
+        self.var_usages.as_ref().unwrap().contains_key(var_name)
+    }
+
+    pub(crate) fn get_indirect_usage(&self, var_name: &str) -> Option<&Vec<Location>> {
+        self.var_indirect_usages.as_ref().unwrap().get(var_name)
+    }
+
+    pub(crate) fn has_indirect_usage(&self, var_name: &str) -> bool {
+        self.var_indirect_usages
+            .as_ref()
+            .unwrap()
+            .contains_key(var_name)
+    }
+
+    pub(crate) fn is_substituted(&self, var_name: &str) -> bool {
+        self.subst_vars.as_ref().unwrap().contains(var_name)
+    }
+
     /// Get command that defines a variable before, with consideration for the condition
     pub fn get_dominant_definition(&self, var_name: &str, node_id: NodeId) -> Option<Location> {
         if let Some(node) = self.pool.get(node_id) {
-            if let Some(user_loc) = node.info.uses.get(var_name).map(|v| v.first()).flatten() {
+            if let Some(use_loc) = node.info.usages.get(var_name).map(|v| v.first()).flatten() {
                 let defs = self
-                    .var_definitions
-                    .get(var_name)
+                    .get_definition(var_name)
                     .into_iter()
                     .flat_map(|defs| defs.iter());
 
-                let eval_defs = self
-                    .eval_assigns
-                    .get(&Identifier::Name(var_name.to_owned()))
+                let prop_defs = self
+                    .get_propagated_definition(var_name)
                     .into_iter()
-                    .flat_map(|entries| entries.iter().map(|(_, loc)| loc));
+                    .flat_map(|defs| defs.iter());
 
                 return defs
-                    .chain(eval_defs)
+                    .chain(prop_defs)
                     .sorted()
                     .rev()
-                    .filter(|def_loc| def_loc <= &user_loc)
+                    .filter(|def_loc| def_loc <= &use_loc)
                     .filter(|def_loc| {
                         guard::cmp_guards(
                             &self.guard_of_location(def_loc),
-                            &self.guard_of_location(user_loc),
+                            &self.guard_of_location(use_loc),
                         )
-                        .is_none_or(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
+                        .is_some_and(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
                     })
                     .next()
                     .cloned();
@@ -778,17 +858,13 @@ impl Analyzer {
     }
 
     /// Get all locations that define a variable before
-    pub fn get_all_definition(
-        &self,
-        var_name: &str,
-        loc: Option<&Location>,
-    ) -> Option<Vec<Location>> {
-        self.var_definitions.get(var_name).map(|v| {
-            v.iter()
-                .filter(|def_loc| loc.is_none() || loc.is_some_and(|loc| *def_loc < loc))
-                .cloned()
-                .collect::<Vec<_>>()
-        })
+    pub fn get_all_definition(&self, var_name: &str, loc: Option<&Location>) -> Vec<Location> {
+        self.get_definition(var_name)
+            .into_iter()
+            .flatten()
+            .filter(|def_loc| loc.is_none() || loc.is_some_and(|loc| *def_loc < loc))
+            .cloned()
+            .collect::<Vec<_>>()
     }
 
     /// Get all locations that uses a variable before
@@ -796,22 +872,20 @@ impl Analyzer {
         &self,
         var_name: &str,
         loc: Option<&Location>,
-    ) -> Option<Vec<Location>> {
-        let mut ret = Vec::new();
-        for id in &self.top_ids {
-            if let Some(m) = self.uses_per_top.get(id) {
-                if let Some(locs) = m.get(var_name) {
-                    ret.extend(
-                        locs.iter()
-                            .filter(|use_loc| {
-                                loc.is_none() || loc.is_some_and(|loc| *use_loc < loc)
-                            })
-                            .cloned(),
-                    );
-                }
-            }
-        }
-        (!ret.is_empty()).then_some(ret)
+        include_indirection: bool,
+    ) -> Vec<Location> {
+        self.get_usage(var_name)
+            .into_iter()
+            .chain(
+                include_indirection
+                    .then_some(self.get_indirect_usage(var_name).into_iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .flatten()
+            .filter(|use_loc| loc.is_none() || loc.is_some_and(|loc| *use_loc < loc))
+            .cloned()
+            .collect::<Vec<_>>()
     }
 
     /// Get all locations that uses a variable after
@@ -819,36 +893,34 @@ impl Analyzer {
         &self,
         var_name: &str,
         loc: Option<&Location>,
-    ) -> Option<Vec<Location>> {
-        let mut ret = Vec::new();
-        for id in &self.top_ids {
-            if let Some(m) = self.uses_per_top.get(id) {
-                if let Some(locs) = m.get(var_name) {
-                    ret.extend(
-                        locs.iter()
-                            .filter(|use_loc| {
-                                loc.is_none() || loc.is_some_and(|loc| *use_loc < loc)
-                            })
-                            .cloned(),
-                    );
-                }
-            }
-        }
-        (!ret.is_empty()).then_some(ret)
+        include_indirection: bool,
+    ) -> Vec<Location> {
+        self.get_usage(var_name)
+            .into_iter()
+            .chain(
+                include_indirection
+                    .then_some(self.get_indirect_usage(var_name).into_iter())
+                    .into_iter()
+                    .flatten(),
+            )
+            .flatten()
+            .filter(|use_loc| loc.is_none() || loc.is_some_and(|loc| *use_loc > loc))
+            .cloned()
+            .collect::<Vec<_>>()
     }
 
     /// Get all variables defined by a command
     pub fn get_defined_variables(&self, node_id: NodeId) -> Option<HashSet<String>> {
         self.pool
             .get(node_id)
-            .map(|node| node.info.defines.keys().cloned().collect())
+            .map(|node| node.info.definitions.keys().cloned().collect())
     }
 
     /// Get all variables used by a command
     pub fn get_used_variables(&self, node_id: NodeId) -> Option<HashSet<String>> {
         self.pool
             .get(node_id)
-            .map(|node| node.info.uses.keys().cloned().collect())
+            .map(|node| node.info.usages.keys().cloned().collect())
     }
 
     /// Get commands this node depends on
@@ -866,16 +938,16 @@ impl Analyzer {
     }
 
     pub fn get_parent(&self, node_id: NodeId) -> Option<NodeId> {
-        self.get_node(node_id).info.parent
+        self.get_node(node_id).unwrap().info.parent
     }
 
     fn link_body_to_parent(&mut self, node_id: NodeId, parent: NodeId, block: BlockId) {
-        self.get_node_mut(node_id).info.parent = Some(parent);
-        self.get_node_mut(node_id).info.block = Some(block);
+        self.get_node_mut(node_id).unwrap().info.parent = Some(parent);
+        self.get_node_mut(node_id).unwrap().info.block = Some(block);
     }
 
     fn link_pre_body_to_parent(&mut self, node_id: NodeId, parent: NodeId) {
-        self.get_node_mut(node_id).info.parent = Some(parent);
+        self.get_node_mut(node_id).unwrap().info.parent = Some(parent);
     }
 
     pub fn get_children(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
@@ -886,7 +958,10 @@ impl Analyzer {
             |n| n.info.pre_body_nodes.iter().cloned(),
         );
 
-        let children: Vec<_> = pre_body_nodes.chain(body_nodes).collect();
+        let children: Vec<_> = pre_body_nodes
+            .chain(body_nodes)
+            .filter(|id| self.node_exists(*id))
+            .collect();
 
         (!children.is_empty()).then_some(children)
     }
@@ -907,6 +982,7 @@ impl Analyzer {
                         })
                         .flatten()
                         .flatten()
+                        .filter(|id| self.node_exists(*id))
                         .collect(),
                 )
             }
@@ -937,13 +1013,13 @@ impl Analyzer {
         let mut result = HashSet::new();
 
         // Add commands that define the variable
-        if let Some(defs) = self.var_definitions.get(var_name) {
+        if let Some(defs) = self.get_definition(var_name) {
             result.extend(defs.iter().map(|loc| loc.node_id));
         }
 
         // Add commands that use the variable
         for (id, node) in &self.pool.nodes {
-            if node.info.uses.contains_key(var_name) {
+            if node.info.usages.contains_key(var_name) {
                 result.insert(id);
             }
         }
@@ -951,14 +1027,19 @@ impl Analyzer {
         result
     }
 
-    /// Get node representation by id
-    pub fn get_node(&self, node_id: NodeId) -> &Node {
-        &self.pool.nodes[node_id]
+    /// Check if the node exists
+    pub fn node_exists(&self, node_id: NodeId) -> bool {
+        self.pool.nodes.contains(node_id)
     }
 
     /// Get node representation by id
-    pub fn get_node_mut(&mut self, node_id: NodeId) -> &mut Node {
-        &mut self.pool.nodes[node_id]
+    pub fn get_node(&self, node_id: NodeId) -> Option<&Node> {
+        self.pool.nodes.get(node_id)
+    }
+
+    /// Get node representation by id
+    pub fn get_node_mut(&mut self, node_id: NodeId) -> Option<&mut Node> {
+        self.pool.nodes.get_mut(node_id)
     }
 
     fn get_block(&self, block_id: BlockId) -> &Block {
@@ -998,11 +1079,6 @@ impl Analyzer {
         self.pool.display_word(word, false)
     }
 
-    /// Return the top node ID where the node with given ID is included.
-    pub fn get_top_of(&self, node_id: NodeId) -> NodeId {
-        self.get_node(node_id).info.top_id.unwrap()
-    }
-
     fn add_block(&mut self, block: Block) -> BlockId {
         let new_id = self.blocks.insert(block);
         self.get_block_mut(new_id).block_id = new_id;
@@ -1011,13 +1087,14 @@ impl Analyzer {
 
     fn add_pre_body_node(&mut self, parent: NodeId, pre_body_node_id: NodeId) {
         self.get_node_mut(parent)
+            .unwrap()
             .info
             .pre_body_nodes
             .push(pre_body_node_id);
         self.link_pre_body_to_parent(pre_body_node_id, parent);
     }
 
-    fn collect_descendant_nodes(
+    fn collect_descendant_nodes_per_node(
         &self,
         node_id: NodeId,
         aware_chunk_boundary: bool,
@@ -1036,13 +1113,15 @@ impl Analyzer {
                     let filtered = children.iter().filter(|&&child| {
                         // if aware chunk boundary,
                         // exclude children that are beyond chunk boundary
-                        !(aware_chunk_boundary && self.get_node(child).info.is_top_node())
+                        !(aware_chunk_boundary && self.get_node(child).unwrap().info.is_top_node())
                     });
                     stack.extend(filtered.clone());
                 }
             }
         }
-        ret.into_iter().collect()
+        ret.into_iter()
+            .sorted_by_key(|id| self.get_node(*id).unwrap().info.exec_id)
+            .collect()
     }
 
     /// recursively collect defined/used variables
@@ -1052,7 +1131,7 @@ impl Analyzer {
     ) -> (NodeDependencyMap, NodeDependencyMap) {
         let mut dependencies = HashMap::new();
         let mut dependents = HashMap::new();
-        for id in self.collect_descendant_nodes(node_id, false, false) {
+        for id in self.collect_descendant_nodes_per_node(node_id, false, false) {
             if let Some(node) = self.pool.nodes.get(id) {
                 dependencies.extend(node.info.dependencies.clone().into_iter());
                 dependents.extend(node.info.dependents.clone().into_iter());
@@ -1062,24 +1141,26 @@ impl Analyzer {
     }
 
     fn is_var_used(&self, var_name: &str) -> bool {
-        self.var_usages.contains_key(var_name)
-            || self.var_indirect_usages.contains_key(var_name)
-            || self.subst_vars.contains(var_name)
+        self.has_usage(var_name)
+            || self.has_indirect_usage(var_name)
+            || self.is_substituted(var_name)
     }
 
     /// recursively collect defined/used variables
     pub(crate) fn collect_variables(&self, node_id: NodeId) -> (VariableMap, VariableMap) {
         let mut defines = HashMap::new();
         let mut uses = HashMap::new();
-        for id in self.collect_descendant_nodes(node_id, true, false) {
-            if let Some(node) = self.pool.nodes.get(id) {
-                defines.extend(
-                    node.info
-                        .defines
-                        .iter()
-                        .filter_map(|(s, v)| self.is_var_used(s).then_some((s.clone(), v.clone()))),
-                );
-                uses.extend(node.info.uses.iter().map(|(s, v)| (s.clone(), v.clone())));
+        for id in self.collect_descendant_nodes_per_node(node_id, true, false) {
+            if let Some(node) = self.get_node(id) {
+                let new_defines = node
+                    .info
+                    .definitions
+                    .iter()
+                    .filter_map(|(s, v)| self.is_var_used(s).then_some((s.clone(), v.clone())));
+                self.extend_var_maps(&mut defines, new_defines);
+
+                let new_uses = node.info.usages.iter().map(|(s, v)| (s.clone(), v.clone()));
+                self.extend_var_maps(&mut uses, new_uses);
             }
         }
         (defines, uses)
@@ -1089,17 +1170,31 @@ impl Analyzer {
         // Apply initialization of depdencies to nodes
         for (def_id, use_id, var_name) in def_use_edges {
             self.get_node_mut(use_id)
+                .unwrap()
                 .info
                 .dependencies
                 .entry(def_id)
                 .or_default()
                 .insert(var_name.to_owned());
             self.get_node_mut(def_id)
+                .unwrap()
                 .info
                 .dependents
                 .entry(use_id)
                 .or_default()
                 .insert(var_name.to_owned());
+        }
+    }
+
+    pub(crate) fn extend_var_maps<I>(&self, var_map: &mut VariableMap, new_items: I)
+    where
+        I: Iterator<Item = (String, Vec<Location>)>,
+    {
+        for (k, v) in new_items {
+            var_map
+                .entry(k)
+                .and_modify(|locs| locs.extend(v.clone()))
+                .or_insert(v);
         }
     }
 }
