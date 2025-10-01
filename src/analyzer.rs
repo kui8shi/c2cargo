@@ -4,7 +4,7 @@ use autotools_parser::{
     ast::{
         minimal::Word,
         node::{
-            AcCommand, AcWord, AcWordFragment, AutoconfPool, Condition, DisplayNode, GuardBodyPair,
+            AcCommand, AcWord, AcWordFragment, Condition, DisplayNode, GuardBodyPair,
             M4Argument, M4Macro, NodeId, Operator, ParameterSubstitution, PatternBodyPair,
             ShellCommand, WordFragment,
         },
@@ -33,6 +33,8 @@ use location::{ExecId, Location};
 use variable::{Identifier, ValueExpr, VariableAnalyzer};
 
 use slab::Slab;
+
+use crate::display::AutoconfPool;
 
 mod automake;
 mod build_option;

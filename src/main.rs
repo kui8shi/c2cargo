@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::{env, fs, path::Path};
+use std::{env, path::Path};
 mod analysis;
 mod analyzer;
 mod utils;
+mod display;
 
 #[derive(Serialize)]
 struct ClaudeRequest {

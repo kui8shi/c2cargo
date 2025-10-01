@@ -205,7 +205,6 @@ impl<'a> VariableAnalyzer<'a> {
         self.increment_order();
     }
 
-
     fn check_propagation(&mut self) {
         let node_id = self.cursor.unwrap();
         let def_loc = self.current_location();

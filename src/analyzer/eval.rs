@@ -5,17 +5,13 @@ use super::{
     variable::{Identifier, ValueExpr},
     AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
 };
-use autotools_parser::{
-    ast::node::{AcWordFragment, NodePool},
-    parse::shell,
-};
+use autotools_parser::ast::node::{AcWordFragment, NodePool};
 use itertools::Itertools;
+use std::io::Write;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
-    fmt::write,
 };
-use std::{io::Write, path::PathBuf};
 
 /// Saving the result of backward traversal
 #[derive(Debug, PartialEq, Eq)]
