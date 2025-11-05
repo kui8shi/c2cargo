@@ -3,6 +3,9 @@ use super::{Analyzer, BlockId, Condition, GuardBodyPair, M4Argument, MayM4, Node
 impl Analyzer {
     /// Remove a node, children nodes, and empty parent nodes recursively
     pub(super) fn remove_node(&mut self, node_id: NodeId) {
+        if self.get_node(node_id).is_none() {
+            return;
+        }
         // Get parent information before removing the node
         let parent = self.get_node(node_id).unwrap().info.parent;
         let block = self.get_node(node_id).unwrap().info.block;
@@ -92,6 +95,8 @@ impl Analyzer {
 
     fn prune_block(&mut self, parent_id: NodeId, block_id: BlockId) {
         let branch_index = self.get_branch_index(parent_id, block_id).unwrap();
+        #[cfg(debug_assertions)]
+        let mut num_arms = None;
         if let MayM4::Shell(cmd) = &mut self.get_node_mut(parent_id).unwrap().cmd.0 {
             match cmd {
                 ShellCommand::If {
@@ -118,8 +123,13 @@ impl Analyzer {
                 }
                 ShellCommand::Case { word: _, arms } => {
                     arms.remove(branch_index);
+                    #[cfg(debug_assertions)]
+                    num_arms.replace(arms.len());
                 }
-                _ => unreachable!(),
+                _ => {
+                    dbg!(&cmd);
+                    unreachable!();
+                }
             }
         }
         // Unlink parent to block relationship
@@ -128,6 +138,14 @@ impl Analyzer {
             .info
             .branches
             .retain(|id| *id != block_id);
+
+        #[cfg(debug_assertions)]
+        if let Some(num_arms) = num_arms {
+            assert_eq!(
+                num_arms,
+                self.get_node(parent_id).unwrap().info.branches.len()
+            );
+        }
     }
 
     fn prune_command(&mut self, parent_id: NodeId, node_id: NodeId, block_id: BlockId) {
@@ -163,7 +181,10 @@ impl Analyzer {
                 } => {
                     body.retain(|id| *id != node_id);
                 }
-                _ => unreachable!(),
+                _ => {
+                    dbg!(&cmd);
+                    unreachable!();
+                }
             },
             MayM4::Macro(m4_macro) => {
                 for arg in m4_macro.args.iter_mut() {

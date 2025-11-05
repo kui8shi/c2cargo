@@ -20,6 +20,7 @@ struct Triplet {
 
 #[derive(Debug)]
 pub(crate) struct PlatformSupport {
+    platform_cfg_vars: HashSet<String>,
     supported_arch: HashSet<String>,
     supported_os: HashSet<String>,
     alternative_arch: HashMap<String, String>,
@@ -45,7 +46,24 @@ impl PlatformSupport {
         let alternative_arch = HashMap::from([("i386".into(), "x86".into())]);
         let alternative_os =
             HashMap::from([("mingw".into(), ("windows".into(), Some("gnu".into()), None))]);
+        let platform_cfg_vars = HashSet::from([
+            // "build".into(),
+            // "build_alias".into(),
+            // "build_cpu".into(),
+            // "build_os".into(),
+            // "build_vendor".into(),
+            // "target".into(),
+            // "target_cpu".into(),
+            // "target_os".into(),
+            // "target_vendor".into(),
+            "host".into(),
+            "host_alias".into(),
+            // "host_cpu".into(),
+            "host_os".into(),
+            "host_vendor".into(),
+        ]);
         Self {
+            platform_cfg_vars,
             supported_arch,
             supported_os,
             alternative_arch,
@@ -56,62 +74,80 @@ impl PlatformSupport {
     pub(crate) fn check_supported_platform(&self, guard: &Guard) -> Option<Guard> {
         match guard {
             Guard::N(negated, atom) => match atom {
-                Atom::ArchGlob(arch_pattern) => self
-                    .supported_arch
-                    .iter()
-                    .find(|arch| glob_match(arch_pattern, arch))
-                    .map(|arch| Guard::N(*negated, Atom::Arch(arch.clone())))
-                    .or(self
-                        .alternative_arch
-                        .keys()
+                Atom::ArchGlob(arch_pattern) => {
+                    if let Some(supported) = self
+                        .supported_arch
+                        .iter()
                         .find(|arch| glob_match(arch_pattern, arch))
-                        .map(|arch| {
-                            let arch = self.alternative_arch[arch].clone();
-                            Guard::N(*negated, Atom::Arch(arch))
-                        })),
-                Atom::OsAbiGlob(os_abi_pattern) => self
-                    .supported_os
-                    .iter()
-                    .find(|os| glob_match(os_abi_pattern, os))
-                    .map(|os| Guard::N(*negated, Atom::Os(os.clone())))
-                    .or(self
-                        .alternative_os
-                        .keys()
-                        .find(|os_abi| glob_match(os_abi_pattern, os_abi))
-                        .map(|os_abi| {
-                            let (os, environment, abi) = self.alternative_os[os_abi].clone();
-                            let mut guards = vec![Guard::confirmed(Atom::Os(os))];
-                            if let Some(e) = environment {
-                                guards.push(Guard::confirmed(Atom::Env(e)));
-                            }
-                            if let Some(a) = abi {
-                                guards.push(Guard::confirmed(Atom::Abi(a)));
-                            }
-                            let guard = if guards.len() > 1 {
-                                Guard::make_and(guards)
-                            } else {
-                                guards.pop().unwrap()
-                            };
-                            if *negated {
-                                guard.negate_whole()
-                            } else {
-                                guard
-                            }
-                        })),
+                        .map(|arch| Guard::N(*negated, Atom::Arch(arch.clone())))
+                    {
+                        Some(supported)
+                    } else {
+                        self.alternative_arch
+                            .keys()
+                            .find(|arch| glob_match(arch_pattern, arch))
+                            .map(|arch| {
+                                let arch = self.alternative_arch[arch].clone();
+                                Guard::N(*negated, Atom::Arch(arch))
+                            })
+                    }
+                }
+                Atom::OsAbiGlob(os_abi_pattern) => {
+                    if let Some(supported) = self
+                        .supported_os
+                        .iter()
+                        .find(|os| glob_match(os_abi_pattern, os))
+                        .map(|os| Guard::N(*negated, Atom::Os(os.clone())))
+                    {
+                        Some(supported)
+                    } else {
+                        self.alternative_os
+                            .keys()
+                            .find(|os_abi| glob_match(os_abi_pattern, os_abi))
+                            .map(|os_abi| {
+                                let (os, environment, abi) = self.alternative_os[os_abi].clone();
+                                let mut guards = vec![Guard::confirmed(Atom::Os(os))];
+                                if let Some(e) = environment {
+                                    guards.push(Guard::confirmed(Atom::Env(e)));
+                                }
+                                if let Some(a) = abi {
+                                    guards.push(Guard::confirmed(Atom::Abi(a)));
+                                }
+                                let guard = if guards.len() > 1 {
+                                    Guard::make_and(guards)
+                                } else {
+                                    guards.pop().unwrap()
+                                };
+                                if *negated {
+                                    guard.negate_whole()
+                                } else {
+                                    guard
+                                }
+                            })
+                    }
+                }
                 _ => None,
             },
             Guard::And(v) => {
-                let mut v = v.iter().map(|g| self.check_supported_platform(g));
-                v.all(|g| g.is_some())
-                    .then_some(Guard::And(v.flatten().collect()))
+                let v = v
+                    .iter()
+                    .map(|g| self.check_supported_platform(g))
+                    .collect::<Vec<_>>();
+                v.iter()
+                    .all(|g| g.is_some())
+                    .then_some(Guard::make_and(v.into_iter().flatten().collect()))
             }
             Guard::Or(v) => {
                 let v = v
                     .iter()
                     .flat_map(|g| self.check_supported_platform(g))
                     .collect::<Vec<_>>();
-                (!v.is_empty()).then_some(Guard::Or(v))
+                (!v.is_empty()).then_some(Guard::make_or(v))
             }
         }
+    }
+
+    pub(crate) fn platform_vars(&self) -> &HashSet<String> {
+        &self.platform_cfg_vars
     }
 }

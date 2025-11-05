@@ -9,6 +9,7 @@ use autotools_parser::ast::{
     Redirect,
 };
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
     /// doc
@@ -25,8 +26,34 @@ pub enum DataType {
     Literal,
     /// doc
     Either(Box<Self>, Vec<String>),
-    /// doc
-    Dict(Box<Self>),
+}
+
+impl DataType {
+    pub(crate) fn print(&self) -> String {
+        use DataType::*;
+        match self {
+            Bool => "bool".into(),
+            Integer => "usize".into(),
+            List(data_type) => format!("Vec<{}>", data_type.print()),
+            Path => "PathBuf".into(),
+            Optional(data_type) => format!("Option<{}>", data_type.print()),
+            Literal => "String".into(),
+            Either(_, _) => "String".into(),
+        }
+    }
+
+    pub(crate) fn priority(&self) -> usize {
+        use DataType::*;
+        match self {
+            Either(_, _) => 0,
+            Literal => 1,
+            Bool => 2,
+            Integer => 3,
+            Path => 4,
+            Optional(_) => 5,
+            List(_) => 6,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,6 +71,8 @@ pub enum TypeHint {
     AssignedInFor,
     /// the var can apper both lhs & rhs in an assignment
     AppendedSelf,
+    /// the var can be appended non-numeric & non-boolean literals
+    AppendedLiteral,
     /// reading the var happens before definition
     ReadBeforeWrite,
     /// the var appears at the second argument of for statements
@@ -71,7 +100,7 @@ pub(super) struct TypeInferrer<'a> {
 }
 
 impl Analyzer {
-    pub(crate) fn get_inferred_type(
+    pub(crate) fn get_type_inference_result(
         &self,
         var_name: &str,
     ) -> Option<&(HashSet<TypeHint>, DataType)> {
@@ -82,6 +111,12 @@ impl Analyzer {
     pub(crate) fn run_type_inference(&mut self) {
         self.inferred_types
             .replace(TypeInferrer::run_type_inference(&self));
+    }
+
+    pub(crate) fn get_inferred_type(&self, name: &str) -> DataType {
+        self.get_type_inference_result(name)
+            .map(|(_, data_type)| data_type.clone())
+            .unwrap_or(DataType::Literal)
     }
 }
 
@@ -108,7 +143,10 @@ impl<'a> TypeInferrer<'a> {
         }
 
         for (from, to) in s.type_relations.clone() {
-            if !s.types.contains_key(&to) {
+            if s.types
+                .get(&to)
+                .is_none_or(|data_type| *data_type == DataType::Literal)
+            {
                 if let Some(from_type) = s.types.get(&from).cloned() {
                     s.types.insert(to.to_owned(), from_type);
                 }
@@ -159,6 +197,9 @@ impl<'a> TypeInferrer<'a> {
         }
         for hint in hints.iter() {
             if let UsedInFor(child) = hint {
+                if hints.contains(&AppendedLiteral) {
+                    self.types.insert(child.to_owned(), Literal);
+                }
                 inferred = List(Box::new(self.infer_type(child)));
             }
         }
@@ -172,11 +213,11 @@ impl<'a> TypeInferrer<'a> {
         if hints.contains(&UsedAsPath) {
             inferred = Path;
         }
-        if hints.contains(&CanBeEmpty) {
-            if !matches!(inferred, List(_)) {
-                inferred = Optional(Box::new(inferred))
-            }
-        }
+        // if hints.contains(&CanBeEmpty) {
+        //     if !matches!(inferred, List(_)) {
+        //         inferred = Optional(Box::new(inferred))
+        //     }
+        // }
         self.types.insert(name.to_owned(), inferred.clone());
         inferred
     }
@@ -189,11 +230,11 @@ impl<'a> TypeInferrer<'a> {
     }
 
     fn check_literal(&mut self, var: &str, lit: &str) {
-        if matches!(lit, "yes" | "no" | "0" | "1") {
+        if is_boolean(lit) {
             self.add_type_hint(var, CanBeBoolLike);
         } else if lit.is_empty() {
             self.add_type_hint(var, CanBeEmpty);
-        } else if lit.chars().all(|c| c.is_numeric()) {
+        } else if is_numeric(lit) {
             self.add_type_hint(var, CanBeNum);
         } else if lit.chars().any(|c| c.is_whitespace()) {
             self.add_type_hint(var, CanContainWhitespace);
@@ -238,9 +279,12 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
     }
 
     fn visit_for(&mut self, var: &str, words: &[AcWord], body: &[NodeId]) {
-        for w in words {
-            if let Word::Single(MayM4::Shell(WordFragment::Param(Parameter::Var(name)))) = &w.0 {
-                self.add_type_hint(name, UsedInFor(var.to_owned()));
+        if words.len() == 1 {
+            for w in words {
+                if let Word::Single(MayM4::Shell(WordFragment::Param(Parameter::Var(name)))) = &w.0
+                {
+                    self.add_type_hint(name, UsedInFor(var.to_owned()));
+                }
             }
         }
 
@@ -331,6 +375,11 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                         .any(|w| as_var(w).is_some_and(|var| name == var)) =>
                 {
                     self.add_type_hint(name, AppendedSelf);
+                    if words.iter().any(|w| {
+                        as_literal(w).is_some_and(|lit| !is_boolean(lit) && !is_numeric(lit))
+                    }) {
+                        self.add_type_hint(name, AppendedLiteral);
+                    }
                 }
                 WordFragment::Literal(lit) => self.check_literal(name, lit),
                 WordFragment::Param(Parameter::Var(var)) => {
@@ -374,4 +423,12 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
             }
         }
     }
+}
+
+pub(crate) fn is_boolean(lit: &str) -> bool {
+    matches!(lit, "yes" | "no" | "0" | "1")
+}
+
+pub(crate) fn is_numeric(lit: &str) -> bool {
+    lit.chars().all(|c| c.is_numeric())
 }

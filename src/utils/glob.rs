@@ -2,7 +2,6 @@
 
 #[derive(Debug)]
 pub enum GlobError {
-    AsteriskNotAllowed,
     UnterminatedClass,
     EmptyClass,
     InvalidEscape,
@@ -13,7 +12,6 @@ pub enum GlobError {
 impl std::fmt::Display for GlobError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            GlobError::AsteriskNotAllowed => write!(f, "asterisk '*' is not allowed in this glob"),
             GlobError::UnterminatedClass => write!(f, "unterminated character class"),
             GlobError::EmptyClass => write!(f, "empty character class"),
             GlobError::InvalidEscape => write!(f, "invalid escape sequence"),
@@ -274,11 +272,6 @@ fn enumerate(
 /// Helper: ASCII printable (0x20..=0x7E)
 fn ascii_printable() -> Vec<char> {
     (0x20u32..=0x7Eu32).filter_map(char::from_u32).collect()
-}
-
-/// Helper: a-z
-fn ascii_lowercase() -> Vec<char> {
-    ('a'..='z').collect()
 }
 
 fn match_ast(ast: &GlobAst, text: &str) -> bool {

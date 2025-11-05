@@ -30,6 +30,7 @@ pub(crate) struct BuildOptionInfo {
     pub dependencies: HashMap<String, HashSet<String>>,
 }
 
+#[allow(dead_code)]
 impl Analyzer {
     pub(crate) fn get_macro_call(&self, name: &str) -> Option<&Vec<(NodeId, M4Macro)>> {
         self.macro_calls.as_ref().unwrap().get(name)
@@ -61,11 +62,11 @@ impl Analyzer {
         // conduct llm analysis
         let mut user = use_llm::LLMUser::new();
         let results = user
-            .run_llm_analysis(self.build_option_info.build_options.values())
+            .run_llm_analysis(self.build_option_info.build_options.values().map(|i| (i, &i.value_candidates)))
             .await;
 
         for res in results {
-            let build_option = self
+            let _build_option = self
                 .build_option_info
                 .build_options
                 .get(&res.option_name)

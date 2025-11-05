@@ -10,7 +10,6 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
 
     // Initialize the lexer and parser
     let mut analyzer = Analyzer::new(&path, None);
-    let top_ids = analyzer.get_top_ids();
 
     // analyzer.run_build_option_analysis();
     // analyzer.run_type_inference();
@@ -322,7 +321,7 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
     // === Translation Analysis Debug ===
     println!("\n=== DEBUG: Testing Analyzer::translate ===");
     println!("Calling analyzer.translate()...");
-    analyzer.translate();
+    analyzer.translate().await;
     println!("translate() completed successfully");
 
     Ok(())

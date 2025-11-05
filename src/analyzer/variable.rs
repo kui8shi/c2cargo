@@ -3,13 +3,15 @@ use std::{
     hash::Hash,
 };
 
+use bincode::{Decode, Encode};
+
 use super::{
     location::Location, AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, ExecId, M4Macro,
     MayM4, Node, NodeId, Parameter, ShellCommand, VariableMap, Word, WordFragment,
 };
 
 /// Struct represents various types of variable names used in assignments.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub(crate) enum Identifier {
     /// String literal. Direct variable reference.
     Name(String),
@@ -20,7 +22,7 @@ pub(crate) enum Identifier {
 }
 
 /// Struct represents various types of values assigned to variables.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Encode, Decode)]
 pub(crate) enum ValueExpr {
     /// String literal. It could be used in lhs or rhs.
     Lit(String),
@@ -134,8 +136,10 @@ impl<'a> VariableAnalyzer<'a> {
         self.order += 1;
     }
 
-    fn clear_order(&mut self) {
-        self.order = 0;
+    fn set_order(&mut self, order: usize) -> usize {
+        let old = self.order;
+        self.order = order;
+        old
     }
 
     fn current_location(&self) -> Location {
@@ -147,7 +151,7 @@ impl<'a> VariableAnalyzer<'a> {
         Location {
             node_id,
             exec_id,
-            order,
+            order_in_expr: order,
             line,
         }
     }
@@ -202,7 +206,6 @@ impl<'a> VariableAnalyzer<'a> {
             .entry(name.to_owned())
             .or_default()
             .push(bind_loc);
-        self.increment_order();
     }
 
     fn check_propagation(&mut self) {
@@ -219,7 +222,13 @@ impl<'a> VariableAnalyzer<'a> {
                         .get_block(*block_id)
                         .nodes
                         .iter()
-                        .map(|id| self.analyzer.get_node(*id).unwrap().info.definitions.keys())
+                        .map(|id| {
+                            let node = self.analyzer.get_node(*id).unwrap();
+                            node.info
+                                .definitions
+                                .keys()
+                                .chain(node.info.propagated_definitions.keys())
+                        })
                         .flatten()
                         .cloned()
                         .collect::<HashSet<_>>()
@@ -242,12 +251,14 @@ impl<'a> VariableAnalyzer<'a> {
 
     /// parse a body of eval assignment. It is expected to take `word` as a concatenated word fragments
     /// currently we don't support mixed lhs value (eigther single literal or single variable)
-    fn parse_eval_assignment(&self, frags: &[AcWordFragment]) -> (Identifier, Option<ValueExpr>) {
+    fn visit_eval_assignment(
+        &mut self,
+        frags: &[AcWordFragment],
+    ) -> (Identifier, Option<ValueExpr>) {
         let mut lhs = Vec::new();
         let mut rhs = Vec::new();
         let mut is_lhs = true;
         let mut is_ref = false;
-        let ref_loc = self.current_location();
         for frag in frags.iter() {
             use MayM4::*;
             match frag {
@@ -256,10 +267,13 @@ impl<'a> VariableAnalyzer<'a> {
                     is_ref = true;
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if is_lhs => {
+                    self.record_variable_usage(s);
                     lhs.push(Identifier::Indirect(s.to_owned()));
                 }
                 Shell(WordFragment::Param(Parameter::Var(s))) if !is_lhs => {
-                    rhs.push(ValueExpr::Var(s.to_owned(), ref_loc.clone()));
+                    let ref_loc = self.current_location();
+                    self.record_variable_usage(s);
+                    rhs.push(ValueExpr::Var(s.to_owned(), ref_loc));
                 }
                 Shell(WordFragment::Literal(s)) if is_lhs => {
                     if s.contains("=") {
@@ -293,7 +307,9 @@ impl<'a> VariableAnalyzer<'a> {
                                 rhs.push(ValueExpr::Lit(s.to_owned()));
                             }
                             WordFragment::Param(Parameter::Var(s)) => {
-                                rhs.push(ValueExpr::Var(s.to_owned(), ref_loc.clone()));
+                                let ref_loc = self.current_location();
+                                self.record_variable_usage(s);
+                                rhs.push(ValueExpr::Var(s.to_owned(), ref_loc));
                             }
                             _ => (),
                         }
@@ -338,11 +354,12 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
             return;
         }
         let saved_cursor = self.cursor.replace(node_id);
-        self.clear_order();
+        let saved_order = self.set_order(0);
         self.record_exec_id();
         self.walk_node(node_id);
         self.record_exit();
         self.check_propagation();
+        self.set_order(saved_order);
         self.cursor = saved_cursor;
     }
 
@@ -403,8 +420,9 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         if let Some(first) = cmd_words.get(0) {
             if is_eval(first) {
                 if let Some(Word::Concat(frags)) = cmd_words.get(1).map(|t| &t.0) {
-                    let (lhs, rhs) = self.parse_eval_assignment(frags);
-                    let loc = self.current_location();
+                    // FIXME: eval_loc's `order_in_expr` is inprecisely fixed to 0.
+                    let eval_loc = self.current_location();
+                    let (lhs, rhs) = self.visit_eval_assignment(frags);
                     if let Identifier::Name(name) = &lhs {
                         self.record_variable_definition(name);
                     }
@@ -414,15 +432,16 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
                         .unwrap()
                         .entry(lhs)
                         .or_default()
-                        .push((rhs, loc.clone()));
+                        .push((rhs, eval_loc.clone()));
                 }
+                return;
             }
         }
         self.walk_command(cmd_words);
     }
 }
 
-fn is_eval(word: &AcWord) -> bool {
+pub(crate) fn is_eval(word: &AcWord) -> bool {
     match &word.0 {
         Word::Single(f) => matches!(f, MayM4::Shell(WordFragment::Literal(t)) if t == "eval"),
         Word::Concat(frags) => {
@@ -457,7 +476,6 @@ impl Analyzer {
                 if self.get_node(loc.node_id).is_some_and(|n| {
                     matches!(&n.cmd.0, MayM4::Shell(ShellCommand::Assignment(_, _)))
                 }) {
-                    dbg!(&unused_var);
                     self.remove_node(loc.node_id);
                     self.var_definitions
                         .as_mut()

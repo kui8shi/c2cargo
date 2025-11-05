@@ -3,6 +3,11 @@ use std::{
     path::PathBuf,
 };
 
+use autotools_parser::{
+    ast::{node::AcCommand, MayM4},
+    m4_macro,
+};
+
 use super::{Analyzer, AstVisitor, M4Macro, Node, NodeId, ShellCommand};
 
 /// Visitor to find case statements branching given variables.
@@ -26,21 +31,49 @@ impl<'a> MacroHandler<'a> {
         let mut remove_nodes = HashSet::new();
         let mut called: HashMap<String, Vec<(NodeId, M4Macro)>> = Default::default();
         let mut oneshot_calls = HashSet::new();
-        for id in s.analyzer.get_top_ids() {
+        for (order, id) in s.analyzer.get_top_ids().into_iter().enumerate() {
             s.visit_top(id);
             for (id, macro_call) in s.found_macro_calls.drain(..) {
-                if macro_call
-                    .signature
-                    .as_ref()
-                    .is_some_and(|sig| sig.is_oneshot)
-                {
-                    let name = macro_call.name.as_str();
-                    if !oneshot_calls.contains(name) {
-                        oneshot_calls.insert(name.to_owned());
-                    } else {
-                        // oneshot macro calls are ignored after the second time
-                        remove_nodes.insert(id);
-                        continue;
+                if let Some(sig) = macro_call.signature.as_ref() {
+                    if sig.is_oneshot {
+                        let name = macro_call.name.as_str();
+                        if !oneshot_calls.contains(name) {
+                            oneshot_calls.insert(name.to_owned());
+                        } else {
+                            // oneshot macro calls are ignored after the second time
+                            remove_nodes.insert(id);
+                            continue;
+                        }
+                    }
+                    if let Some(required) = sig.require.as_ref() {
+                        for name in required {
+                            if !called.contains_key(name) {
+                                let required_sig = m4_macro::MACROS.get(name).unwrap();
+                                if required_sig.is_oneshot {
+                                    oneshot_calls.insert(name.to_owned());
+                                }
+                                let effects =
+                                    (!required_sig.has_no_exports()).then_some(required_sig.into());
+                                let required_call = m4_macro::M4Macro::new_with_side_effect(
+                                    name.to_owned(),
+                                    Vec::new(),
+                                    effects,
+                                    None,
+                                );
+                                let new_id = s.analyzer.pool.nodes.insert(Node {
+                                    comment: None,
+                                    range: s.analyzer.get_ranges(id).unwrap().to_vec(),
+                                    cmd: AcCommand(MayM4::Macro(required_call.clone())),
+                                    // FIXME: this brace's block id is strage
+                                    info: Default::default(),
+                                });
+                                s.analyzer.top_ids.insert(order, new_id);
+                                called
+                                    .entry(name.to_owned())
+                                    .or_default()
+                                    .push((new_id, required_call));
+                            }
+                        }
                     }
                 }
                 called
@@ -51,8 +84,8 @@ impl<'a> MacroHandler<'a> {
         }
 
         if let Some(v) = called.get("AX_PREFIX_CONFIG_H") {
-            if let Some((id, m4_macro)) = v.first().clone() {
-                // prefix CPP vars
+            if let Some((_id, _m4_macro)) = v.first().clone() {
+                // TODO: prefix CPP vars
             }
         }
 
@@ -62,6 +95,14 @@ impl<'a> MacroHandler<'a> {
                     if let Some(block_id) = s.analyzer.get_node(*node_id).unwrap().info.block {
                         s.analyzer.blocks[block_id].error_out = true;
                     }
+                }
+            }
+        }
+
+        for msg_only_macro in ["AC_MSG_CHECKING", "AC_MSG_RESULT", "AC_MSG_NOTICE"] {
+            if let Some(v) = called.get(msg_only_macro) {
+                for (node_id, _) in v {
+                    remove_nodes.insert(*node_id);
                 }
             }
         }
@@ -118,7 +159,13 @@ impl<'a> MacroHandler<'a> {
         }
 
         for arg_macro in ["AC_ARG_VAR"] {
-            for (id, macro_call) in called.get(arg_macro).cloned().into_iter().flatten() {
+            for (id, _) in called.get(arg_macro).cloned().into_iter().flatten() {
+                remove_nodes.insert(id);
+            }
+        }
+
+        for cpp_macro in ["AH_VERBATIM"] {
+            for (id, _) in called.get(cpp_macro).cloned().into_iter().flatten() {
                 remove_nodes.insert(id);
             }
         }
@@ -162,8 +209,8 @@ impl Analyzer {
         self.subst_vars.replace(subst_vars);
     }
 
-    pub(super) fn aggregate_env_vars(&mut self) {
-        let env_vars = self
+    pub(super) fn aggregate_input_vars(&mut self) {
+        let input_vars = self
             .macro_calls
             .as_ref()
             .unwrap()
@@ -181,9 +228,23 @@ impl Analyzer {
                     .into_iter()
                     .flatten()
             })
+            .collect();
+        self.input_vars.replace(input_vars);
+    }
+
+    pub(super) fn aggregate_env_vars(&mut self) {
+        let env_vars = self
+            .input_vars
+            .as_ref()
+            .unwrap()
+            .iter()
+            .cloned()
             .filter(|var_name| {
-                self.get_scopes(var_name.as_str())
-                    .is_some_and(|scopes| scopes.first().unwrap().owner.is_none())
+                self.get_scopes(var_name.as_str()).is_some_and(|scopes| {
+                    scopes
+                        .first()
+                        .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
+                })
             })
             .collect::<HashSet<String>>();
         self.env_vars.replace(env_vars);

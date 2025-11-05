@@ -1,10 +1,10 @@
 use super::{M4Argument, M4Macro};
 use itertools::Itertools;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::{
     AcWord, Analyzer, AstVisitor, Condition, GuardBodyPair, MayM4, Node, NodeId, Operator,
-    Parameter, ParameterSubstitution, PatternBodyPair, Redirect, Word, WordFragment,
+    Parameter, ParameterSubstitution, PatternBodyPair, Redirect, ShellCommand, Word, WordFragment,
 };
 
 use crate::analyzer::{as_literal, as_shell, as_var};
@@ -72,8 +72,69 @@ impl Guard {
             And(guards) | Or(guards) => guards.iter().any(|guard| guard.has_variable(var_name)),
         }
     }
+
+    pub(crate) fn print(
+        &self,
+        printed_cmds: &HashMap<NodeId, String>,
+    ) -> Result<String, HashSet<NodeId>> {
+        use Atom::*;
+        use VarCond::*;
+        match self {
+            Guard::N(negated, atom) => Ok(format!(
+                "test {} {}",
+                if *negated { "!" } else { "" },
+                match atom {
+                    ArchGlob(_) | OsAbiGlob(_) | Arch(_) | Cpu(_) | Os(_) | Env(_) | Abi(_)
+                    | Ext(_) | BigEndian | HasProgram(_) | HasLibrary(_) | HasHeader(_)
+                    | Compiler(_) => todo!(),
+                    PathExists(vols, is_absolute) => {
+                        let path_str = vols.iter().map(|vol| vol.print()).collect::<String>();
+                        format!("-e {}{}", if *is_absolute { "/" } else { "" }, path_str)
+                    }
+                    Var(name, var_cond) | Arg(name, var_cond) => match var_cond {
+                        Yes => format!("${{{}}} = yes", name),
+                        No => format!("${{{}}} = no", name),
+                        Empty => format!("-z ${{{}}}", name),
+                        Unset => format!("${{{}:-set}} != set", name),
+                        Set => format!("${{{}:-set}} = set", name),
+                        Eq(vol) => format!("${{{}}} = {}", name, vol.print()),
+                        Lt(vol) => format!("${{{}}} -lt {}", name, vol.print()),
+                        Le(vol) => format!("${{{}}} -le {}", name, vol.print()),
+                        Gt(vol) => format!("${{{}}} -gt {}", name, vol.print()),
+                        Ge(vol) => format!("${{{}}} -ge {}", name, vol.print()),
+                        Match(_) | MatchAny => todo!(),
+                    },
+                    Cmd(node_id) => {
+                        if let Some(cmd_str) = printed_cmds.get(node_id) {
+                            cmd_str.to_owned()
+                        } else {
+                            return Err(HashSet::from([*node_id]));
+                        }
+                    }
+                }
+            )),
+            Guard::Or(guards) | Guard::And(guards)
+                if guards.iter().any(|g| g.print(printed_cmds).is_err()) =>
+            {
+                Err(guards
+                    .iter()
+                    .flat_map(|g| g.print(printed_cmds).err())
+                    .flatten()
+                    .collect())
+            }
+            Guard::Or(guards) => Ok(guards
+                .iter()
+                .map(|g| g.print(printed_cmds).unwrap())
+                .join(" || ")),
+            Guard::And(guards) => Ok(guards
+                .iter()
+                .map(|g| g.print(printed_cmds).unwrap())
+                .join(" && ")),
+        }
+    }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Atom {
     ArchGlob(String),  // glob string
@@ -128,6 +189,16 @@ fn as_vol(value: &WordFragment<AcWord>) -> Option<VoL> {
     }
 }
 
+impl VoL {
+    fn print(&self) -> String {
+        match self {
+            VoL::Var(name) => format!("${{{}}}", name),
+            VoL::Lit(lit) => lit.clone(),
+        }
+    }
+}
+
+#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CompilerCheck {
     Func(String),
@@ -152,13 +223,13 @@ pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp:
 }
 
 /// Visitor to find case statements branching given variables.
+#[allow(dead_code)]
 #[derive(Debug)]
 pub(super) struct GuardAnalyzer<'a> {
     analyzer: &'a mut Analyzer,
     cursor: Option<NodeId>,
     range: Option<Vec<(usize, usize)>>,
     guard_stack: Vec<Guard>,
-    removing_blocks: Vec<NodeId>,
 }
 
 impl Analyzer {
@@ -197,22 +268,9 @@ impl<'a> GuardAnalyzer<'a> {
             cursor: None,
             range: None,
             guard_stack: Vec::new(),
-            removing_blocks: Vec::new(),
         };
         for node_id in s.analyzer.get_top_ids() {
             s.visit_top(node_id);
-        }
-        for block_id in s.removing_blocks {
-            if s.analyzer.blocks.contains(block_id) {
-                let block = &s.analyzer.blocks[block_id];
-                if s.analyzer.pool.nodes.contains(block.parent) {
-                    for child in block.nodes.clone().into_iter() {
-                        if s.analyzer.pool.nodes.contains(child) {
-                            s.analyzer.remove_node(child);
-                        }
-                    }
-                }
-            }
         }
     }
 
@@ -532,7 +590,7 @@ impl<'a> GuardAnalyzer<'a> {
                     _ => {
                         let pattern_string = self.analyzer.display_word(pattern);
                         if var == "host" {
-                            let (arch, _, os): (String, String, String) =
+                            let (arch, _vendor, os): (String, String, String) =
                                 split_glob_triplet(&pattern_string)
                                     .into_iter()
                                     .take(3)
@@ -712,11 +770,15 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     }
                 }
             }
-            if let Some("host") = as_var(w) {
-                is_platform_branch = true;
+            if let Some(var_name) = as_var(w) {
+                if var_name == "host" {
+                    is_platform_branch = true;
+                }
+                // FIXME: host_cpu, host_os?
             }
         }
-        for arm in arms {
+        let mut removing_arm_indexes = Vec::new();
+        for (arm_index, arm) in arms.into_iter().enumerate() {
             let mut guard = Guard::make_or(
                 arm.patterns
                     .iter()
@@ -740,19 +802,62 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
             } else {
                 false
             };
-            let block_id = self.record_block(&arm.body);
             if unsupported_platform_branch_found {
-                // why not remove the nodes in the arm immediately?
-                // because `remove_node` depends on the block structure.
-                // it looks dirty but work well for now.
-                self.removing_blocks.push(block_id);
+                // why not use `remove_node` in removal.rs?
+                // because `remove_node` depends on the block structure,
+                // that we are constructing now.
+                for node_id in arm.body.iter() {
+                    // FIXME: we should recurse into the body to erase all nodes from the pool.
+                    self.analyzer.pool.nodes.remove(*node_id);
+                }
+                removing_arm_indexes.push(arm_index);
+            } else {
+                self.guard_stack.push(guard);
+                self.record_block(&arm.body);
+                for c in &arm.body {
+                    self.visit_node(*c);
+                }
+                self.negate_last_guard();
             }
-            self.guard_stack.push(guard);
-            for c in &arm.body {
-                self.visit_node(*c);
-            }
-            self.negate_last_guard();
         }
+        if !removing_arm_indexes.is_empty() {
+            let node_id = self.cursor.unwrap();
+            match &mut self.analyzer.get_node_mut(node_id).unwrap().cmd.0 {
+                MayM4::Shell(ShellCommand::Case { word: _, arms }) => {
+                    for arm_index in removing_arm_indexes.into_iter().rev() {
+                        arms.remove(arm_index);
+                    }
+                }
+                _ => unreachable!(),
+            }
+        }
+        // if is_platform_branch {
+        //     let mut conditionals = Vec::new();
+        //     let mut else_branch = Vec::new();
+        //     for (arm_index, arm) in arms.iter().enumerate() {
+        //         let node_id = self.cursor.unwrap();
+        //         let block_id = self.analyzer.get_node(node_id).unwrap().info.branches[arm_index];
+        //         let guard = self.analyzer.get_block(block_id).guards.last().unwrap();
+        //         let is_else_branch = match guard {
+        //             Guard::N(false, Atom::Var(_, VarCond::MatchAny)) => true,
+        //             _ => false,
+        //         };
+        //         if is_else_branch {
+        //             else_branch = arm.body.clone();
+        //         } else {
+        //             let dummy_cond = Condition::Cond(Operator::Empty(AcWord(Word::Empty)));
+        //             let dummy_guard_body_pair = GuardBodyPair {
+        //                 condition: dummy_cond,
+        //                 body: arm.body.clone(),
+        //             };
+        //             conditionals.push(dummy_guard_body_pair);
+        //         }
+        //     }
+        //     ShellCommand::If {
+        //         conditionals,
+        //         else_branch,
+        //     };
+        // }
         self.guard_stack = saved_stack;
     }
 

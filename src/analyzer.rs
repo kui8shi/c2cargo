@@ -1,12 +1,18 @@
 //! Provides the higher level on-time analyses to improve parsing
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
+};
+
 use automake::AutomakeAnalyzer;
 use autotools_parser::{
     ast::{
         minimal::Word,
         node::{
-            AcCommand, AcWord, AcWordFragment, Condition, DisplayNode, GuardBodyPair,
-            M4Argument, M4Macro, NodeId, Operator, ParameterSubstitution, PatternBodyPair,
-            ShellCommand, WordFragment,
+            AcCommand, AcWord, AcWordFragment, Condition, DisplayNode, GuardBodyPair, M4Argument,
+            M4Macro, NodeId, Operator, ParameterSubstitution, PatternBodyPair, ShellCommand,
+            WordFragment,
         },
         Arithmetic, MayM4, Parameter, Redirect,
     },
@@ -14,20 +20,15 @@ use autotools_parser::{
     parse::autoconf::NodeParser,
 };
 use build_option::BuildOptionInfo;
-use chunk::{Chunk, ChunkId, Scope};
+use chunk::{Chunk, ChunkId, FunctionSkelton, Scope};
 use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
 use macro_call::MacroHandler;
 use platform_support::PlatformSupport;
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
-};
 use type_inference::{DataType, TypeHint};
 
-use eval::{IdentifierDivision, VSACache};
+use eval::{DividedVariable, VSACache};
 use flatten::Flattener;
 use location::{ExecId, Location};
 use variable::{Identifier, ValueExpr, VariableAnalyzer};
@@ -41,6 +42,7 @@ mod build_option;
 mod chunk;
 mod dictionary;
 mod eval;
+mod filtering;
 mod flatten;
 mod guard;
 mod location;
@@ -51,18 +53,9 @@ mod translator;
 mod type_inference;
 mod variable;
 
-type Command = ShellCommand<AcWord>;
 type VariableMap = HashMap<String, Vec<Location>>;
 type NodeDependencyMap = HashMap<NodeId, HashSet<String>>;
 type Node = autotools_parser::ast::node::Node<AcCommand, NodeInfo>;
-
-fn is_empty(word: &AcWord) -> bool {
-    if let Word::Empty = &word.0 {
-        true
-    } else {
-        false
-    }
-}
 
 fn as_shell(word: &AcWord) -> Option<&WordFragment<AcWord>> {
     if let Word::Single(MayM4::Shell(shell_word)) = &word.0 {
@@ -439,7 +432,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a parameter node.
-    fn walk_parameter(&mut self, param: &Parameter<String>) {}
+    fn walk_parameter(&mut self, _param: &Parameter<String>) {}
 
     /// Walk a parameter substitution node.
     fn walk_parameter_substitution(&mut self, subs: &ParameterSubstitution<AcWord>) {
@@ -470,7 +463,7 @@ pub trait AstVisitor: Sized {
     }
 
     /// Walk a function definition.
-    fn walk_function_definition(&mut self, name: &str, body: NodeId) {
+    fn walk_function_definition(&mut self, _name: &str, body: NodeId) {
         self.visit_node(body);
     }
 
@@ -571,7 +564,7 @@ struct ProjectInfo {
     project_dir: PathBuf,
     subst_files: Vec<PathBuf>,
     am_files: Vec<PathBuf>,
-    config_header: PathBuf,
+    _config_header: PathBuf,
 }
 
 /// Analyzer which conducts various kinds of analyses:
@@ -586,6 +579,23 @@ pub struct Analyzer {
     pool: AutoconfPool<NodeInfo>,
     /// Ids of top-level commands
     top_ids: Vec<NodeId>,
+    /// Map of block ID to Block information
+    /// The node ids vector preserves the sequence order of commands.
+    blocks: Slab<Block>,
+    /// Chunks of nodes
+    chunks: Slab<Chunk>,
+    /// options of this analyzer
+    options: AnalyzerOptions,
+    /// Set of variable maps that is fixed to a certain value
+    fixed: HashMap<String, String>,
+    /// information about paths in the project
+    project_info: ProjectInfo,
+    /// information about platform support of Rust.
+    platform_support: PlatformSupport,
+    /// Analysis results of build options.
+    build_option_info: BuildOptionInfo,
+    /// Cache used inside Value Set Analysis. Mainly used for recording resolved values of variables
+    vsa_cache: VSACache,
     /// Whether the nodes are flattened or not
     has_flattened_nodes: bool,
     /// Map of variable names to information of commands that define them
@@ -596,36 +606,23 @@ pub struct Analyzer {
     var_usages: Option<VariableMap>,
     /// Map of variable names to information of commands that indirectly uses them
     var_indirect_usages: Option<VariableMap>,
-    /// Map of block ID to Block information
-    /// The node ids vector preserves the sequence order of commands.
-    blocks: Slab<Block>,
-    /// Analysis results of build options.
-    build_option_info: BuildOptionInfo,
-    /// Set of variable maps that is fixed to a certain value
-    fixed: HashMap<String, String>,
     /// Set of variables which are used in eval assignments
     eval_assigns: Option<HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>>,
-    /// Cache used inside Value Set Analysis. Mainly used for recording resolved values of variables
-    vsa_cache: VSACache,
     /// dynamically divided identifiers
     /// The value of entry is a map from eval location to division info
-    divided_vars: Option<HashMap<String, HashMap<Location, IdentifierDivision>>>,
+    divided_vars: Option<HashMap<String, DividedVariable>>,
     /// all m4 macro calls
     macro_calls: Option<HashMap<String, Vec<(NodeId, M4Macro)>>>,
     /// all susbstitued variables
     subst_vars: Option<HashSet<String>>,
+    /// all input variables which are defined in m4 macros and are candidates of environmental variables.
+    input_vars: Option<HashSet<String>>,
     /// all variables that can recieve user-supplied values other than build options.
     env_vars: Option<HashSet<String>>,
-    /// options of this analyzer
-    options: AnalyzerOptions,
-    /// information about paths in the project
-    project_info: ProjectInfo,
-    /// information about platform support of Rust.
-    platform_support: PlatformSupport,
-    /// Chunks of nodes
-    chunks: Slab<Chunk>,
     /// Scopes of variables
-    scopes: Option<HashMap<String, Vec<Scope>>>,
+    var_scopes: Option<HashMap<String, Vec<Scope>>>,
+    /// Signatures of chunks as a function
+    chunk_skeletons: Option<HashMap<ChunkId, FunctionSkelton>>,
     /// Inferred Types
     inferred_types: Option<HashMap<String, (HashSet<TypeHint>, DataType)>>,
     /// Dictionary Instances
@@ -634,6 +631,7 @@ pub struct Analyzer {
     automake: Option<AutomakeAnalyzer>,
 }
 
+#[allow(dead_code)]
 impl Analyzer {
     /// Reorganize nodes to flatten deeply nested command blocks
     /// Note that once we call it, the structure of nodes will change irreversibly,
@@ -654,7 +652,10 @@ impl Analyzer {
                 .expect("Partial Expansion of configure.ac has failed.")
         } else {
             std::fs::read_to_string(path).expect("Reading a file has failed.")
-        };
+        }
+        // FIXME: We really don't want this variable. But the matching logic is incorrect
+        // (e.g. $USER_VARIABLE -> SER_VARIABLE)
+        .replace("$U", "");
         std::fs::read_to_string(&path).unwrap();
         // Move to the project directory
         let project_dir = path.parent().unwrap().to_owned();
@@ -692,6 +693,8 @@ impl Analyzer {
 
         GuardAnalyzer::analyze_blocks(&mut s);
 
+        s.filter_out_commands();
+
         // Record all m4 macro calls
         MacroHandler::handle_macro_calls(&mut s);
 
@@ -703,8 +706,6 @@ impl Analyzer {
         s.run_value_set_analysis();
         s.run_type_inference();
         s.make_dictionary_instances();
-        dbg!(&s.divided_vars);
-        dbg!(&s.dicts);
 
         // Analyze automake files
         s.analyze_automake_files();
@@ -712,21 +713,44 @@ impl Analyzer {
 
         s.remove_unused_variables();
 
+        s.run_build_option_analysis();
+
         // Flatten nodes
         s.flatten();
 
+        s.aggregate_input_vars();
+
         // Construct chunks & cut var scopes
-        s.construct_chunks(Some(5), true);
+        s.construct_chunks(Some(2), false);
         s.cut_variable_scopes_chunkwise();
 
         s.aggregate_env_vars();
 
-        s
-    }
+        s.make_chunk_skeletons();
+        // dbg!(&s
+        //     .dicts
+        //     .as_ref()
+        //     .unwrap()
+        //     .iter()
+        //     .filter(|d| {
+        //         let mut map = HashSet::new();
+        //         for k in d.accesses.keys() {
+        //             if map.contains(&k.node_id) {
+        //                 // two dict accesses in one node
+        //                 return true;
+        //             }
+        //             map.insert(k.node_id);
+        //         }
+        //         false
+        //     })
+        //     .map(|d| (
+        //         &d.name,
+        //         &d.value_type,
+        //         d.accesses.iter().sorted_by_key(|(k, _)| k.node_id)
+        //     ))
+        //     .collect::<Vec<_>>());
 
-    /// Get the number of nodes (commands)
-    pub fn num_nodes(&self) -> usize {
-        self.pool.nodes.len()
+        s
     }
 
     /// Get guard conditions of given variable location
@@ -789,11 +813,36 @@ impl Analyzer {
             .contains_key(var_name)
     }
 
+    pub(crate) fn has_definition_before(&self, var_name: &str, loc: &Location) -> bool {
+        self.var_definitions
+            .as_ref()
+            .unwrap()
+            .get(var_name)
+            .is_some_and(|def_locs| def_locs.iter().any(|def_loc| def_loc < loc))
+    }
+
     pub(crate) fn get_propagated_definition(&self, var_name: &str) -> Option<&Vec<Location>> {
         self.var_propagated_definitions
             .as_ref()
             .unwrap()
             .get(var_name)
+    }
+
+    pub(crate) fn as_propagated_definition(
+        &self,
+        var_name: &str,
+        def_loc: &Location,
+    ) -> Option<Location> {
+        // we actually should save the information where the propagation comes from.
+        // for now instead, we use this dumb logic.
+        self.get_propagated_definition(var_name)
+            .into_iter()
+            .flat_map(|prop_def_locs| prop_def_locs.into_iter())
+            .find(|prop_def| {
+                self.collect_descendant_nodes_per_node(prop_def.node_id, false, true)
+                    .contains(&def_loc.node_id)
+            })
+            .cloned()
     }
 
     pub(crate) fn has_propagated_definition(&self, var_name: &str) -> bool {
@@ -809,6 +858,14 @@ impl Analyzer {
 
     pub(crate) fn has_usage(&self, var_name: &str) -> bool {
         self.var_usages.as_ref().unwrap().contains_key(var_name)
+    }
+
+    pub(crate) fn has_usage_before(&self, var_name: &str, loc: &Location) -> bool {
+        self.var_usages
+            .as_ref()
+            .unwrap()
+            .get(var_name)
+            .is_some_and(|use_locs| use_locs.iter().any(|use_loc| use_loc < loc))
     }
 
     pub(crate) fn get_indirect_usage(&self, var_name: &str) -> Option<&Vec<Location>> {
@@ -838,7 +895,13 @@ impl Analyzer {
                 let prop_defs = self
                     .get_propagated_definition(var_name)
                     .into_iter()
-                    .flat_map(|defs| defs.iter());
+                    .flat_map(|defs| defs.iter())
+                    .filter(|prop_def| {
+                        // we should ignore propagation which may originate from the requested node itself.
+                        !self
+                            .collect_descendant_nodes_per_node(prop_def.node_id, false, true)
+                            .contains(&node_id)
+                    });
 
                 return defs
                     .chain(prop_defs)
@@ -867,6 +930,11 @@ impl Analyzer {
             .filter(|def_loc| loc.is_none() || loc.is_some_and(|loc| *def_loc < loc))
             .cloned()
             .collect::<Vec<_>>()
+    }
+
+    /// Get all locations that uses a variable
+    pub fn get_all_usages(&self, var_name: &str, include_indirection: bool) -> Vec<Location> {
+        self.get_all_usages_before(var_name, None, include_indirection)
     }
 
     /// Get all locations that uses a variable before
@@ -1198,5 +1266,12 @@ impl Analyzer {
                 .and_modify(|locs| locs.extend(v.clone()))
                 .or_insert(v);
         }
+    }
+
+    pub(crate) fn print_entire_scripts(&self) -> String {
+        self.get_top_ids()
+            .into_iter()
+            .map(|id| self.display_node(id))
+            .join("\n")
     }
 }

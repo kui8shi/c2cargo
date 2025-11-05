@@ -28,6 +28,7 @@ impl<U: std::fmt::Debug> std::fmt::Debug for AutoconfPool<U> {
     }
 }
 
+#[allow(dead_code)]
 impl<U> AutoconfPool<U> {
     /// Construct a new pool of autoconf commands
     pub fn new(
@@ -115,10 +116,16 @@ impl<U> DisplayNode for AutoconfPool<U> {
             }
             Single(frag) => {
                 let s = self.may_m4_word_to_string(frag);
-                if should_quote && matches!(frag, MayM4::Shell(Literal(_))) {
-                    format!("\'{}\'", s)
-                } else if should_quote && !matches!(frag, MayM4::Shell(DoubleQuoted(_))) {
-                    format!("\"{}\"", s)
+                if should_quote {
+                    match frag {
+                        MayM4::Shell(Literal(lit)) if !lit.contains("\'") => {
+                            format!("\'{}\'", s)
+                        }
+                        MayM4::Shell(DoubleQuoted(_)) => s,
+                        _ => {
+                            format!("\"{}\"", s)
+                        }
+                    }
                 } else {
                     s
                 }
@@ -203,7 +210,7 @@ impl<U> NodePool<AcWord> for AutoconfPool<U> {}
 
 #[cfg(test)]
 mod tests {
-    use super::{AcCommand, AcWord, Node, NodePool, AutoconfPool};
+    use super::{AcCommand, AcWord, AutoconfPool, Node, NodePool};
     use autotools_parser::ast::minimal::Word;
     use autotools_parser::ast::minimal::WordFragment::*;
     use autotools_parser::ast::node::Condition;
@@ -559,5 +566,21 @@ mod tests {
         let pool = AutoconfPool::from_vec(vec![body.clone(), func.clone(), mac.clone()]);
         assert_eq!(pool.display_node(1, 0), "function f () b");
         assert_eq!(pool.display_node(2, 0), "m([a],\n  w)");
+    }
+
+    #[test]
+    fn test_node_to_string_with_single_quotes_in_literal() {
+        let echo: AcWord = Word::Single(Shell(Literal("echo".to_string()))).into();
+        let lit = Word::Single(Shell(Literal("\')".to_string()))).into();
+        let cmd = Node::new(None, None, AcCommand::new_cmd(C::Cmd(vec![echo, lit])), ());
+        let redir = autotools_parser::ast::Redirect::Write(None, Word::Empty.into());
+        let rd_node = Node::new(
+            None,
+            None,
+            AcCommand::new_cmd(C::Redirect(0, vec![redir])),
+            (),
+        );
+        let pool = AutoconfPool::from_vec(vec![cmd, rd_node]);
+        assert_eq!(pool.display_node(1, 0), "echo \"\')\" > \"\"");
     }
 }

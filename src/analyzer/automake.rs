@@ -25,6 +25,7 @@ struct AmNodeInfo {
     node_id: NodeId,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 struct AmTarget {
     name: String,
@@ -52,6 +53,7 @@ struct AmTarget {
     shortname: Option<AmWord>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone, Default)]
 struct Automake {
     this_path: PathBuf,
@@ -66,12 +68,14 @@ struct Automake {
     built_sources: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct AmValue<T> {
     value: T,
     condition: Vec<AmGuard>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct AmGuard {
     negated: bool,
@@ -104,7 +108,7 @@ impl Analyzer {
         self.automake.as_ref().unwrap()
     }
 
-    pub(crate) fn mut_automake(&mut self) -> &mut AutomakeAnalyzer {
+    pub(crate) fn automake_mut(&mut self) -> &mut AutomakeAnalyzer {
         self.automake.as_mut().unwrap()
     }
 
@@ -113,7 +117,7 @@ impl Analyzer {
 
         for path in self.project_info.am_files.clone() {
             let automake = self.analyze_automake_file(&path);
-            self.mut_automake().files.insert(path.into(), automake);
+            self.automake_mut().files.insert(path.into(), automake);
         }
         let files = self.automake().files.keys().cloned().collect::<Vec<_>>();
         self.project_info.am_files.extend(files);
@@ -165,7 +169,7 @@ impl Analyzer {
                         automake.include_paths.push(include_path.clone());
                         if !self.automake().files.contains_key(&include_path) {
                             let res = self.analyze_automake_file(&include_path);
-                            self.mut_automake().files.insert(include_path, res);
+                            self.automake_mut().files.insert(include_path, res);
                         }
                     }
                 }
@@ -179,7 +183,7 @@ impl Analyzer {
                         automake.sub_paths.push(sub_path.clone());
                         if !self.automake().files.contains_key(&sub_path) {
                             let res = self.analyze_automake_file(&sub_path);
-                            self.mut_automake().files.insert(sub_path, res);
+                            self.automake_mut().files.insert(sub_path, res);
                         }
                     }
                 }

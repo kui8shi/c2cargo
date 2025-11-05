@@ -2,7 +2,7 @@
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::utils::llm_analysis::{LLMAnalysis, LLMAnalysisInput, LLMAnalysisOutput};
+use crate::utils::llm_analysis::{LLMAnalysis, LLMAnalysisOutput};
 
 use super::BuildOption;
 
@@ -22,12 +22,6 @@ impl Serialize for BuildOption {
     }
 }
 
-impl LLMAnalysisInput<Vec<String>> for BuildOption {
-    fn get_evidence_for_validation(&self) -> &Vec<String> {
-        &self.value_candidates
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct BuildOptionLLMAnalysisResult {
     #[serde(default)]
@@ -39,12 +33,6 @@ pub(super) struct BuildOptionLLMAnalysisResult {
     pub enabled_by_default: Option<bool>,
     /// Name of the build option
     pub option_name: String,
-}
-
-impl BuildOptionLLMAnalysisResult {
-    fn normalize(&mut self) {
-        self.representatives.sort();
-    }
 }
 
 impl LLMAnalysisOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
@@ -256,7 +244,7 @@ impl LLMAnalysis for LLMUser {
 }"#
     }
 
-    fn extraction_prompt(&self) -> &'static str {
+    fn instruction_prompt(&self) -> &'static str {
         r#"
 You will be given Autotools fragments (configure.ac/configure shell, m4 macros, Makefile.am snippets, and related variable logic). For each build option, extract only the minimal facts below and return JSON conforming exactly to the schema. Output JSON only.
 

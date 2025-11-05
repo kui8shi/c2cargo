@@ -1,20 +1,21 @@
 use autotools_parser::ast::node::NodeId;
+use bincode::{Decode, Encode};
 
 use super::Analyzer;
 
 pub(super) type ExecId = usize;
 
-#[derive(Debug, Clone, PartialEq, Eq, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Ord, Hash, Encode, Decode)]
 pub(crate) struct Location {
     pub node_id: NodeId,
     pub exec_id: ExecId,
-    pub order: usize,
+    pub order_in_expr: usize,
     pub line: usize,
 }
 
 impl PartialOrd for Location {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((self.exec_id, self.order).cmp(&(other.exec_id, other.order)))
+        Some((self.exec_id, self.order_in_expr).cmp(&(other.exec_id, other.order_in_expr)))
     }
 }
 
@@ -23,7 +24,7 @@ impl Analyzer {
         Location {
             node_id,
             exec_id: self.get_node(node_id).unwrap().info.exec_id,
-            order: 0,
+            order_in_expr: 0,
             line: self.get_node(node_id).unwrap().range_start().unwrap(),
         }
     }
@@ -32,7 +33,7 @@ impl Analyzer {
         Location {
             node_id,
             exec_id: self.get_node(node_id).unwrap().info.exit,
-            order: 0,
+            order_in_expr: 0,
             line: self.get_node(node_id).unwrap().range_end().unwrap(),
         }
     }

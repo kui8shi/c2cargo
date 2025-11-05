@@ -1,7 +1,6 @@
 //! Structs & Methods for Making Dictionary Instances
 use std::collections::HashMap;
 
-use autotools_parser::ast::node::NodeId;
 use itertools::Itertools;
 
 use super::{
@@ -17,7 +16,6 @@ use super::{
 pub(crate) enum DictionaryOperation {
     Read,
     Write,
-    Append,
 }
 
 /// Represents the operation on the dictionary types
@@ -27,15 +25,37 @@ pub(crate) enum DictionaryKey {
     Var(String),
 }
 
+impl DictionaryKey {
+    pub(crate) fn print(&self) -> String {
+        use DictionaryKey::*;
+        match self {
+            Lit(lit) => format!("\"{}\".to_string()", lit),
+            Var(var) => format!("{}.to_string()", var),
+        }
+    }
+}
+
+/// Represents the value assigned to the dictionary
+#[derive(Debug, PartialEq, Eq, Clone)]
+pub(crate) enum DictionaryValue {
+    Lit(String),
+    Var(String),
+    Dict(String, Location),
+}
+
 /// Saving the result of dictionary type inference.
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) struct DictionaryAccess {
     // Tells whether are we reading/writing to the dictionary.
-    operation: DictionaryOperation,
+    pub operation: DictionaryOperation,
     // The keys needed to access to the dictionary equivalently as the original script.
-    keys: Vec<DictionaryKey>,
+    pub keys: Vec<DictionaryKey>,
     // The variable name in the original script.
-    raw_name: Option<String>,
+    pub raw_name: Option<String>,
+    // Right-hand-side values writing to the dictionary.
+    pub assigned_to: Option<String>,
+    // Right-hand-side values writing to the dictionary.
+    pub assigned_value: Option<Vec<DictionaryValue>>,
 }
 
 /// Represent the newly developped dictionary instance
@@ -43,11 +63,11 @@ pub(crate) struct DictionaryAccess {
 pub(crate) struct DictionaryInstance {
     // The name of the dictionary instance.
     // It should not collide with any other dictionary instances.
-    name: String,
+    pub name: String,
     // Represent the behaviors of access to the instance.
-    accesses: HashMap<NodeId, DictionaryAccess>,
+    pub accesses: HashMap<Location, DictionaryAccess>,
     // The inferred type of the values
-    value_type: DataType,
+    pub value_type: DataType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -71,14 +91,16 @@ struct DictionaryAccessRecipe {
     keys: Option<Vec<DictionaryKey>>,
     raw_name: Option<String>,
     assigned_to: Option<String>,
+    assigned_value: Option<Vec<DictionaryValue>>,
 }
 
 #[derive(Debug, Default)]
 struct DictionaryInstanceRecipe {
-    accesses: HashMap<NodeId, DictionaryAccessRecipe>,
+    accesses: HashMap<Location, DictionaryAccessRecipe>,
     name_candidates: Vec<String>,
     confirmed_name: Option<String>,
     value_type: Option<DataType>,
+    last_loc: Option<Location>,
 }
 
 fn encode_identifier(ident: &Identifier) -> DictId {
@@ -116,65 +138,170 @@ fn strip_underscore(s: &str) -> String {
     s.split("_").filter(|s| !s.is_empty()).join("_")
 }
 
-fn find_dictionary_from_eval_assignment(
+fn make_dictionary_value(value_expr: &ValueExpr, eval_loc: &Location) -> Vec<DictionaryValue> {
+    match value_expr {
+        ValueExpr::Lit(lit) => vec![DictionaryValue::Lit(lit.clone())],
+        ValueExpr::Var(var, _) => vec![DictionaryValue::Var(var.clone())],
+        ValueExpr::Concat(value_exprs) => value_exprs
+            .iter()
+            .map(|v| make_dictionary_value(v, eval_loc))
+            .flatten()
+            .collect(),
+        v @ ValueExpr::DynName(_) => {
+            let ident: Option<Identifier> = v.into();
+            let mut loc = eval_loc.clone();
+            // FIXME: incorrect.
+            loc.order_in_expr = loc.order_in_expr.saturating_sub(1);
+            vec![DictionaryValue::Dict(
+                // will be replaced with the dictionary name later
+                encode_identifier(&ident.unwrap()).0,
+                loc.clone(),
+            )]
+        }
+        _ => todo!("Shell commands in eval statements are unsupported"),
+    }
+}
+
+fn search_dictionary_from_eval_assignment_rhs(
     lhs: &Identifier,
     rhs: &Option<ValueExpr>,
-) -> (
+) -> Option<(
     DictId,
-    DictionaryOperation,
     Vec<DictionaryKey>,
-    Option<String>,
+    DictionaryOperation,
     Vec<String>,
-) {
-    let rhs: Option<Identifier> = rhs.as_ref().and_then(|e| e.into());
-    if rhs.as_ref().is_some_and(|ident| ident.is_indirect()) {
-        let rhs_as_ident = rhs.unwrap();
-        let dict_id = encode_identifier(&rhs_as_ident);
+    Option<String>,
+    Option<Vec<DictionaryValue>>,
+)> {
+    if let Some(rhs) = rhs {
+        // FIXME: The cases where two differennt dicts used in a single eval are out of scope.
+        // In other words, we are expecting all indirect identifiers in this eval assignment
+        // refer to the same dictionary.
+        let rhs_as_ident: Option<Identifier> = rhs.into();
+        if rhs_as_ident
+            .as_ref()
+            .is_some_and(|ident| ident.is_indirect())
+        {
+            let rhs_as_ident = rhs_as_ident.unwrap();
+            let dict_id = encode_identifier(&rhs_as_ident);
+            let vars = rhs_as_ident.vars().unwrap();
+            let keys = vars.into_iter().map(DictionaryKey::Var).collect();
+            let op = DictionaryOperation::Read;
+            let names = vec![
+                // prefer the name created from rhs
+                make_dictionary_variable_name(&dict_id),
+                make_dictionary_variable_name(&encode_identifier(lhs)),
+            ];
+            let assigned_to = if let Identifier::Name(var) = lhs {
+                Some(var.into())
+            } else {
+                dbg!(&lhs);
+                None
+            };
 
-        let operation = if lhs.is_indirect() {
-            // the dictionary must be on both lhs & rhs
-            DictionaryOperation::Append
-        } else {
-            // the dictionary must be on rhs
-            DictionaryOperation::Read
-        };
+            return Some((dict_id, keys, op, names, assigned_to, None));
+        }
+    }
+    None
+}
 
-        let vars = rhs_as_ident.vars().unwrap();
+fn search_dictionary_from_eval_assignment_lhs(
+    lhs: &Identifier,
+    rhs: &Option<ValueExpr>,
+    eval_loc: &Location,
+) -> Option<(
+    DictId,
+    Vec<DictionaryKey>,
+    DictionaryOperation,
+    Vec<String>,
+    Option<String>,
+    Option<Vec<DictionaryValue>>,
+)> {
+    let dict_id = encode_identifier(lhs);
+    if lhs.is_indirect() {
+        // the dictionary must be on lhs
+        let vars = lhs.vars().unwrap();
         let keys = vars.into_iter().map(DictionaryKey::Var).collect();
-
-        let assigned_to = if let Identifier::Name(var) = lhs {
-            Some(var.into())
+        let op = DictionaryOperation::Write;
+        let names = vec![make_dictionary_variable_name(&dict_id)];
+        let assigned_value = if let Some(rhs) = rhs {
+            Some(make_dictionary_value(rhs, eval_loc))
         } else {
             None
         };
 
-        let name_candidates = vec![
-            // prefer the name created from rhs
-            make_dictionary_variable_name(&dict_id),
-            make_dictionary_variable_name(&encode_identifier(lhs)),
-        ];
-
-        (dict_id, operation, keys, assigned_to, name_candidates)
+        Some((dict_id, keys, op, names, None, assigned_value))
     } else {
-        // the dictionary must be on lhs
-        let dict_id = encode_identifier(lhs);
-
-        let operation = DictionaryOperation::Write;
-
-        let vars = lhs.vars().unwrap();
-        let keys = vars.into_iter().map(DictionaryKey::Var).collect();
-
-        let assigned_to = None;
-
-        let name_candidates = vec![make_dictionary_variable_name(&dict_id)];
-
-        (dict_id, operation, keys, assigned_to, name_candidates)
+        None
     }
 }
 
 impl Analyzer {
     pub(crate) fn make_dictionary_instances(&mut self) {
         self.dicts.replace(self._make_dictionary_instances());
+    }
+
+    fn inspect_eval_assignment(
+        &self,
+        recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
+        lhs: &Identifier,
+        rhs: &Option<ValueExpr>,
+        mut eval_loc: Location,
+    ) {
+        let _num_vars_in_lhs = lhs.vars().map(|v| v.len()).unwrap_or(0);
+        let _num_vars_in_rhs = rhs
+            .as_ref()
+            .map(|r| r.vars().map(|v| v.len()))
+            .flatten()
+            .unwrap_or(0);
+
+        // Currently this ordering is determined independently of what is
+        // assigned to the non-dictionary variables in the node,
+        // so there is a possibility that inconsistencies may arise in
+        // situations where particular care must be taken
+        // with regard to the order within a node.
+        eval_loc.order_in_expr = 0; //num_vars_in_lhs + num_vars_in_rhs;
+        for result in [
+            search_dictionary_from_eval_assignment_rhs(lhs, rhs),
+            search_dictionary_from_eval_assignment_lhs(lhs, rhs, &eval_loc),
+        ] {
+            if let Some((dict_id, keys, operation, name_candidates, assigned_to, assigned_value)) =
+                result
+            {
+                //assert!(!dict_id.0.is_empty());
+                let recipe = recipes.entry(dict_id.clone()).or_default();
+
+                let access = recipe.accesses.entry(eval_loc.clone()).or_default();
+                access.operation.replace(operation);
+                access.keys.replace(keys);
+                access.assigned_to = assigned_to;
+                access.assigned_value = assigned_value;
+                // add candidates of the dictionary name
+                for name_candidate in name_candidates {
+                    if !name_candidate.is_empty() {
+                        if !recipe.name_candidates.contains(&name_candidate) {
+                            recipe.name_candidates.push(name_candidate);
+                        }
+                    }
+                }
+
+                // record latest eval locations for the read-only dictionary
+                if recipe
+                    .accesses
+                    .values()
+                    .all(|a| matches!(a.operation, Some(DictionaryOperation::Read)))
+                {
+                    if let Some(old_loc) = &recipe.last_loc {
+                        recipe.last_loc.replace(old_loc.max(&eval_loc).clone());
+                    } else {
+                        recipe.last_loc.replace(eval_loc.clone());
+                    }
+                } else {
+                    recipe.last_loc = None;
+                }
+                eval_loc.order_in_expr += 1;
+            }
+        }
     }
 
     fn _make_dictionary_instances(&self) -> Vec<DictionaryInstance> {
@@ -185,29 +312,11 @@ impl Analyzer {
             .iter()
             .flat_map(|(ident, evals)| std::iter::repeat(ident).zip(evals.into_iter()))
         {
-            let (dict_id, operation, keys, assigned_to, name_candidates) =
-                find_dictionary_from_eval_assignment(identifier, expr);
-            assert!(!dict_id.0.is_empty());
-
-            let recipe = recipes.entry(dict_id.clone()).or_default();
-
-            let access = recipe.accesses.entry(eval_loc.node_id).or_default();
-            access.operation.replace(operation);
-            access.keys.replace(keys);
-            access.assigned_to = assigned_to;
-
-            // add candidates of the dictionary name
-            for candidate in name_candidates {
-                if !candidate.is_empty() {
-                    if !recipe.name_candidates.contains(&candidate) {
-                        recipe.name_candidates.push(candidate);
-                    }
-                }
-            }
+            self.inspect_eval_assignment(&mut recipes, identifier, expr, eval_loc.clone());
         }
 
         // confirm names of dictionaries
-        self.confirm_names_of_directories(&mut recipes);
+        let names = self.confirm_names_of_directories(&mut recipes);
 
         // enumerate dictionary access
         self.enumerate_dictionary_accesses(&mut recipes);
@@ -226,9 +335,25 @@ impl Analyzer {
                         (
                             k,
                             DictionaryAccess {
+                                // unwrap all optional fields
                                 operation: v.operation.unwrap(),
                                 keys: v.keys.unwrap(),
                                 raw_name: v.raw_name,
+                                assigned_to: v.assigned_to,
+                                assigned_value: v.assigned_value.map(|vals| {
+                                    // replace dict_id with confirmed dictionary name
+                                    vals.into_iter()
+                                        .map(|v| match v {
+                                            DictionaryValue::Dict(id, loc) => {
+                                                DictionaryValue::Dict(
+                                                    names[&id.into()].clone(),
+                                                    loc,
+                                                )
+                                            }
+                                            v => v,
+                                        })
+                                        .collect()
+                                }),
                             },
                         )
                     })
@@ -246,7 +371,7 @@ impl Analyzer {
     fn confirm_names_of_directories(
         &self,
         recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
-    ) {
+    ) -> HashMap<DictId, String> {
         let mut confirmed_names: HashMap<String, DictId> = Default::default();
         let mut spare_name_index = 0;
         let name_candidates = recipes
@@ -276,6 +401,7 @@ impl Analyzer {
                     unique_name
                 } else {
                     // alternative strategy 2: default names for anonymous dictionaries
+                    // I guess we rarely use this strategy though.
                     let name = format!("dict_{}", spare_name_index);
 
                     // if such a weird name is already defined, just give up.
@@ -287,14 +413,15 @@ impl Analyzer {
             };
             confirmed_names.insert(name, dict_id.clone());
         }
-        for (name, dict_id) in confirmed_names {
+        for (name, dict_id) in confirmed_names.iter() {
             recipes
-                .get_mut(&dict_id)
+                .get_mut(dict_id)
                 .unwrap()
                 .confirmed_name
-                .replace(name);
+                .replace(name.to_owned());
         }
         assert!(recipes.values().all(|r| r.confirmed_name.is_some()));
+        confirmed_names.into_iter().map(|(k, v)| (v, k)).collect()
     }
 
     /// returns a map from location to accesses to variable as dictionary
@@ -303,63 +430,58 @@ impl Analyzer {
         recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
     ) {
         for (full_name, divided) in self.divided_vars.as_ref().unwrap().iter() {
-            let mut idents = divided
-                .values()
-                .map(|div| encode_identifier(&div.division))
-                .collect::<Vec<_>>();
-            // make sure that a divided variable corresponds to exactly one dictionary.
-            assert!(idents.iter().all_equal());
-            let dict_id = idents.pop().unwrap();
-            assert!(!divided.is_empty());
+            let dict_id = {
+                let mut idents = divided
+                    .eval_locs
+                    .values()
+                    .map(|div| encode_identifier(&div.division))
+                    .collect::<Vec<_>>();
+                // make sure that a divided variable corresponds to exactly one dictionary.
+                assert!(idents.iter().all_equal());
+                idents.pop().unwrap()
+            };
+            assert!(!divided.eval_locs.is_empty());
             let mut keys_for_evals = divided
+                .eval_locs
                 .iter()
                 .map(|(_, div)| div.mapping.iter().map(|(_, v)| v).collect::<Vec<_>>());
             let dict_keys = if !keys_for_evals.clone().all_equal() {
                 // Detected omission of keys. We need to find what keys are omitted.
                 let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
-                self.fill_up_omissions_of_dictionary_keys(accesses, &divided)
+                self.fill_up_omissions_of_dictionary_keys(accesses, &divided.eval_locs)
             } else {
                 let keys = keys_for_evals.next().unwrap().clone();
                 keys.into_iter()
                     .map(|v| DictionaryKey::Lit(strip_underscore(v)))
                     .collect::<Vec<_>>()
             };
-            let def_locs = self.get_all_definition(full_name.as_str(), None);
-            let use_locs = self.get_all_usages_before(full_name.as_str(), None, false);
 
-            for loc in def_locs {
+            for def_loc in &divided.def_locs {
                 let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
                 accesses.insert(
-                    loc.node_id,
+                    def_loc.clone(),
                     DictionaryAccessRecipe {
                         operation: Some(DictionaryOperation::Write),
                         keys: Some(dict_keys.clone()),
                         raw_name: Some(full_name.to_owned()),
                         assigned_to: None,
+                        assigned_value: None,
                     },
                 );
             }
 
-            for use_loc in use_locs {
-                if let Some(access) = recipes
-                    .get_mut(&dict_id)
-                    .unwrap()
-                    .accesses
-                    .get_mut(&use_loc.node_id)
-                {
-                    access.operation.replace(DictionaryOperation::Append);
-                } else {
-                    let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
-                    accesses.insert(
-                        use_loc.node_id,
-                        DictionaryAccessRecipe {
-                            operation: Some(DictionaryOperation::Read),
-                            keys: Some(dict_keys.clone()),
-                            raw_name: Some(full_name.to_owned()),
-                            assigned_to: None,
-                        },
-                    );
-                }
+            for use_loc in &divided.use_locs {
+                let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
+                accesses.insert(
+                    use_loc.clone(),
+                    DictionaryAccessRecipe {
+                        operation: Some(DictionaryOperation::Read),
+                        keys: Some(dict_keys.clone()),
+                        raw_name: Some(full_name.to_owned()),
+                        assigned_to: None,
+                        assigned_value: None,
+                    },
+                );
             }
         }
         assert!(recipes.values().all(|r| r
@@ -376,7 +498,7 @@ impl Analyzer {
 
     fn fill_up_omissions_of_dictionary_keys(
         &self,
-        accesses: &mut HashMap<NodeId, DictionaryAccessRecipe>,
+        accesses: &mut HashMap<Location, DictionaryAccessRecipe>,
         division: &HashMap<Location, IdentifierDivision>,
     ) -> Vec<DictionaryKey> {
         // The idea is that there must be a division where a key is evaluated to an empty string.
@@ -410,7 +532,7 @@ impl Analyzer {
                 filled_up_keys.push(key);
             }
             accesses
-                .get_mut(&eval_loc.node_id)
+                .get_mut(&eval_loc)
                 .unwrap()
                 .keys
                 .replace(filled_up_keys);
@@ -426,13 +548,15 @@ impl Analyzer {
         recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
     ) {
         for recipe in recipes.values_mut() {
-            let mut value_type = None;
+            let mut value_type: Option<DataType> = None;
             for access in recipe.accesses.values_mut() {
                 let inferred = self.infer_dictionary_value_type(access);
-                if DataType::Literal != inferred {
-                    // FIXME more refined type merging needed
+                if let Some(old) = value_type.clone() {
+                    if old.priority() < inferred.priority() {
+                        value_type.replace(inferred);
+                    }
+                } else {
                     value_type.replace(inferred);
-                    break;
                 }
             }
             let value_type = value_type.unwrap_or(DataType::Literal);
@@ -442,18 +566,33 @@ impl Analyzer {
 
     fn infer_dictionary_value_type(&self, access: &DictionaryAccessRecipe) -> DataType {
         if let Some(raw_name) = &access.raw_name {
-            if let Some((_, ty)) = self.get_inferred_type(raw_name) {
+            if let Some((_, ty)) = self.get_type_inference_result(raw_name) {
                 return ty.clone();
             }
         }
 
         if let Some(assigned_to) = &access.assigned_to {
-            if let Some((_, ty)) = self.get_inferred_type(assigned_to) {
+            if let Some((_, ty)) = self.get_type_inference_result(assigned_to) {
                 return ty.clone();
             }
         }
 
         DataType::Literal
+    }
+
+    pub(crate) fn get_dict(&self, name: &str) -> Option<&DictionaryInstance> {
+        self.dicts.as_ref().unwrap().iter().find(|d| d.name == name)
+    }
+
+    pub(crate) fn print_dictionary_type(&self, name: &str) -> String {
+        let dict = self.get_dict(name).unwrap();
+        let num_keys = dict.accesses.values().next().map(|a| a.keys.len()).unwrap();
+        let key_type = match num_keys {
+            1 => "String".into(),
+            _ => format!("({})", std::iter::repeat("String").take(num_keys).join(", ")),
+        };
+        let value_type = dict.value_type.print();
+        format!("HashMap<{}, {}>", key_type, value_type)
     }
 }
 

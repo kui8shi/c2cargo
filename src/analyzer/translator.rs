@@ -1,27 +1,26 @@
 use itertools::Itertools;
 use std::collections::HashSet;
+use use_llm::{TranslationEvidence, TranslationInput};
 
-use serde::{Deserialize, Serialize};
-
-use crate::utils::llm_analysis::{LLMAnalysis, LLMAnalysisInput, LLMAnalysisOutput};
+use crate::{analyzer::type_inference::DataType, utils::llm_analysis::LLMAnalysis};
 
 use super::Analyzer;
 
+mod printer;
+mod use_llm;
+
 impl Analyzer {
     /// Analyze commands and build the dependency graph
-    pub fn translate(&mut self) {
+    pub async fn translate(&mut self) {
         println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
-
-        println!("Constructed {} chunks", self.chunks.len());
-
         let mut exported = HashSet::new();
-        // First, collect I/O for all chunks
         for (i, chunk) in self.chunks.iter() {
-            exported.extend(chunk.exported.clone());
+            exported.extend(chunk.io.exported.clone());
             let last_id = *chunk.nodes.last().unwrap();
             println!(
-                "Chunk {}: nodes {:?} , exit {:?}: imports {:?}, exports {:?}, bounds: {:?}",
+                "Chunk {}: parent: {:?}, nodes {:?} , exit {:?}",
                 i,
+                chunk.parent,
                 chunk
                     .nodes
                     .iter()
@@ -39,120 +38,165 @@ impl Analyzer {
                     ))
                     .collect::<Vec<_>>(),
                 self.get_node(last_id).unwrap().info.exit,
-                chunk.imported,
-                chunk.exported,
-                chunk.bounded,
             );
+            println!("signature: {}", self.print_chunk_skeleton_signature(i));
+            println!("header: {:?}", self.print_chunk_skeleton_body_header(i));
+            println!("footer: {}", self.print_chunk_skeleton_body_footer(i));
+            println!(
+                "callsite: {}",
+                self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
+            );
+            let printer = printer::TranslatingPrinter::new(&self);
             for &id in chunk.nodes.iter() {
-                println!("{}", &self.display_node(id));
+                println!("{}", &printer.print_node(id));
             }
         }
-        dbg!(&self.scopes);
+        println!("======================");
+        let _env_init = self
+            .env_vars
+            .as_ref()
+            .unwrap()
+            .iter()
+            .sorted()
+            .map(|name| {
+                let data_type = self.get_inferred_type(name);
+                let expression = match &data_type {
+                    DataType::Bool => format!("option_env!(\"{}\").is_some()", &name),
+                    DataType::Integer => {
+                        format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
+                    }
+                    DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => format!(
+                        "option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()",
+                        &name
+                    ),
+                    DataType::Literal | DataType::Either(_, _) => format!(
+                        "option_env!(\"{}\").unwrap_or_default().to_owned()",
+                        &name
+                    ),
+                    DataType::Path => format!("option_env!(\"{}\").unwrap_or(\"\").into()", &name),
+                    _ => todo!(),
+                };
+                let write_exists =
+                    self.get_scopes(name.as_str())
+                        .unwrap()
+                        .first()
+                        .is_some_and(|scope| {
+                            !scope.writers.is_empty() || !scope.overwriters.is_empty()
+                        });
+                let mutability = if write_exists { "mut " } else { "    " };
+                format!(
+                    "let {}{}: {} = {};",
+                    mutability,
+                    name,
+                    data_type.print(),
+                    expression
+                )
+            })
+            .collect::<Vec<_>>();
+        let _default_init = self
+            .var_usages
+            .as_ref()
+            .unwrap()
+            .keys()
+            .filter(|var_name| !self.env_vars.as_ref().unwrap().contains(var_name.as_str()))
+            .filter(|var_name| {
+                self.get_scopes(var_name.as_str()).is_some_and(|scopes| {
+                    scopes
+                        .first()
+                        .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
+                })
+            })
+            .sorted()
+            .map(|name| {
+                let data_type = self.get_inferred_type(name);
+                let mutability = if self
+                    .get_scopes(name.as_str())
+                    .unwrap()
+                    .first()
+                    .is_some_and(|scope| !scope.writers.is_empty() || !scope.overwriters.is_empty())
+                {
+                    "mut "
+                } else {
+                    "    "
+                };
+                format!(
+                    "let {}{}: {} = Default::default();",
+                    mutability,
+                    name,
+                    data_type.print()
+                )
+            })
+            .collect::<Vec<_>>();
+        self.translate_chunks().await;
     }
-}
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct TranslationInput {
-    script: String,
-    signature: String,
-}
+    /// Translate chunk using LLMs
+    pub(crate) async fn translate_chunks(&self) {
+        let mut user = use_llm::LLMUser::new();
+        let mut inputs = Vec::new();
+        for (chunk_id, _) in self.chunks.iter().skip(276).take(1) {
+            // for chunk_id in [124] {
+            // conduct llm analysis
+            let printer = printer::TranslatingPrinter::new(self);
+            let script = self
+                .chunks
+                .get(chunk_id)
+                .unwrap()
+                .nodes
+                .iter()
+                .map(|nid| format!("{}", &printer.print_node(*nid)))
+                .join("\n");
+            let header = format!(
+                "{} {{{}\n  ",
+                self.print_chunk_skeleton_signature(chunk_id),
+                {
+                    let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n  ");
+                    if header.is_empty() {
+                        "".into()
+                    } else {
+                        format!("\n  {}", header)
+                    }
+                }
+            );
+            let footer = format!("{}\n}}", {
+                let footer = self.print_chunk_skeleton_body_footer(chunk_id);
+                if footer.is_empty() {
+                    "".into()
+                } else {
+                    format!("\n  {}", footer)
+                }
+            });
+            let skeleton = format!("{}{{body}}{}", header, footer);
+            let required_funcs = printer.get_required_rust_funcs();
+            println!("{}: {}", chunk_id, &skeleton);
+            println!("Chunk {} (Before):\n{}", chunk_id, &script);
+            let input = TranslationInput::new(chunk_id, script, skeleton.clone(), &required_funcs);
+            let evidence = TranslationEvidence {
+                fixed_values: printer.collect_translated_fragments(),
+                header,
+                footer,
+            };
+            inputs.push((input, evidence));
+        }
 
-impl LLMAnalysisInput<()> for TranslationInput {
-    fn get_evidence_for_validation(&self) -> &() {
-        &()
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct TranslationOutput {
-    rust_func_body: String,
-}
-
-impl LLMAnalysisOutput<()> for TranslationOutput {
-    /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
-    /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
-    fn validate(&self, values: &()) -> Result<(), Vec<String>> {
-        Ok(())
-    }
-}
-
-pub(super) struct LLMUser {}
-
-impl LLMAnalysis for LLMUser {
-    type Evidence = ();
-    type Input = TranslationInput;
-    type Output = TranslationOutput;
-
-    fn new() -> Self {
-        Self {}
-    }
-
-    fn schema_text(&self) -> &'static str {
-        r#"{
-  "type": "object",
-  "required": [
-    "rust_func_body"
-  ],
-  "properties": {
-    "rust_func_body": { "type": "string" }
-  },
-  "additionalProperties": false
-}"#
-    }
-
-    fn extraction_prompt(&self) -> &'static str {
-        r#"
-You are an expert C-to-Rust migration assistant. Your task is to translate Autotools/shell script fragments into equivalent Rust function bodies.
-
-Input format:
-{ "script": "...", "signature": "..." }
-
-The "script" contains the original shell/autotools code that needs translation.
-The "signature" contains the target Rust function signature that the body should implement.
-
-Translation Guidelines:
-
-1. **Shell Command Translation**:
-   - Convert shell commands to appropriate Rust std::process::Command calls
-   - Use proper error handling with Result<T, E> return types
-   - Replace shell variable expansions with Rust string formatting
-   - Convert shell conditionals to Rust if/match statements
-
-2. **Variable Handling**:
-   - Convert shell variables to Rust variables with appropriate types
-   - Use String for text, bool for flags, Vec<String> for lists
-   - Handle environment variables with std::env::var()
-
-3. **File Operations**:
-   - Replace shell file tests with std::fs and std::path operations  
-   - Use Path::exists(), is_file(), is_dir() instead of [ -f ], [ -d ]
-   - Convert file reading/writing to proper Rust I/O
-
-4. **Error Handling**:
-   - Always use proper Rust error handling patterns
-   - Return Result types for fallible operations
-   - Use ? operator for error propagation where appropriate
-
-5. **Dependencies**:
-   - Only use standard library unless absolutely necessary
-   - If external crates needed, prefer common ones like serde, regex, etc.
-
-6. **Code Style**:
-   - Follow Rust naming conventions (snake_case)
-   - Add appropriate type annotations
-   - Use idiomatic Rust patterns and constructs
-
-Example Translation:
-Shell: if [ -f "$CONFIG_FILE" ]; then echo "Found config"; fi
-Rust: if std::path::Path::new(&config_file).exists() { println!("Found config"); }
-
-Return only the Rust function body that implements the signature. Do not include the function declaration itself.
-
-Strictness:
-- Return exactly one top-level, minified JSON object.
-- No comments or extra keys.  
-- Output must validate against the schema.
-- The rust_func_body should be complete, compilable Rust code.
-"#
+        let results = user
+            .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
+            .await;
+        for res in results {
+            let func_def = format!(
+                "fn {}{} {{\n  {}\n}}",
+                res.rust_func_name,
+                self.print_chunk_skeleton_signature(res.id),
+                self.print_chunk_skeleton_body_header(res.id)
+                    .into_iter()
+                    .chain(res.rust_func_body.split("\n").map(|s| s.to_owned()))
+                    .chain(std::iter::once(
+                        self.print_chunk_skeleton_body_footer(res.id)
+                    ))
+                    .filter(|s| !s.is_empty())
+                    .join("\n  "),
+            );
+            println!("Chunk {} (After):\n{}", res.id, func_def)
+        }
     }
 }

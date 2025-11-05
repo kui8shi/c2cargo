@@ -8,10 +8,6 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;
 
-pub(crate) trait LLMAnalysisInput<E>: std::fmt::Debug + Clone + Serialize {
-    fn get_evidence_for_validation(&self) -> &E;
-}
-
 pub(crate) trait LLMAnalysisOutput<E>:
     std::fmt::Debug + Serialize + DeserializeOwned
 {
@@ -24,46 +20,47 @@ pub(crate) trait LLMAnalysisOutput<E>:
 
 pub(crate) trait LLMAnalysis {
     type Evidence;
-    type Input: LLMAnalysisInput<Self::Evidence>;
+    type Input: std::fmt::Debug + Clone + Serialize;
     type Output: LLMAnalysisOutput<Self::Evidence>;
 
-    const MODEL: &str = "gpt-5-nano";
+    const MODEL: &str = "gpt-5-mini";
 
     fn new() -> Self;
 
-    /// Analyze various properties of build options using LLMs
-    async fn run_llm_analysis<'a, I: Iterator<Item = &'a Self::Input>>(
+    async fn run_llm_analysis<'a, I: Iterator<Item = (&'a Self::Input, &'a Self::Evidence)>>(
         &'a mut self,
         inputs: I,
     ) -> Vec<Self::Output> {
-        futures::stream::iter(inputs.map(|input| self.make_api_request_with_retry(input)))
-            .buffer_unordered(10)
-            .then(|result| async move {
-                match result {
-                    Ok(analysis) => Some(analysis),
-                    Err(e) => {
-                        eprintln!("Failed to analyze build option: {}", e);
-                        None
-                    }
+        futures::stream::iter(
+            inputs.map(|(input, evidence)| self.make_api_request_with_retry(input, evidence)),
+        )
+        .buffer_unordered(10)
+        .then(|result| async move {
+            match result {
+                Ok(analysis) => Some(analysis),
+                Err(e) => {
+                    eprintln!("Failed to run LLM analysis: {}", e);
+                    None
                 }
-            })
-            .filter_map(|opt| async move { opt })
-            .collect()
-            .await
+            }
+        })
+        .filter_map(|opt| async move { opt })
+        .collect()
+        .await
     }
 
     fn schema_text(&self) -> &'static str;
 
-    fn extraction_prompt(&self) -> &'static str;
+    fn instruction_prompt(&self) -> &'static str;
 
     /// Package the schema + prompt + user fragments into one user message.
     fn compose_user_content(&self, input: &Self::Input) -> String {
-        serde_json::json!({
-            "schema": serde_json::from_str::<serde_json::Value>(self.schema_text()).unwrap(),
-            "instruction": self.extraction_prompt(),
-            "input": input
-        })
-        .to_string()
+        format!(
+            "{}\n## Input\n{}\n### Output Schema\n{}",
+            self.instruction_prompt(),
+            serde_json::json!(input),
+            self.schema_text(),
+        )
     }
 
     fn compose_user_content_with_feedback(
@@ -76,7 +73,7 @@ pub(crate) trait LLMAnalysis {
 
         let mut extra = String::new();
         if let Some(j) = prev_json {
-            extra.push_str("\n\n# PreviousInvalidJSON\n");
+            extra.push_str("\n\n# PreviousInvalidOutput\n");
             extra.push_str(j);
             extra.push('\n');
         }
@@ -95,9 +92,10 @@ pub(crate) trait LLMAnalysis {
     async fn make_api_request_with_retry(
         &self,
         input: &Self::Input,
+        evidence: &Self::Evidence,
     ) -> Result<Self::Output, String> {
         const MAX_RETRIES: usize = 3;
-        const RETRY_DELAY_MS: u64 = 1000;
+        const RETRY_DELAY_MS: u64 = 5000;
 
         let api_key = std::env::var("OPENAI_API_KEY").unwrap_or("sk-TESTKEY".into());
 
@@ -110,7 +108,6 @@ pub(crate) trait LLMAnalysis {
                 .backend(LLMBackend::OpenAI)
                 .api_key(api_key.clone())
                 .model(Self::MODEL)
-                .stream(false)
                 .build()
                 .map_err(|e| format!("Failed to build LLM client: {}", e))?;
 
@@ -120,19 +117,21 @@ pub(crate) trait LLMAnalysis {
                 last_raw_json.as_deref(),
                 last_errors.as_deref(),
             );
+            println!("==========PROMPT {attempt}=========\n{prompt}");
             let msg = ChatMessage::user().content(prompt).build();
 
             match llm.chat(&[msg]).await {
                 Ok(response) => {
                     let text = response.text().ok_or("No text in response")?;
                     // println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
-                    // if let Some(usage) = response.usage() {
-                    //     show_cost(usage);
-                    // }
+                    if let Some(usage) = response.usage() {
+                        Self::show_cost(usage);
+                    }
 
                     match serde_json::from_str::<Self::Output>(&text) {
                         Ok(mut result) => {
-                            match result.validate(&input.get_evidence_for_validation()) {
+                            println!("Result {}:\n{:?}", attempt, result);
+                            match result.validate(evidence) {
                                 Ok(()) => {
                                     result.normalize();
                                     return Ok(result);
@@ -146,8 +145,9 @@ pub(crate) trait LLMAnalysis {
                                         continue;
                                     } else {
                                         return Err(format!(
-                                            "Validation failed after {} attempts: {:?}",
-                                            MAX_RETRIES, last_errors
+                                            "Validation failed after {} attempts:\n{}",
+                                            MAX_RETRIES,
+                                            last_errors.map(|v| v.join("\n")).unwrap_or_default()
                                         ));
                                     }
                                 }
@@ -170,23 +170,7 @@ pub(crate) trait LLMAnalysis {
                     }
                 }
                 Err(e) => {
-                    /*
-                    eprintln!(
-                        "API request error on attempt {} for option '{}': {}",
-                        attempt + 1,
-                        build_option.option_name,
-                        e
-                    );
-                    */
-                    if attempt < MAX_RETRIES - 1 {
-                        // eprintln!("Retrying in {}ms...", RETRY_DELAY_MS);
-                        sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
-                    } else {
-                        return Err(format!(
-                            "API request failed after {} attempts: {}",
-                            MAX_RETRIES, e
-                        ));
-                    }
+                    return Err(format!("API request failed: {}", e));
                 }
             }
         }

@@ -6,12 +6,13 @@ use super::{
     AcWord, Analyzer, MayM4, Parameter, ParameterSubstitution, ShellCommand, Word, WordFragment,
 };
 use autotools_parser::ast::node::{AcWordFragment, NodePool};
+use bincode::{Decode, Encode};
 use itertools::Itertools;
-use std::io::Write;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
 };
+use std::{io::Write, path::PathBuf, str::FromStr};
 
 /// Saving the result of backward traversal
 #[derive(Debug, PartialEq, Eq)]
@@ -39,8 +40,15 @@ impl Chain {
     }
 }
 
+#[derive(Debug, PartialEq, Eq, Default, Clone, Encode, Decode)]
+pub(crate) struct DividedVariable {
+    pub eval_locs: HashMap<Location, IdentifierDivision>,
+    pub def_locs: HashSet<Location>,
+    pub use_locs: HashSet<Location>,
+}
+
 /// Saving information how an identifier is divided via eval statements.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone, Encode, Decode)]
 pub(crate) struct IdentifierDivision {
     /// components of the divided identifier
     pub division: Identifier,
@@ -56,10 +64,11 @@ fn enumerate_combinations(combos: Vec<HashSet<String>>) -> Vec<Vec<String>> {
         .collect()
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Encode, Decode)]
 pub(crate) struct VSACache {
     resolved_identifiers: HashMap<Identifier, BTreeMap<Location, HashSet<String>>>,
     resolved_value_expresssions: HashMap<ValueExpr, HashSet<String>>,
+    recorded_divided_vars: HashMap<String, DividedVariable>,
 }
 
 impl Analyzer {
@@ -67,12 +76,13 @@ impl Analyzer {
         self.eval_assigns.as_ref().unwrap()
     }
 
-    pub(crate) fn divided_vars(&self) -> &HashMap<String, HashMap<Location, IdentifierDivision>> {
+    pub(crate) fn divided_vars(&self) -> &HashMap<String, DividedVariable> {
         self.divided_vars.as_ref().unwrap()
     }
 
     /// run value set analysis to obtain value candidates of variables appeared in eval statements.
     pub(crate) fn run_value_set_analysis(&mut self) {
+        self.deserialize_vsa_cache();
         self.divided_vars.replace(Default::default());
         self.var_indirect_usages.replace(Default::default());
 
@@ -80,22 +90,24 @@ impl Analyzer {
         let mut evals = self
             .eval_assigns()
             .iter()
-            .flat_map(|(l, v)| v.iter().zip(std::iter::repeat(l)))
-            .map(|((r, loc), l)| (l.clone(), r.clone(), loc.clone()))
+            .flat_map(|(ident, assigns)| assigns.iter().zip(std::iter::repeat(ident)))
+            .map(|((value, loc), ident)| (ident.clone(), value.clone(), loc.clone()))
             .collect::<Vec<_>>();
         evals.sort_by_key(|(_, _, loc)| loc.clone());
-        for (l, r, loc) in evals.iter() {
-            self.resolve_eval(&l, &r, &loc);
+        for (ident, value, loc) in evals.iter() {
+            self.resolve_eval(&ident, &value, &loc);
         }
+        self.divided_vars
+            .replace(self.vsa_cache.recorded_divided_vars.clone());
         // Add def use chains caused by dynamic identifier
         let mut def_use_edges = Vec::new();
         let mut new_locs = Vec::new();
         for (name, divided) in self.divided_vars().into_iter() {
             if let Some(def_locs) = self.get_definition(name) {
                 for def_loc in def_locs {
-                    for (ref_loc, _) in divided {
-                        def_use_edges.push((def_loc.node_id, ref_loc.node_id, name.to_owned()));
-                        new_locs.push((name.to_owned(), ref_loc.clone()));
+                    for (eval_loc, _) in &divided.eval_locs {
+                        def_use_edges.push((def_loc.node_id, eval_loc.node_id, name.to_owned()));
+                        new_locs.push((name.to_owned(), eval_loc.clone()));
                     }
                 }
             }
@@ -112,6 +124,7 @@ impl Analyzer {
             }
         }
         self.apply_def_use_edges(def_use_edges);
+        self.serialize_vsa_cache();
     }
 
     /// collect literals of a var
@@ -128,10 +141,10 @@ impl Analyzer {
         &mut self,
         identifier: Identifier,
         resolved: Vec<String>,
-        ref_loc: Location,
+        eval_loc: Location,
     ) {
         let name = resolved.concat();
-        if self.has_definition(name.as_str()) || self.has_usage(name.as_str()) {
+        if self.has_definition_before(name.as_str(), &eval_loc) || self.has_usage(name.as_str()) {
             let mut mapping = Vec::new();
             for (k, v) in identifier
                 .positional_vars()
@@ -142,13 +155,48 @@ impl Analyzer {
                     mapping.push((var, v));
                 }
             }
-            let division = identifier;
-            self.divided_vars
-                .as_mut()
-                .unwrap()
-                .entry(name)
-                .or_default()
-                .insert(ref_loc, IdentifierDivision { division, mapping });
+            let (def_locs, use_locs) = {
+                let all_def_locs = self.get_all_definition(&name, None);
+                let mut before_eval = Vec::new();
+                let mut after_eval = Vec::new();
+                for loc in all_def_locs {
+                    if loc < eval_loc {
+                        before_eval.push(loc);
+                    } else {
+                        after_eval.push(loc);
+                    }
+                }
+                let use_locs = self
+                    .get_all_usages(&name, false)
+                    .into_iter()
+                    .filter(|loc| {
+                        !self
+                            .get_dominant_definition(&name, loc.node_id)
+                            .is_some_and(|dom| {
+                                after_eval.contains(&dom)
+                                    || after_eval.iter().any(|def_loc| {
+                                        self.as_propagated_definition(&name, def_loc)
+                                            .is_some_and(|prop_def_loc| prop_def_loc == dom)
+                                    })
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                (before_eval, use_locs)
+            };
+            let div = self
+                .vsa_cache
+                .recorded_divided_vars
+                .entry(name.clone())
+                .or_default();
+            div.eval_locs.insert(
+                eval_loc.clone(),
+                IdentifierDivision {
+                    division: identifier,
+                    mapping,
+                },
+            );
+            div.def_locs.extend(def_locs);
+            div.use_locs.extend(use_locs);
         }
     }
 
@@ -611,6 +659,21 @@ impl Analyzer {
                 .split_whitespace()
                 .filter_map(|s| (!s.is_empty()).then_some(s.to_owned()))
                 .collect()
+        }
+    }
+
+    fn serialize_vsa_cache(&self) {
+        let path = PathBuf::from_str("/tmp/vsa_cache.bin").unwrap();
+        let config = bincode::config::standard();
+        let content = bincode::encode_to_vec(&self.vsa_cache, config).unwrap();
+        std::fs::write(path, content).unwrap();
+    }
+
+    fn deserialize_vsa_cache(&mut self) {
+        let path = PathBuf::from_str("/tmp/vsa_cache.bin").unwrap();
+        if let Ok(content) = std::fs::read(path) {
+            let config = bincode::config::standard();
+            self.vsa_cache = bincode::decode_from_slice(&content, config).unwrap().0;
         }
     }
 }

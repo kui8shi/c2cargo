@@ -196,9 +196,15 @@ impl<'a> Flattener<'a> {
     /// a brace node to maintain the hierarchical structure while keeping the
     /// parent command at the top level
     fn insert_brace(&mut self, parent: NodeId, children: &[NodeId]) -> NodeId {
-        let old_block_id = self._block_id_of_nodes(children);
+        let children_block_id = self._block_id_of_nodes(children);
 
         // create a new brace node
+        let exec_id = self
+            .get_node(*children.first().unwrap())
+            .unwrap()
+            .info
+            .exec_id;
+        let exit = self.get_node(*children.last().unwrap()).unwrap().info.exit;
         let new_node_id = self.analyzer.pool.nodes.insert(Node {
             comment: None,
             range: children
@@ -208,7 +214,9 @@ impl<'a> Flattener<'a> {
             cmd: AcCommand::new_cmd(ShellCommand::Brace(children.to_vec())),
             // FIXME: this brace's block id is strage
             info: NodeInfo {
-                branches: vec![old_block_id],
+                branches: vec![children_block_id],
+                exec_id,
+                exit,
                 ..Default::default()
             },
         });
@@ -218,21 +226,21 @@ impl<'a> Flattener<'a> {
         let new_block_id = self.analyzer.add_block(Block {
             parent,
             nodes: vec![new_node_id],
-            guards: self.get_block(old_block_id).guards.clone(),
+            guards: self.get_block(children_block_id).guards.clone(),
             ..Default::default()
         });
         self.analyzer
             .link_body_to_parent(new_node_id, parent, new_block_id);
 
         // update original children & their block
-        self.get_block_mut(old_block_id).parent = new_node_id;
+        self.get_block_mut(children_block_id).parent = new_node_id;
         for &child in children {
             self.analyzer
-                .link_body_to_parent(child, new_node_id, old_block_id);
+                .link_body_to_parent(child, new_node_id, children_block_id);
         }
 
         // update parent
-        if let Some(branch_index) = self.analyzer.get_branch_index(parent, old_block_id) {
+        if let Some(branch_index) = self.analyzer.get_branch_index(parent, children_block_id) {
             self.get_node_mut(parent).info.branches[branch_index] = new_block_id;
         }
 
