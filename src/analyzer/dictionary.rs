@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use itertools::Itertools;
 
 use super::{
-    eval::IdentifierDivision,
+    value_set_analysis::IdentifierDivision,
     location::Location,
     type_inference::DataType,
     variable::{Identifier, ValueExpr},

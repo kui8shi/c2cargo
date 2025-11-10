@@ -28,7 +28,7 @@ use macro_call::MacroHandler;
 use platform_support::PlatformSupport;
 use type_inference::{DataType, TypeHint};
 
-use eval::{DividedVariable, VSACache};
+use value_set_analysis::{DividedVariable, VSACache};
 use flatten::Flattener;
 use location::{ExecId, Location};
 use variable::{Identifier, ValueExpr, VariableAnalyzer};
@@ -41,7 +41,7 @@ mod automake;
 mod build_option;
 mod chunk;
 mod dictionary;
-mod eval;
+mod value_set_analysis;
 mod filtering;
 mod flatten;
 mod guard;
