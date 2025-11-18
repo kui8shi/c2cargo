@@ -315,14 +315,14 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
     // }
 
     // === Build Option Analysis ===
-    // analyzer.run_extra_build_option_analysis().await;
-    // dbg!(analyzer.find_macro_calls().keys().collect::<Vec<_>>());
+    analyzer.run_extra_build_option_analysis().await;
 
     // === Translation Analysis Debug ===
     println!("\n=== DEBUG: Testing Analyzer::translate ===");
     println!("Calling analyzer.translate()...");
     analyzer.translate().await;
     println!("translate() completed successfully");
+
 
     Ok(())
 }

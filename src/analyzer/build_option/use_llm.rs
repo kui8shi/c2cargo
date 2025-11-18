@@ -85,7 +85,17 @@ impl LLMAnalysisOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
         if reps_set.contains("yes") && reps_set.contains("no") {
             if reps_set.len() > 2 {
                 errors.push(format!(
-                    r#"If "yes" and "no" are in representatives, they must not hold any other value: {:?}"#,
+                    r#"If "yes" and "no" are in representatives, they must not hold any other values: {:?}"#,
+                    reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
+                ))
+            }
+        }
+
+        // 2c) binary representatives must contain yes and no.
+        if reps_set.len() <= 2 {
+            if !(reps_set.contains("yes") && reps_set.contains("no")) {
+                errors.push(format!(
+                    r#"Binary representatives must contain yes and no. They must not hold any other values: {:?}"#,
                     reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
                 ))
             }

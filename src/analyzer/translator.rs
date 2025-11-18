@@ -127,7 +127,7 @@ impl Analyzer {
                 )
             })
             .collect::<Vec<_>>();
-        self.translate_chunks().await;
+        // self.translate_chunks().await;
     }
 
     /// Translate chunk using LLMs

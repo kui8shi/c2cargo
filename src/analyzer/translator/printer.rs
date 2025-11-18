@@ -5,6 +5,7 @@ use std::{
 
 use crate::analyzer::{
     as_literal, as_shell,
+    build_option::FeatureState,
     dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue},
     guard::{Atom, VarCond, VoL},
     location::Location,
@@ -298,26 +299,74 @@ impl<'a> TranslatingPrinter<'a> {
         format!("{}=\"{}\"", lhs, rhs)
     }
 
-    fn display_cfg_atom(&self, atom: &Atom) -> String {
+    fn display_cfg_atom(&self, atom: &Atom, negated: bool) -> String {
         use Atom::*;
         debug_assert!(should_atom_replaced(atom));
+        let may_negate = |str: String, negated: bool| {
+            if negated {
+                format!("not({})", str)
+            } else {
+                str
+            }
+        };
         match atom {
-            Arch(arch) => format!("target_arch = \"{}\"", arch),
+            Arch(arch) => may_negate(format!("target_arch = \"{}\"", arch), negated),
             Cpu(_) => todo!(),
-            Os(os) => format!("target_os = \"{}\"", os),
-            Env(env) => format!("target_env = \"{}\"", env),
-            Abi(abi) => format!("target_abi = \"{}\"", abi),
+            Os(os) => may_negate(format!("target_os = \"{}\"", os), negated),
+            Env(env) => may_negate(format!("target_env = \"{}\"", env), negated),
+            Abi(abi) => may_negate(format!("target_abi = \"{}\"", abi), negated),
             Arg(name, var_cond) => {
-                let name = self
+                let option_name = self
                     .analyzer
                     .build_option_info
                     .arg_var_to_option_name
                     .get(name)
                     .unwrap();
+                let find_feature = |value: &str| -> Option<(&str, &FeatureState)> {
+                    self.analyzer
+                        .build_option_info
+                        .cargo_features
+                        .as_ref()
+                        .map(|cargo_features| {
+                            cargo_features
+                                .get(option_name.as_str())
+                                .map(|features| {
+                                    features.iter().find_map(|feature| {
+                                        feature.value_map.get(value).map(|feature_state| {
+                                            (feature.name.as_str(), feature_state)
+                                        })
+                                    })
+                                })
+                                .flatten()
+                        })
+                        .flatten()
+                };
                 match var_cond {
-                    VarCond::Yes => format!("{}", name),
-                    VarCond::No => format!("not({})", name),
-                    VarCond::Eq(VoL::Lit(lit)) => format!("{}_{}", name, lit),
+                    VarCond::Yes => {
+                        if let Some((feature_name, feature_state)) = find_feature("yes") {
+                            let negated = feature_state.is_negative() ^ negated;
+                            may_negate(feature_name.into(), negated)
+                        } else {
+                            // fallback
+                            format!("{}", option_name)
+                        }
+                    }
+                    VarCond::No => {
+                        if let Some((feature_name, feature_state)) = find_feature("no") {
+                            let negated = feature_state.is_negative() ^ negated;
+                            may_negate(feature_name.into(), negated)
+                        } else {
+                            format!("not({})", option_name)
+                        }
+                    }
+                    VarCond::Eq(VoL::Lit(lit)) => {
+                        if let Some((feature_name, feature_state)) = find_feature(lit) {
+                            let negated = feature_state.is_negative() ^ negated;
+                            may_negate(feature_name.into(), negated)
+                        } else {
+                            format!("{}_{}", option_name, lit)
+                        }
+                    }
                     _ => todo!(),
                 }
             }
@@ -331,12 +380,8 @@ impl<'a> TranslatingPrinter<'a> {
         match guard {
             Guard::N(negated, atom) => {
                 if should_atom_replaced(atom) {
-                    let cfg_atom_str = self.display_cfg_atom(atom);
-                    let cfg_str = if *negated {
-                        format!("cfg!(not({}))", cfg_atom_str)
-                    } else {
-                        format!("cfg!({})", cfg_atom_str)
-                    };
+                    let cfg_atom_str = self.display_cfg_atom(atom, *negated);
+                    let cfg_str = format!("cfg!({})", cfg_atom_str);
                     self.enclose_by_rust_tags(cfg_str, true)
                 } else {
                     self.display_guard(guard)
@@ -646,7 +691,8 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                             } else {
                                 String::new()
                             };
-                            return self.display_dictionary_write(dict_name, access, value_type, &rhs);
+                            return self
+                                .display_dictionary_write(dict_name, access, value_type, &rhs);
                         }
                         DictionaryOperation::Read => {
                             if access.assigned_to.is_none() {

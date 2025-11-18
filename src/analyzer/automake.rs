@@ -58,7 +58,7 @@ struct AmTarget {
 struct Automake {
     this_path: PathBuf,
     include_paths: Vec<PathBuf>,
-    sub_paths: Vec<PathBuf>,
+    sub_dir_paths: Vec<PathBuf>,
     programs: HashMap<String, Vec<AmTarget>>,
     libraries: HashMap<String, Vec<AmTarget>>,
     headers: HashMap<String, Vec<AmValue<String>>>,
@@ -180,7 +180,7 @@ impl Analyzer {
                 if let Some(lit) = as_shell(&val.value).and_then(as_literal) {
                     let relative = PathBuf::from(lit).join("Makefile.am");
                     if let Some(sub_path) = resolve_path(&relative) {
-                        automake.sub_paths.push(sub_path.clone());
+                        automake.sub_dir_paths.push(sub_path.clone());
                         if !self.automake().files.contains_key(&sub_path) {
                             let res = self.analyze_automake_file(&sub_path);
                             self.automake_mut().files.insert(sub_path, res);

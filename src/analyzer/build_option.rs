@@ -4,9 +4,12 @@ use super::{
     guard::{Atom, Guard, VarCond, VoL},
     Analyzer, M4Macro, NodeId,
 };
-use crate::utils::glob::glob_enumerate;
-use crate::utils::llm_analysis::LLMAnalysis;
+use crate::{
+    analyzer::build_option::use_llm::BuildOptionLLMAnalysisResult, utils::glob::glob_enumerate,
+};
+use crate::{analyzer::AstVisitor, utils::llm_analysis::LLMAnalysis};
 use heck::ToSnakeCase;
+use itertools::Itertools;
 
 mod use_llm;
 
@@ -28,6 +31,33 @@ pub(crate) struct BuildOptionInfo {
     pub decl_ids: Vec<NodeId>,
     pub arg_var_to_option_name: HashMap<String, String>,
     pub dependencies: HashMap<String, HashSet<String>>,
+    pub cargo_features: Option<HashMap<String, Vec<CargoFeature>>>,
+}
+
+/// doc
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CargoFeature {
+    pub name: String,
+    pub original_build_option: String,
+    pub value_map: HashMap<String, FeatureState>,
+}
+
+/// doc
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FeatureState(bool);
+
+impl FeatureState {
+    pub fn positive() -> Self {
+        Self(true)
+    }
+
+    pub fn negative() -> Self {
+        Self(false)
+    }
+
+    pub fn is_negative(&self) -> bool {
+        !self.0
+    }
 }
 
 #[allow(dead_code)]
@@ -49,6 +79,9 @@ impl Analyzer {
         self.ignore_nodes_disabling_options();
         self.extract_dependencies_from_nodes_enabling_options();
 
+        // remove nodes directly taking build option value.
+        self.expand_or_ignore_option_value_assignments();
+
         // collect informations for llm analysis
         self.collect_build_option_contexts();
         self.collect_build_option_value_candidates();
@@ -58,20 +91,28 @@ impl Analyzer {
     }
 
     /// Analyze various properties of build options using LLMs
-    pub(crate) async fn run_extra_build_option_analysis(&self) {
+    pub(crate) async fn run_extra_build_option_analysis(&mut self) {
         // conduct llm analysis
         let mut user = use_llm::LLMUser::new();
         let results = user
-            .run_llm_analysis(self.build_option_info.build_options.values().map(|i| (i, &i.value_candidates)))
+            .run_llm_analysis(
+                self.build_option_info
+                    .build_options
+                    .values()
+                    .map(|b| (b, &b.value_candidates)),
+            )
             .await;
 
+        self.build_option_info
+            .cargo_features
+            .replace(Default::default());
         for res in results {
             let _build_option = self
                 .build_option_info
                 .build_options
                 .get(&res.option_name)
                 .unwrap();
-            if res.representatives == vec!["no".to_owned(), "yes".to_owned()] {
+            if res.representatives.iter().sorted().eq(["no", "yes"]) {
                 println!("{}: YesNo", res.option_name);
             } else {
                 println!("{}: {:?}", res.option_name, res.representatives);
@@ -79,7 +120,93 @@ impl Analyzer {
             if let Some(aliases) = &res.aliases {
                 println!("{}: Aliases: {:?}", res.option_name, aliases);
             }
+
+            // Generate Cargo features
+            let features = self.generate_cargo_features(&res);
+            println!("Cargo features for {}: {:?}", res.option_name, features);
+            self.build_option_info
+                .cargo_features
+                .as_mut()
+                .unwrap()
+                .insert(res.option_name.clone(), features);
         }
+    }
+
+    /// Generate Cargo features from BuildOptionLLMAnalysisResult
+    fn generate_cargo_features(&self, result: &BuildOptionLLMAnalysisResult) -> Vec<CargoFeature> {
+        let mut features = Vec::new();
+
+        if result.representatives.iter().sorted().eq(["no", "yes"]) {
+            // For boolean options, just use the option name as feature
+            features.push(CargoFeature {
+                name: result.option_name.clone(),
+                original_build_option: result.option_name.clone(),
+                value_map: HashMap::from_iter(
+                    [
+                        ("yes".to_owned(), FeatureState::positive()),
+                        ("no".to_owned(), FeatureState::negative()),
+                    ]
+                    .into_iter()
+                    .chain(
+                        result
+                            .aliases
+                            .iter()
+                            .map(|aliases| {
+                                aliases.iter().map(|(from, to)| {
+                                    let state = match to.as_str() {
+                                        "yes" => FeatureState::positive(),
+                                        "no" => FeatureState::negative(),
+                                        _ => unreachable!(),
+                                    };
+                                    (from.clone(), state)
+                                })
+                            })
+                            .flatten(),
+                    ),
+                ),
+            });
+        } else {
+            // For enum-like options, generate features by prefixing representatives with option_name
+            for representative in &result.representatives {
+                if representative == "no" {
+                    // the disabled state can be representated by turning off all other exclusive features
+                    // TODO: however we may have to treat this case more carefully.
+                    continue;
+                }
+                let feature_name = if &result.option_name == representative {
+                    result.option_name.clone()
+                } else {
+                    format!(
+                        "{}_{}",
+                        result.option_name,
+                        representative.replace("-", "_")
+                    )
+                };
+                features.push(CargoFeature {
+                    name: feature_name.clone(),
+                    original_build_option: result.option_name.clone(),
+                    value_map: HashMap::from_iter(
+                        [(representative.clone(), FeatureState::positive())]
+                            .into_iter()
+                            .chain(
+                                result
+                                    .aliases
+                                    .iter()
+                                    .map(|aliases| {
+                                        aliases.iter().map(|(from, to)| {
+                                            (to == representative)
+                                                .then_some((from.clone(), FeatureState::positive()))
+                                        })
+                                    })
+                                    .flatten()
+                                    .flatten(),
+                            ),
+                    ),
+                });
+            }
+        }
+
+        features
     }
 
     /// doc
@@ -192,7 +319,11 @@ impl Analyzer {
             .drain()
             .collect::<HashMap<_, _>>();
         for build_option in build_options.values_mut() {
-            let mut values = HashSet::from(["yes".to_owned(), "no".to_owned()]);
+            // Treat "yes" and "no" as value candidates by default
+            build_option
+                .value_candidates
+                .extend(["yes".to_owned(), "no".to_owned()]);
+            let mut values = HashSet::new();
             for id in self.collect_descendant_nodes_per_node(build_option.decl_id, false, false) {
                 for &block_id in &self.get_node(id).unwrap().info.branches {
                     for guard in self.blocks[block_id].guards.iter() {
@@ -200,7 +331,9 @@ impl Analyzer {
                     }
                 }
             }
-            build_option.value_candidates = normalize(values.into_iter().collect());
+            build_option
+                .value_candidates
+                .extend(normalize(values.into_iter().collect()));
         }
         self.build_option_info.build_options = build_options;
     }
@@ -312,6 +445,83 @@ impl Analyzer {
             self.remove_node(node_id);
         }
     }
+
+    /// Expand or ignore build option value in assignments
+    fn expand_or_ignore_option_value_assignments(&mut self) {
+        use crate::analyzer::MayM4;
+        use autotools_parser::ast::node::ShellCommand;
+
+        let mut nodes_to_remove = Vec::new();
+
+        let arg_vars = self
+            .build_option_info
+            .arg_var_to_option_name
+            .keys()
+            .collect::<Vec<_>>();
+
+        // Find all assignment nodes where build option variable is set to "yes"
+        for (node_id, node) in self
+            .pool
+            .nodes
+            .iter()
+            .filter(|(node_id, _)| !self.build_option_info.decl_ids.contains(node_id))
+        {
+            if let MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) = &node.cmd.0 {
+                if let Some(arg_var) = arg_vars.iter().find_map(|arg_var| {
+                    node.info
+                        .usages
+                        .contains_key(arg_var.as_str())
+                        .then_some(arg_var)
+                }) {
+                    // An argument variable is used
+                    let lhs_loc = node
+                        .info
+                        .definitions
+                        .values()
+                        .next()
+                        .unwrap()
+                        .first()
+                        .unwrap();
+                    if let Some(guard) = self.guard_of_location(lhs_loc).last() {
+                        // the node has a condition
+                        if is_arg_var_guarded(guard, arg_var) {
+                            // the condition is related to the argument variable
+                            let is_assigned_variable_always_defined = self
+                                .get_node(self.get_parent(node_id).unwrap())
+                                .unwrap()
+                                .info
+                                .propagated_definitions
+                                .contains_key(lhs.as_str());
+
+                            let is_match_any =
+                                matches!(guard, Guard::N(_, Atom::Arg(_, VarCond::MatchAny)));
+
+                            if is_assigned_variable_always_defined && is_match_any {
+                                nodes_to_remove.push(node_id);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Remove the identified nodes
+        for node_id in nodes_to_remove {
+            self.remove_node(node_id);
+        }
+    }
+}
+
+fn is_arg_var_guarded(guard: &Guard, arg_var: &str) -> bool {
+    match guard {
+        Guard::N(_, atom) => match atom {
+            Atom::Arg(arg, _) if arg == arg_var => true,
+            _ => false,
+        },
+        Guard::And(guards) | Guard::Or(guards) => {
+            guards.iter().all(|g| is_arg_var_guarded(g, arg_var))
+        }
+    }
 }
 
 fn convert_guard_type_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
@@ -338,12 +548,6 @@ fn convert_guard_type_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
 fn enumerate_literal(guard: &Guard) -> Vec<String> {
     match guard {
         Guard::N(negated, Atom::Var(_, cond) | Atom::Arg(_, cond)) if !negated => match cond {
-            VarCond::Yes => {
-                vec!["yes".to_owned()]
-            }
-            VarCond::No => {
-                vec!["no".to_owned()]
-            }
             VarCond::Eq(VoL::Lit(lit)) => {
                 vec![lit.to_owned()]
             }
@@ -356,6 +560,7 @@ fn enumerate_literal(guard: &Guard) -> Vec<String> {
 }
 
 fn normalize(values: Vec<String>) -> Vec<String> {
+    const MAX_NUM: usize = 10;
     if values.iter().all(|value| value.parse::<usize>().is_ok()) {
         let mut nums: Vec<usize> = values
             .into_iter()
@@ -364,10 +569,13 @@ fn normalize(values: Vec<String>) -> Vec<String> {
             .into_iter()
             .collect();
         nums.sort();
-        nums.into_iter().map(|num| num.to_string()).collect()
+        nums.into_iter()
+            .take(MAX_NUM)
+            .map(|num| num.to_string())
+            .collect()
     } else {
         let mut literals: Vec<String> = values;
         literals.sort();
-        literals
+        literals.into_iter().take(MAX_NUM).collect()
     }
 }

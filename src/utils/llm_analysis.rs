@@ -117,26 +117,27 @@ pub(crate) trait LLMAnalysis {
                 last_raw_json.as_deref(),
                 last_errors.as_deref(),
             );
-            println!("==========PROMPT {attempt}=========\n{prompt}");
             let msg = ChatMessage::user().content(prompt).build();
 
             match llm.chat(&[msg]).await {
                 Ok(response) => {
                     let text = response.text().ok_or("No text in response")?;
-                    // println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
+                    println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
                     if let Some(usage) = response.usage() {
                         Self::show_cost(usage);
                     }
 
                     match serde_json::from_str::<Self::Output>(&text) {
                         Ok(mut result) => {
-                            println!("Result {}:\n{:?}", attempt, result);
+                            println!("Result (attempt={}):\n  {:?}", attempt, result);
                             match result.validate(evidence) {
                                 Ok(()) => {
+                                    println!("  Validated.");
                                     result.normalize();
                                     return Ok(result);
                                 }
                                 Err(errs) => {
+                                    println!("Error:\n{}", errs.iter().map(|e| format!("  {}", e)).collect::<String>());
                                     last_errors = Some(errs);
                                     last_raw_json = Some(text);
                                     if attempt < MAX_RETRIES - 1 {

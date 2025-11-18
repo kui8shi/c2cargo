@@ -516,8 +516,8 @@ pub(crate) struct NodeInfo {
     /// The indexes correspond to the branch indexes of if/case statements
     pub branches: Vec<BlockId>,
     /// Optional Node ID for commands used in pre body clause.
-    /// The reason why we need this field instead of just creating
-    /// a new block for the command is:
+    /// The reasons why we need this field instead of just creating
+    /// a new block for the command are:
     /// 1. now we assume the indexes of child_blocks correspond to branch indexes
     /// 2. due to the parser's optimization, condtitions may not be represented as nodes but operators.
     /// FIXME: this looks dirty so refine it if possible.
