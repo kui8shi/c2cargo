@@ -61,7 +61,7 @@ impl Analyzer {
             .map(|name| {
                 let data_type = self.get_inferred_type(name);
                 let expression = match &data_type {
-                    DataType::Bool => format!("option_env!(\"{}\").is_some()", &name),
+                    DataType::Boolean => format!("option_env!(\"{}\").is_some()", &name),
                     DataType::Integer => {
                         format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
                     }

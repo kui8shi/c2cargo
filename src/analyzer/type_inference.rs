@@ -1,6 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::analyzer::{as_literal, as_shell, as_var};
+use crate::analyzer::{
+    as_literal, as_shell, as_var,
+    guard::{Atom, VarCond, VoL},
+    Guard,
+};
 
 use super::{AcWord, Analyzer, AstVisitor, MayM4, Node, NodeId, Parameter, PatternBodyPair, Word};
 use autotools_parser::ast::{
@@ -13,7 +17,7 @@ use autotools_parser::ast::{
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DataType {
     /// doc
-    Bool,
+    Boolean,
     /// doc
     Integer,
     /// doc
@@ -32,7 +36,7 @@ impl DataType {
     pub(crate) fn print(&self) -> String {
         use DataType::*;
         match self {
-            Bool => "bool".into(),
+            Boolean => "bool".into(),
             Integer => "usize".into(),
             List(data_type) => format!("Vec<{}>", data_type.print()),
             Path => "PathBuf".into(),
@@ -47,7 +51,7 @@ impl DataType {
         match self {
             Either(_, _) => 0,
             Literal => 1,
-            Bool => 2,
+            Boolean => 2,
             Integer => 3,
             Path => 4,
             Optional(_) => 5,
@@ -111,12 +115,31 @@ impl Analyzer {
     pub(crate) fn run_type_inference(&mut self) {
         self.inferred_types
             .replace(TypeInferrer::run_type_inference(&self));
+        self.convert_guards_for_numeric_boolean();
     }
 
     pub(crate) fn get_inferred_type(&self, name: &str) -> DataType {
         self.get_type_inference_result(name)
             .map(|(_, data_type)| data_type.clone())
             .unwrap_or(DataType::Literal)
+    }
+
+    fn convert_guards_for_numeric_boolean(&mut self) {
+        let bool_vars = self
+            .inferred_types
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|(_, (_, ty))| ty == &DataType::Boolean)
+            .map(|(var_name, _)| var_name.as_str())
+            .collect::<HashSet<_>>();
+        for (_, block) in self.blocks.iter_mut() {
+            block.guards = block
+                .guards
+                .iter()
+                .map(|guard| convert_guard_numeric_boolean(&guard, &bool_vars))
+                .collect();
+        }
     }
 }
 
@@ -177,9 +200,9 @@ impl<'a> TypeInferrer<'a> {
 
         if hints.contains(&CanBeBoolLike) {
             if let Some(set) = self.assigned.get(name) {
-                inferred = Either(Box::new(Bool), Vec::from_iter(set.iter().cloned()))
+                inferred = Either(Box::new(Boolean), Vec::from_iter(set.iter().cloned()))
             } else {
-                inferred = Bool
+                inferred = Boolean
             }
         }
         if hints.contains(&CanBeNum) {
@@ -431,4 +454,37 @@ pub(crate) fn is_boolean(lit: &str) -> bool {
 
 pub(crate) fn is_numeric(lit: &str) -> bool {
     lit.chars().all(|c| c.is_numeric())
+}
+
+fn convert_guard_numeric_boolean(guard: &Guard, bool_vars: &HashSet<&str>) -> Guard {
+    match guard {
+        Guard::N(negated, atom) => match atom {
+            Atom::Var(name, VarCond::Eq(VoL::Lit(lit)))
+                if bool_vars.contains(name.as_str()) && is_numeric(&lit) =>
+            {
+                Guard::N(
+                    false,
+                    Atom::Var(
+                        name.clone(),
+                        if (lit == "0") ^ negated {
+                            VarCond::False
+                        } else {
+                            VarCond::True
+                        },
+                    ),
+                )
+            }
+            _ => guard.clone(),
+        },
+        Guard::And(v) => Guard::And(
+            v.iter()
+                .map(|g| convert_guard_numeric_boolean(g, &bool_vars))
+                .collect(),
+        ),
+        Guard::Or(v) => Guard::Or(
+            v.iter()
+                .map(|g| convert_guard_numeric_boolean(g, &bool_vars))
+                .collect(),
+        ),
+    }
 }

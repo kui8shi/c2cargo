@@ -20,7 +20,7 @@ impl PartialOrd for Location {
 }
 
 impl Analyzer {
-    pub(crate) fn node_start_loc(&self, node_id: NodeId) -> Location {
+    pub(crate) fn get_location_of_node_start(&self, node_id: NodeId) -> Location {
         Location {
             node_id,
             exec_id: self.get_node(node_id).unwrap().info.exec_id,
@@ -29,7 +29,7 @@ impl Analyzer {
         }
     }
 
-    pub(crate) fn node_end_loc(&self, node_id: NodeId) -> Location {
+    pub(crate) fn get_location_of_node_end(&self, node_id: NodeId) -> Location {
         Location {
             node_id,
             exec_id: self.get_node(node_id).unwrap().info.exit,

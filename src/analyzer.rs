@@ -1,8 +1,6 @@
 //! Provides the higher level on-time analyses to improve parsing
 use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    cell::RefCell, cmp::Ordering, collections::{HashMap, HashSet}, path::{Path, PathBuf}
 };
 
 use automake::AutomakeAnalyzer;
@@ -24,7 +22,6 @@ use chunk::{Chunk, ChunkId, FunctionSkelton, Scope};
 use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
-use macro_call::MacroHandler;
 use platform_support::PlatformSupport;
 use type_inference::{DataType, TypeHint};
 
@@ -38,6 +35,7 @@ use slab::Slab;
 use crate::display::AutoconfPool;
 
 mod automake;
+mod conditional_compilation;
 mod build_option;
 mod chunk;
 mod dictionary;
@@ -384,7 +382,9 @@ pub trait AstVisitor: Sized {
             Condition::Eval(cmd) => {
                 self.visit_node(**cmd);
             }
-            Condition::ReturnZero(cmd) => self.visit_node(**cmd),
+            Condition::ReturnZero(cmd) => {
+                self.visit_node(**cmd)
+            }
         }
     }
 
@@ -562,8 +562,11 @@ impl Default for AnalyzerOptions {
 #[derive(Debug, Default)]
 struct ProjectInfo {
     project_dir: PathBuf,
-    subst_files: Vec<PathBuf>,
+    c_files: Vec<PathBuf>,
+    h_files: Vec<PathBuf>,
+    subst_files: Vec<(PathBuf, PathBuf)>,
     am_files: Vec<PathBuf>,
+    dynamic_links: Vec<(Vec<PathBuf>, Vec<PathBuf>)>,
     _config_header: PathBuf,
 }
 
@@ -573,6 +576,8 @@ struct ProjectInfo {
 /// etc..
 #[derive(Debug, Default)]
 pub struct Analyzer {
+    /// Path to the analyzed script
+    path: PathBuf,
     /// Original contents of analyzed script
     lines: Vec<String>,
     /// Nodes in the dependency graph
@@ -595,7 +600,7 @@ pub struct Analyzer {
     /// Analysis results of build options.
     build_option_info: BuildOptionInfo,
     /// Cache used inside Value Set Analysis. Mainly used for recording resolved values of variables
-    vsa_cache: VSACache,
+    vsa_cache: RefCell<VSACache>,
     /// Whether the nodes are flattened or not
     has_flattened_nodes: bool,
     /// Map of variable names to information of commands that define them
@@ -613,6 +618,10 @@ pub struct Analyzer {
     divided_vars: Option<HashMap<String, DividedVariable>>,
     /// all m4 macro calls
     macro_calls: Option<HashMap<String, Vec<(NodeId, M4Macro)>>>,
+    /// prefix for all cpp symbols
+    cpp_symbol_prefix: Option<String>,
+    /// all cpp symbols
+    cpp_symbols: Option<HashSet<String>>,
     /// all susbstitued variables
     subst_vars: Option<HashSet<String>>,
     /// all input variables which are defined in m4 macros and are candidates of environmental variables.
@@ -665,6 +674,7 @@ impl Analyzer {
             ".".into(), // project_dir.to_str().unwrap().to_owned(),
         )];
         let lexer = Lexer::new(contents.chars());
+        println!("==================== Parse BEGIN =======================");
         let (nodes, top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
         let nodes = nodes
             .into_iter()
@@ -675,8 +685,10 @@ impl Analyzer {
             .collect::<Slab<Node>>();
 
         let pool = AutoconfPool::new(nodes, Some(Box::new(|n| n.info.is_top_node())));
+        println!("==================== Parse END =======================");
 
         let mut s = Self {
+            path: path.to_owned(),
             lines: contents.lines().map(|s| s.to_string()).collect(),
             pool,
             top_ids,
@@ -695,21 +707,30 @@ impl Analyzer {
 
         s.filter_out_commands();
 
+        println!("==================== M4 =======================");
         // Record all m4 macro calls
-        MacroHandler::handle_macro_calls(&mut s);
+        s.find_macro_calls();
 
         // Create a VariableAnalyzer to extract both defined and used variables
         VariableAnalyzer::analyze_variables(&mut s);
 
         s.aggregate_def_use();
 
+        println!("==================== VSA =======================");
         s.run_value_set_analysis();
+        println!("==================== DICT =======================");
         s.run_type_inference();
         s.make_dictionary_instances();
 
+        // analyze filesystem links
+        s.consume_link_macros();
+
+        println!("==================== AUTOMAKE =======================");
         // Analyze automake files
         s.analyze_automake_files();
+        s.consume_automake_macros();
         s.aggregate_subst_vars();
+        s.create_conditional_compilation_map();
 
         s.remove_unused_variables();
 
@@ -726,7 +747,7 @@ impl Analyzer {
 
         s.aggregate_env_vars();
 
-        s.make_chunk_skeletons();
+        s.construct_chunk_skeletons();
         // dbg!(&s
         //     .dicts
         //     .as_ref()

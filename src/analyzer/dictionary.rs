@@ -195,7 +195,6 @@ fn search_dictionary_from_eval_assignment_rhs(
             let assigned_to = if let Identifier::Name(var) = lhs {
                 Some(var.into())
             } else {
-                dbg!(&lhs);
                 None
             };
 
@@ -424,7 +423,7 @@ impl Analyzer {
         confirmed_names.into_iter().map(|(k, v)| (v, k)).collect()
     }
 
-    /// returns a map from location to accesses to variable as dictionary
+    /// returns a map from location to variable accesses as dictionary
     fn enumerate_dictionary_accesses(
         &self,
         recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,

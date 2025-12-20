@@ -7,7 +7,7 @@ use super::{
     Parameter, ParameterSubstitution, PatternBodyPair, Redirect, ShellCommand, Word, WordFragment,
 };
 
-use crate::analyzer::{as_literal, as_shell, as_var};
+use super::{as_literal, as_shell, as_var};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) enum Guard {
@@ -28,15 +28,15 @@ pub(super) struct Block {
 }
 
 impl Guard {
-    pub(crate) fn confirmed(atom: Atom) -> Guard {
+    pub(super) fn confirmed(atom: Atom) -> Guard {
         Guard::N(false, atom)
     }
 
-    pub(crate) fn negated(atom: Atom) -> Guard {
+    pub(super) fn negated(atom: Atom) -> Guard {
         Guard::N(true, atom)
     }
 
-    pub(crate) fn negate_whole(self) -> Guard {
+    pub(super) fn negate_whole(self) -> Guard {
         match self {
             Guard::N(b, atom) => Guard::N(!b, atom),
             Guard::And(guards) => Guard::Or(guards.into_iter().map(|g| g.negate_whole()).collect()),
@@ -44,7 +44,7 @@ impl Guard {
         }
     }
 
-    pub(crate) fn make_and(mut guards: Vec<Guard>) -> Guard {
+    pub(super) fn make_and(mut guards: Vec<Guard>) -> Guard {
         if guards.len() == 1 {
             guards.pop().unwrap()
         } else {
@@ -52,7 +52,7 @@ impl Guard {
         }
     }
 
-    pub(crate) fn make_or(mut guards: Vec<Guard>) -> Guard {
+    pub(super) fn make_or(mut guards: Vec<Guard>) -> Guard {
         if guards.len() == 1 {
             guards.pop().unwrap()
         } else {
@@ -60,7 +60,7 @@ impl Guard {
         }
     }
 
-    pub(crate) fn has_variable(&self, var_name: &str) -> bool {
+    pub(super) fn has_variable(&self, var_name: &str) -> bool {
         use Atom::*;
         use Guard::*;
         match self {
@@ -73,7 +73,7 @@ impl Guard {
         }
     }
 
-    pub(crate) fn print(
+    pub(super) fn print(
         &self,
         printed_cmds: &HashMap<NodeId, String>,
     ) -> Result<String, HashSet<NodeId>> {
@@ -92,8 +92,8 @@ impl Guard {
                         format!("-e {}{}", if *is_absolute { "/" } else { "" }, path_str)
                     }
                     Var(name, var_cond) | Arg(name, var_cond) => match var_cond {
-                        Yes => format!("${{{}}} = yes", name),
-                        No => format!("${{{}}} = no", name),
+                        True => format!("${{{}}} = yes", name),
+                        False => format!("${{{}}} = no", name),
                         Empty => format!("-z ${{{}}}", name),
                         Unset => format!("${{{}:-set}} != set", name),
                         Set => format!("${{{}:-set}} = set", name),
@@ -111,6 +111,7 @@ impl Guard {
                             return Err(HashSet::from([*node_id]));
                         }
                     }
+                    _ => todo!(),
                 }
             )),
             Guard::Or(guards) | Guard::And(guards)
@@ -136,7 +137,7 @@ impl Guard {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum Atom {
+pub(super) enum Atom {
     ArchGlob(String),  // glob string
     OsAbiGlob(String), // glob string
     Arch(String),
@@ -156,12 +157,13 @@ pub(crate) enum Atom {
     Var(String, VarCond),
     Arg(String, VarCond),
     Cmd(NodeId),
+    Tautology, // always true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum VarCond {
-    Yes,
-    No,
+pub(super) enum VarCond {
+    True,
+    False,
     Empty,
     Unset,
     Set,
@@ -175,7 +177,7 @@ pub(crate) enum VarCond {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum VoL {
+pub(super) enum VoL {
     Var(String),
     Lit(String),
 }
@@ -200,7 +202,7 @@ impl VoL {
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum CompilerCheck {
+pub(super) enum CompilerCheck {
     Func(String),
     Symbol { name: String, lib: Option<String> },
     Sizeof(String),
@@ -210,7 +212,7 @@ pub(crate) enum CompilerCheck {
 }
 
 /// Compare two conditions.
-pub(crate) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp::Ordering> {
+pub(super) fn cmp_guards(lhs: &Vec<Guard>, rhs: &Vec<Guard>) -> Option<std::cmp::Ordering> {
     for (l, r) in lhs.iter().zip(rhs.iter()) {
         if l != r {
             // not comparable.
@@ -230,6 +232,7 @@ pub(super) struct GuardAnalyzer<'a> {
     cursor: Option<NodeId>,
     range: Option<Vec<(usize, usize)>>,
     guard_stack: Vec<Guard>,
+    in_condition: bool,
 }
 
 impl Analyzer {
@@ -262,12 +265,13 @@ impl Analyzer {
 }
 
 impl<'a> GuardAnalyzer<'a> {
-    pub(crate) fn analyze_blocks(analyzer: &'a mut Analyzer) {
+    pub(super) fn analyze_blocks(analyzer: &'a mut Analyzer) {
         let mut s = Self {
             analyzer,
             cursor: None,
             range: None,
             guard_stack: Vec::new(),
+            in_condition: false,
         };
         for node_id in s.analyzer.get_top_ids() {
             s.visit_top(node_id);
@@ -309,82 +313,177 @@ impl<'a> GuardAnalyzer<'a> {
         self.guard_stack.push(guard.negate_whole());
     }
 
-    fn equality(&self, a: &AcWord, b: &AcWord) -> Option<Atom> {
+    fn equality(&self, w1: &AcWord, w2: &AcWord) -> Option<Guard> {
         fn interpret_literal(lit: &str) -> VarCond {
             match lit {
-                "yes" => VarCond::Yes,
-                "no" => VarCond::No,
+                "yes" => VarCond::True,
+                "no" => VarCond::False,
                 "" => VarCond::Empty,
                 _ => VarCond::Eq(VoL::Lit(lit.to_owned())),
             }
         }
 
-        fn cancel_x(
-            x: &WordFragment<AcWord>,
-            var: &WordFragment<AcWord>,
-            x_lit: &WordFragment<AcWord>,
-        ) -> Option<Atom> {
-            if Some("x") == as_literal(x) {
-                if let Some(var) = as_var(var) {
-                    if let Some(x_lit) = as_literal(x_lit) {
-                        if let Some(lit) = x_lit.strip_prefix("x") {
-                            return Some(Atom::Var(var.to_owned(), interpret_literal(lit)));
+        fn cancel_prefix(
+            may_prefix: &WordFragment<AcWord>,
+            w1: &WordFragment<AcWord>,
+            w2: &WordFragment<AcWord>,
+            prefix: &str,
+        ) -> Option<Guard> {
+            if Some(prefix) == as_literal(may_prefix) {
+                if let Some(var) = as_var(w1) {
+                    if let Some(b_lit) = as_literal(w2) {
+                        if let Some(b_stripped) = b_lit.strip_prefix(prefix) {
+                            return Some(Guard::confirmed(Atom::Var(
+                                var.to_owned(),
+                                interpret_literal(b_stripped),
+                            )));
                         }
                     }
                 }
             }
             None
         }
-        match &a.0 {
+
+        fn split_delim(
+            w1: &Vec<WordFragment<AcWord>>,
+            w2: &WordFragment<AcWord>,
+            delimiter: &str,
+        ) -> Option<Guard> {
+            let delims_in_w1 = w1
+                .iter()
+                .enumerate()
+                .filter(|(_, w)| as_literal(w).is_some_and(|lit| lit == delimiter))
+                .map(|(i, _)| i)
+                .collect::<Vec<_>>();
+            if let Some(lit) = as_literal(w2) {
+                if delims_in_w1.len() == lit.matches(delimiter).count() {
+                    let mut vars = Vec::new();
+                    for word in w1
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, w)| delims_in_w1.contains(&i).then_some(w))
+                        .collect::<Vec<_>>()
+                    {
+                        if let Some(var) = as_var(word) {
+                            vars.push(var);
+                        } else {
+                            return None;
+                        }
+                    }
+                    let literals = lit.split(delimiter);
+                    return Some(Guard::And(
+                        vars.into_iter()
+                            .zip(literals)
+                            .map(|(var, lit)| {
+                                Guard::confirmed(Atom::Var(
+                                    var.to_owned(),
+                                    VarCond::Eq(VoL::Lit(lit.to_owned())),
+                                ))
+                            })
+                            .collect::<Vec<_>>(),
+                    ));
+                }
+            }
+            None
+        }
+
+        match &w1.0 {
             Word::Empty => {
-                if let Some(var) = as_shell(b).and_then(as_var) {
-                    Some(Atom::Var(var.to_owned(), VarCond::Empty))
+                if let Some(var) = as_shell(w2).and_then(as_var) {
+                    Some(Guard::confirmed(Atom::Var(var.to_owned(), VarCond::Empty)))
                 } else {
                     None
                 }
             }
-            Word::Single(MayM4::Shell(w)) => {
-                if let WordFragment::Subst(subst) = w {
+            Word::Single(MayM4::Shell(w1)) => {
+                if let WordFragment::Subst(subst) = w1 {
                     match &**subst {
                         ParameterSubstitution::Alternative(
                             _,
                             Parameter::Var(name),
                             Some(alter),
-                        ) if alter == b => {
-                            return Some(Atom::Var(name.to_owned(), VarCond::Set));
+                        ) if alter == w2 => {
+                            return Some(Guard::confirmed(Atom::Var(
+                                name.to_owned(),
+                                VarCond::Set,
+                            )));
                         }
                         ParameterSubstitution::Default(_, Parameter::Var(name), Some(default))
-                            if default == b =>
+                            if default == w2 =>
                         {
-                            return Some(Atom::Var(name.to_owned(), VarCond::Unset));
+                            return Some(Guard::confirmed(Atom::Var(
+                                name.to_owned(),
+                                VarCond::Unset,
+                            )));
                         }
                         ParameterSubstitution::Assign(_, Parameter::Var(name), Some(default))
-                            if default == b =>
+                            if default == w2 =>
                         {
-                            return Some(Atom::Var(name.to_owned(), VarCond::Unset));
+                            return Some(Guard::confirmed(Atom::Var(
+                                name.to_owned(),
+                                VarCond::Unset,
+                            )));
                         }
                         _ => {}
                     }
-                } else if let Some(b) = as_shell(b) {
-                    if let WordFragment::DoubleQuoted(frags) = w {
-                        if frags.len() == 2 {
-                            return cancel_x(&frags[0], &frags[1], b);
+                } else if let Some(w2) = as_shell(w2) {
+                    if let WordFragment::DoubleQuoted(frags) = w1 {
+                        if frags.len() >= 2 {
+                            let w1_first = &frags[0];
+                            let w1_second = &frags[1];
+                            for pattern in ["x", "X"] {
+                                if let Some(guard) = cancel_prefix(w1_first, w1_second, w2, pattern)
+                                {
+                                    return Some(guard);
+                                }
+                                if let Some(guard) = split_delim(frags, w2, pattern) {
+                                    return Some(guard);
+                                }
+                            }
                         }
-                    } else if let Some(var) = as_var(w) {
-                        if let Some(lit) = as_literal(b) {
-                            return Some(Atom::Var(var.to_owned(), interpret_literal(lit)));
-                        } else if let Some(b) = as_vol(b) {
-                            return Some(Atom::Var(var.to_owned(), VarCond::Eq(b)));
+                    } else if let Some(var) = as_var(w1) {
+                        if let Some(lit) = as_literal(w2) {
+                            return Some(Guard::confirmed(Atom::Var(
+                                var.to_owned(),
+                                interpret_literal(lit),
+                            )));
+                        } else if let Some(vol) = as_vol(w2) {
+                            return Some(Guard::confirmed(Atom::Var(
+                                var.to_owned(),
+                                VarCond::Eq(vol),
+                            )));
+                        }
+                    } else if let Some(l1) = as_literal(w1) {
+                        if let Some(l2) = as_literal(w2) {
+                            if l1 == l2 {
+                                return Some(Guard::confirmed(Atom::Tautology));
+                            } else {
+                                return Some(Guard::negated(Atom::Tautology));
+                            }
                         }
                     }
                 }
                 None
             }
             Word::Concat(concat) if concat.len() == 2 => {
-                if let Some(b) = as_shell(b) {
-                    if let MayM4::Shell(x) = concat.get(0).unwrap() {
-                        if let MayM4::Shell(a) = concat.get(1).unwrap() {
-                            return cancel_x(x, a, b);
+                if let Some(w2) = as_shell(w2) {
+                    if let Some(frags) = concat
+                        .into_iter()
+                        .map(|w| match w {
+                            MayM4::Shell(shell) => Some(shell.clone()),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()
+                    {
+                        let w1_first = &frags[0];
+                        let w1_second = &frags[1];
+                        for pattern in ["x", "X"] {
+                            if let Some(guard) = cancel_prefix(w1_first, w1_second, w2, pattern) {
+                                return Some(guard);
+                            }
+                            if let Some(guard) = split_delim(&frags, w2, pattern) {
+                                return Some(guard);
+                            }
                         }
                     }
                 }
@@ -392,6 +491,30 @@ impl<'a> GuardAnalyzer<'a> {
             }
             _ => None,
         }
+    }
+
+    fn compare(
+        &self,
+        w1: &AcWord,
+        w2: &AcWord,
+        direct_op: fn(VoL) -> VarCond,
+        swapped_op: fn(VoL) -> VarCond,
+    ) -> Option<Guard> {
+        let s1 = as_shell(w1);
+        let s2 = as_shell(w2);
+
+        // Case 1: Variable [OP] Value (e.g., $x >= 10)
+        if let (Some(v1), Some(v2)) = (s1.and_then(as_var), s2.and_then(as_vol)) {
+            return Some(Guard::confirmed(Atom::Var(v1.to_owned(), direct_op(v2))));
+        }
+
+        // Case 2: Value [OP] Variable (e.g., 10 >= $x  <==> $x <= 10)
+        // We use the swapped_op here (e.g., Ge becomes Le).
+        if let (Some(v1), Some(v2)) = (s1.and_then(as_vol), s2.and_then(as_var)) {
+            return Some(Guard::confirmed(Atom::Var(v2.to_owned(), swapped_op(v1))));
+        }
+
+        None
     }
 
     fn condition_to_guard(&mut self, cond: &Condition<AcWord>) -> Guard {
@@ -417,7 +540,7 @@ impl<'a> GuardAnalyzer<'a> {
             }
             Condition::Cond(op) => match op {
                 Operator::Eq(w1, w2) => {
-                    let atom = if let Some(res) = self.equality(w1, w2) {
+                    let guard = if let Some(res) = self.equality(w1, w2) {
                         res
                     } else if let Some(res) = self.equality(w2, w1) {
                         res
@@ -425,10 +548,10 @@ impl<'a> GuardAnalyzer<'a> {
                         dbg!(w1, w2);
                         panic!("unsupported syntax");
                     };
-                    Guard::confirmed(atom)
+                    guard
                 }
                 Operator::Neq(w1, w2) => {
-                    let atom = if let Some(res) = self.equality(w1, w2) {
+                    let guard = if let Some(res) = self.equality(w1, w2) {
                         res
                     } else if let Some(res) = self.equality(w2, w1) {
                         res
@@ -436,80 +559,39 @@ impl<'a> GuardAnalyzer<'a> {
                         dbg!(w1, w2);
                         panic!("unsupported syntax");
                     };
-                    Guard::negated(atom)
+                    guard.negate_whole()
                 }
                 Operator::Ge(w1, w2) => {
-                    let atom = if let Some(v1) = as_shell(w1).and_then(as_var) {
-                        if let Some(v2) = as_shell(w2).and_then(as_vol) {
-                            Atom::Var(v1.to_owned(), VarCond::Ge(v2))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
-                    } else if let Some(v2) = as_shell(w2).and_then(as_var) {
-                        if let Some(v1) = as_shell(w1).and_then(as_vol) {
-                            Atom::Var(v2.to_owned(), VarCond::Le(v1))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
-                    } else {
-                        panic!("unsupported syntax");
-                    };
-                    Guard::confirmed(atom)
-                }
-                Operator::Gt(w1, w2) => {
-                    let atom = if let Some(v1) = as_shell(w1).and_then(as_var) {
-                        if let Some(v2) = as_shell(w2).and_then(as_vol) {
-                            Atom::Var(v1.to_owned(), VarCond::Gt(v2))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
-                    } else if let Some(v2) = as_shell(w2).and_then(as_var) {
-                        if let Some(v1) = as_shell(w1).and_then(as_vol) {
-                            Atom::Var(v2.to_owned(), VarCond::Lt(v1))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
+                    if let Some(guard) = self.compare(w1, w2, VarCond::Ge, VarCond::Le) {
+                        guard
                     } else {
                         dbg!(w1, w2);
-                        panic!("unsupported syntax");
-                    };
-                    Guard::confirmed(atom)
+                        panic!("unsupported syntax")
+                    }
+                }
+                Operator::Gt(w1, w2) => {
+                    if let Some(guard) = self.compare(w1, w2, VarCond::Gt, VarCond::Lt) {
+                        guard
+                    } else {
+                        dbg!(w1, w2);
+                        panic!("unsupported syntax")
+                    }
                 }
                 Operator::Le(w1, w2) => {
-                    let atom = if let Some(v1) = as_shell(w1).and_then(as_var) {
-                        if let Some(v2) = as_shell(w2).and_then(as_vol) {
-                            Atom::Var(v1.to_owned(), VarCond::Le(v2))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
-                    } else if let Some(v2) = as_shell(w2).and_then(as_var) {
-                        if let Some(v1) = as_shell(w1).and_then(as_vol) {
-                            Atom::Var(v2.to_owned(), VarCond::Ge(v1))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
+                    if let Some(guard) = self.compare(w1, w2, VarCond::Le, VarCond::Ge) {
+                        guard
                     } else {
-                        panic!("unsupported syntax");
-                    };
-                    Guard::confirmed(atom)
+                        dbg!(w1, w2);
+                        panic!("unsupported syntax")
+                    }
                 }
                 Operator::Lt(w1, w2) => {
-                    let atom = if let Some(v2) = as_shell(w2).and_then(as_var) {
-                        if let Some(v1) = as_shell(w1).and_then(as_vol) {
-                            Atom::Var(v2.to_owned(), VarCond::Lt(v1))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
-                    } else if let Some(v2) = as_shell(w2).and_then(as_var) {
-                        if let Some(v1) = as_shell(w1).and_then(as_vol) {
-                            Atom::Var(v2.to_owned(), VarCond::Gt(v1))
-                        } else {
-                            panic!("unsupported syntax");
-                        }
+                    if let Some(guard) = self.compare(w1, w2, VarCond::Lt, VarCond::Gt) {
+                        guard
                     } else {
-                        panic!("unsupported syntax");
-                    };
-                    Guard::confirmed(atom)
+                        dbg!(w1, w2);
+                        panic!("unsupported syntax")
+                    }
                 }
                 Operator::Empty(w) => {
                     if let Some(name) = as_shell(w).and_then(as_var) {
@@ -568,9 +650,9 @@ impl<'a> GuardAnalyzer<'a> {
                                 Some(Guard::confirmed(Atom::OsAbiGlob(lit.to_owned())))
                             } else {
                                 let cond = if lit == "yes" {
-                                    VarCond::Yes
+                                    VarCond::True
                                 } else if lit == "no" {
-                                    VarCond::No
+                                    VarCond::False
                                 } else if lit.is_empty() {
                                     VarCond::Empty
                                 } else {
@@ -680,9 +762,45 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
     }
 
     fn visit_condition(&mut self, cond: &Condition<AcWord>) {
-        let guard = self.condition_to_guard(cond);
-        self.guard_stack.push(guard);
-        self.walk_condition(cond);
+        let was_in_condition = self.in_condition;
+        if !was_in_condition {
+            let guard = self.condition_to_guard(cond);
+            self.guard_stack.push(guard);
+            self.in_condition = true;
+        }
+        match cond {
+            Condition::Cond(op) => match op {
+                Operator::Eq(w1, w2)
+                | Operator::Neq(w1, w2)
+                | Operator::Ge(w1, w2)
+                | Operator::Gt(w1, w2)
+                | Operator::Le(w1, w2)
+                | Operator::Lt(w1, w2) => {
+                    self.visit_word(w1);
+                    self.visit_word(w2);
+                }
+                Operator::Empty(w)
+                | Operator::NonEmpty(w)
+                | Operator::Dir(w)
+                | Operator::File(w)
+                | Operator::NoExists(w) => self.visit_word(w),
+            },
+            Condition::Not(cond) => self.visit_condition(cond),
+            Condition::And(c1, c2) | Condition::Or(c1, c2) => {
+                self.visit_condition(c1);
+                self.visit_condition(c2);
+            }
+            Condition::Eval(cmd) => {
+                self.record_block(&[**cmd]);
+                self.visit_node(**cmd);
+            }
+            Condition::ReturnZero(cmd) => {
+                self.record_block(&[**cmd]);
+                self.visit_node(**cmd)
+            }
+            _ => {}
+        }
+        self.in_condition = was_in_condition;
     }
 
     fn visit_parameter_substitution(&mut self, subs: &ParameterSubstitution<AcWord>) {

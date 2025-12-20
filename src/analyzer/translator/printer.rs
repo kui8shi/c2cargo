@@ -50,6 +50,8 @@ pub(crate) struct TranslatingPrinter<'a> {
     found_redirection: Cell<bool>,
     /// Whether we have found a usage of sed command.
     found_sed: Cell<bool>,
+    /// Whether we have found a checking of libraries.
+    found_lib_check: Cell<bool>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -87,6 +89,7 @@ impl<'a> TranslatingPrinter<'a> {
             formatted_vars: RefCell::new(Vec::new()),
             found_redirection: Cell::new(false),
             found_sed: Cell::new(false),
+            found_lib_check: Cell::new(false),
         }
     }
 
@@ -120,6 +123,9 @@ impl<'a> TranslatingPrinter<'a> {
         }
         if self.found_sed.get() {
             ret.push("regex");
+        }
+        if self.found_lib_check.get() {
+            ret.push("check_library");
         }
         ret
     }
@@ -342,7 +348,7 @@ impl<'a> TranslatingPrinter<'a> {
                         .flatten()
                 };
                 match var_cond {
-                    VarCond::Yes => {
+                    VarCond::True => {
                         if let Some((feature_name, feature_state)) = find_feature("yes") {
                             let negated = feature_state.is_negative() ^ negated;
                             may_negate(feature_name.into(), negated)
@@ -351,7 +357,7 @@ impl<'a> TranslatingPrinter<'a> {
                             format!("{}", option_name)
                         }
                     }
-                    VarCond::No => {
+                    VarCond::False => {
                         if let Some((feature_name, feature_state)) = find_feature("no") {
                             let negated = feature_state.is_negative() ^ negated;
                             may_negate(feature_name.into(), negated)
@@ -367,7 +373,9 @@ impl<'a> TranslatingPrinter<'a> {
                             format!("{}_{}", option_name, lit)
                         }
                     }
-                    _ => todo!(),
+                    _ => {
+                        todo!("Printing Arg({}, {:?})", name, var_cond);
+                    }
                 }
             }
             _ => {
@@ -384,7 +392,7 @@ impl<'a> TranslatingPrinter<'a> {
                     let cfg_str = format!("cfg!({})", cfg_atom_str);
                     self.enclose_by_rust_tags(cfg_str, true)
                 } else {
-                    self.display_guard(guard)
+                    self.display_guard_as_test_command(guard)
                 }
             }
             Guard::Or(guards) => guards
@@ -398,7 +406,7 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
-    fn display_guard(&self, guard: &Guard) -> String {
+    fn display_guard_as_test_command(&self, guard: &Guard) -> String {
         match guard.print(&Default::default()) {
             Ok(s) => s,
             Err(required_node_ids) => guard
@@ -598,6 +606,13 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
             match self.analyzer.get_block(*block_id).guards.last() {
                 Some(guard) if should_guard_replaced(guard) => {
                     return self.display_cfg_guard(guard);
+                }
+                Some(Guard::N(negated, Atom::Tautology)) => {
+                    if *negated {
+                        return "false".into();
+                    } else {
+                        return "true".into();
+                    }
                 }
                 _ => (),
             }
@@ -808,7 +823,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     None => (Default::default(), Default::default()),
                     _ => unreachable!(),
                 };
-                let value_fstr = match value_fstr.as_str() {
+                let eq_value_fstr = match value_fstr.as_str() {
                     "0" | "1" | "" => {
                         // should be a boolean
                         assert!(vars_in_value.is_empty());
@@ -816,7 +831,8 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     }
                     _ => format!("=\"{value_fstr}\""),
                 };
-                let cargo_instruction = format!("\"cargo::rustc-cfg={}{}\"", key_fstr, value_fstr);
+                let cargo_instruction =
+                    format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr);
                 self.record_translated_fragment(cargo_instruction.clone());
                 let print_line = if vars_in_key.is_empty() && vars_in_value.is_empty() {
                     format!("println!({});", cargo_instruction)
@@ -828,6 +844,38 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     )
                 };
                 return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
+            }
+            "AC_CHECK_LIB" => {
+                let first_arg_as_word = m4_macro.get_arg_as_word(0).unwrap();
+                let lib_name = as_shell(&first_arg_as_word).and_then(as_literal).unwrap();
+                let pkg_config_call = format!(r#"check_library("{}")"#, lib_name);
+                let commands_when_found = match m4_macro.get_arg_as_cmd(2) {
+                    Some(cmds) => cmds
+                        .iter()
+                        .map(|c| self.display_node(*c, indent_level + 1))
+                        .collect::<Vec<String>>()
+                        .join("\n"),
+                    None => "".into(),
+                };
+                let commands_when_not_found = match m4_macro.get_arg_as_cmd(3) {
+                    Some(cmds) => cmds
+                        .iter()
+                        .map(|c| self.display_node(*c, indent_level + 1))
+                        .collect::<Vec<String>>()
+                        .join("\n"),
+                    None => "".into(),
+                };
+                let gen_tab = |nest: usize| " ".repeat((indent_level + nest) * Self::M4_TAB_WIDTH);
+                let tab_nest1 = gen_tab(1);
+                self.found_lib_check.set(true);
+                return format!(
+                    "{tab}{}{{\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab}}}",
+                    self.enclose_by_rust_tags(pkg_config_call, true),
+                    self.enclose_by_rust_tags("Some(library) => ".into(), false),
+                    commands_when_found,
+                    self.enclose_by_rust_tags("None => ".into(), false),
+                    commands_when_not_found,
+                );
             }
             _ => (),
         }

@@ -315,7 +315,7 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
     // }
 
     // === Build Option Analysis ===
-    analyzer.run_extra_build_option_analysis().await;
+    // analyzer.run_extra_build_option_analysis().await;
 
     // === Translation Analysis Debug ===
     println!("\n=== DEBUG: Testing Analyzer::translate ===");

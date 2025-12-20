@@ -38,23 +38,33 @@ pub(super) struct TranslationOutput {
 fn get_predefinition(required_funcs: &[&str]) -> String {
     let predefinitions = HashMap::from([
         (
-            "modules",
+            "default_modules",
             "use std::{fs, io::Write, path::{Path, PathBuf}};",
         ),
         ("regex", "use regex;"),
         (
             "write_file",
             r#"fn write_file(path: &Path, content: &str) {
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .expect("file opening");
-    writeln!(f, "{content}").expect("writing");
+  let mut f = OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(path)
+    .expect("file opening");
+  writeln!(f, "{content}").expect("writing");
+}"#,
+        ),
+        (
+            "pkg_config",
+            r#"use pkg_config;
+fn run_pkg_config(name: &str) -> Option<pkg_config::Library> {
+  pkg_config::Config::new()
+    .cargo_metadata(true)
+    .probe(name)
+    .ok()
 }"#,
         ),
     ]);
-    std::iter::once("modules")
+    std::iter::once("default_modules")
         .chain(required_funcs.into_iter().cloned())
         .map(|key| predefinitions.get(key).unwrap())
         .join("\n")

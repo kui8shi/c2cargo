@@ -1,4 +1,6 @@
 //! Structs & Methods for Value Set Analysis
+use crate::utils::enumerate::enumerate_combinations;
+
 use super::{
     guard::cmp_guards,
     location::Location,
@@ -7,12 +9,12 @@ use super::{
 };
 use autotools_parser::ast::node::{AcWordFragment, NodePool};
 use bincode::{Decode, Encode};
-use itertools::Itertools;
 use std::{
     cmp::Ordering,
     collections::{BTreeMap, HashMap, HashSet},
+    hash::{DefaultHasher, Hash, Hasher},
 };
-use std::{io::Write, path::PathBuf, str::FromStr};
+use std::{io::Write, path::PathBuf};
 
 /// Saving the result of backward traversal
 #[derive(Debug, PartialEq, Eq)]
@@ -56,14 +58,6 @@ pub(crate) struct IdentifierDivision {
     pub mapping: Vec<(String, String)>,
 }
 
-fn enumerate_combinations(combos: Vec<HashSet<String>>) -> Vec<Vec<String>> {
-    combos
-        .into_iter()
-        .map(|hs| hs.into_iter().collect::<Vec<_>>().into_iter())
-        .multi_cartesian_product()
-        .collect()
-}
-
 #[derive(Debug, Default, Encode, Decode)]
 pub(crate) struct VSACache {
     resolved_identifiers: HashMap<Identifier, BTreeMap<Location, HashSet<String>>>,
@@ -98,7 +92,7 @@ impl Analyzer {
             self.resolve_eval(&ident, &value, &loc);
         }
         self.divided_vars
-            .replace(self.vsa_cache.recorded_divided_vars.clone());
+            .replace(self.vsa_cache.borrow().recorded_divided_vars.clone());
         // Add def use chains caused by dynamic identifier
         let mut def_use_edges = Vec::new();
         let mut new_locs = Vec::new();
@@ -128,17 +122,27 @@ impl Analyzer {
     }
 
     /// collect literals of a var
-    pub(crate) fn resolve_var(&mut self, name: &str, loc: &Location) -> HashSet<String> {
+    pub(crate) fn resolve_var(
+        &self,
+        name: &str,
+        loc: Option<Location>,
+        is_cache_enabled: bool,
+    ) -> HashSet<String> {
+        let loc = match loc {
+            Some(loc) => loc,
+            None => self.get_location_of_node_end(*self.top_ids.last().unwrap()),
+        };
         let v = ValueExpr::Var(name.to_owned(), loc.clone());
-        if let Some(cached) = self.get_cached_resolved_values(&v, loc) {
-            cached
-        } else {
-            self.resolve_value_expression(&v, loc)
+        if is_cache_enabled {
+            if let Some(cached) = self.get_cached_resolved_values(&v, &loc) {
+                return cached;
+            }
         }
+        self.resolve_value_expression(&v, &loc, is_cache_enabled)
     }
 
     fn record_identifier_division(
-        &mut self,
+        &self,
         identifier: Identifier,
         resolved: Vec<String>,
         eval_loc: Location,
@@ -183,8 +187,8 @@ impl Analyzer {
                     .collect::<Vec<_>>();
                 (before_eval, use_locs)
             };
-            let div = self
-                .vsa_cache
+            let mut cache_guard = self.vsa_cache.borrow_mut();
+            let div = cache_guard
                 .recorded_divided_vars
                 .entry(name.clone())
                 .or_default();
@@ -200,14 +204,10 @@ impl Analyzer {
         }
     }
 
-    fn cache_resolved_values(
-        &mut self,
-        val_expr: ValueExpr,
-        loc: Location,
-        values: HashSet<String>,
-    ) {
+    fn cache_resolved_values(&self, val_expr: ValueExpr, loc: Location, values: HashSet<String>) {
         if let Some(identifier) = (&val_expr).into() {
             self.vsa_cache
+                .borrow_mut()
                 .resolved_identifiers
                 .entry(identifier)
                 .or_default()
@@ -216,6 +216,7 @@ impl Analyzer {
                 .extend(values);
         } else if !matches!(val_expr, ValueExpr::Lit(_)) {
             self.vsa_cache
+                .borrow_mut()
                 .resolved_value_expresssions
                 .entry(val_expr)
                 .or_default()
@@ -230,11 +231,13 @@ impl Analyzer {
     ) -> Option<HashSet<String>> {
         if let Some(identifier) = val_expr.into() {
             self.vsa_cache
+                .borrow()
                 .resolved_identifiers
                 .get(&identifier)
                 .and_then(|m| m.range(..=loc).next().map(|(_, s)| s.clone()))
         } else {
             self.vsa_cache
+                .borrow()
                 .resolved_value_expresssions
                 .get(val_expr)
                 .cloned()
@@ -244,7 +247,7 @@ impl Analyzer {
     /// construct chain of value flows in backward order and resolve them.
     fn resolve_eval(&mut self, lhs: &Identifier, rhs: &Option<ValueExpr>, loc: &Location) {
         if let Some(rhs) = rhs {
-            let rhs = self.resolve_value_expression(rhs, loc);
+            let rhs = self.resolve_value_expression(rhs, loc, true);
             for var_name in self.resolve_identifier(lhs, loc) {
                 if !var_name.is_empty() {
                     self.cache_resolved_values(
@@ -268,8 +271,8 @@ impl Analyzer {
                 result.insert(lit.to_owned());
             }
             Identifier::Indirect(name) => {
-                if let Some(chain) = self.construct_chain(name, loc) {
-                    result.extend(self.resolve_chain(chain))
+                if let Some(chain) = self.construct_chain(name, loc, true) {
+                    result.extend(self.resolve_chain(chain, true))
                 }
             }
             ident @ Identifier::Concat(values) => {
@@ -290,10 +293,17 @@ impl Analyzer {
         result
     }
 
-    fn resolve_value_expression(&mut self, value: &ValueExpr, loc: &Location) -> HashSet<String> {
+    pub(crate) fn resolve_value_expression(
+        &self,
+        value: &ValueExpr,
+        loc: &Location,
+        is_cache_enabled: bool,
+    ) -> HashSet<String> {
         let mut result = HashSet::new();
-        if let Some(resolved) = self.get_cached_resolved_values(&value, loc) {
-            return resolved;
+        if is_cache_enabled {
+            if let Some(resolved) = self.get_cached_resolved_values(&value, loc) {
+                return resolved;
+            }
         }
         match value {
             ValueExpr::Lit(lit) => {
@@ -303,8 +313,8 @@ impl Analyzer {
                 );
             }
             ValueExpr::Var(name, loc) => {
-                if let Some(chain) = self.construct_chain(name, loc) {
-                    let chain_result = self.resolve_chain(chain);
+                if let Some(chain) = self.construct_chain(name, loc, is_cache_enabled) {
+                    let chain_result = self.resolve_chain(chain, is_cache_enabled);
                     result.extend(chain_result);
                 } else {
                     // No chain found for variable
@@ -313,7 +323,7 @@ impl Analyzer {
             ValueExpr::Concat(values) => {
                 let resolved = values
                     .iter()
-                    .map(|r| self.resolve_value_expression(r, loc))
+                    .map(|r| self.resolve_value_expression(r, loc, is_cache_enabled))
                     .collect::<Vec<_>>();
                 let combos = enumerate_combinations(resolved);
                 // enumerate combinations
@@ -323,7 +333,7 @@ impl Analyzer {
             v @ ValueExpr::DynName(values) => {
                 let resolved = values
                     .iter()
-                    .map(|r| self.resolve_value_expression(r, loc))
+                    .map(|r| self.resolve_value_expression(r, loc, is_cache_enabled))
                     .collect::<Vec<_>>();
                 let ident = Into::<Option<Identifier>>::into(v).unwrap();
                 // enumerate combinations
@@ -332,8 +342,8 @@ impl Analyzer {
                     self.record_identifier_division(ident.clone(), combo.clone(), loc.clone());
                 }
                 for name in combos.into_iter().map(|words| words.concat()) {
-                    if let Some(chain) = self.construct_chain(&name, loc) {
-                        let chain_result = self.resolve_chain(chain);
+                    if let Some(chain) = self.construct_chain(&name, loc, is_cache_enabled) {
+                        let chain_result = self.resolve_chain(chain, is_cache_enabled);
                         result.extend(chain_result);
                     }
                 }
@@ -341,7 +351,7 @@ impl Analyzer {
             ValueExpr::Shell(shell_string, vars) => {
                 let resolved = vars
                     .iter()
-                    .map(|r| self.resolve_value_expression(r, loc))
+                    .map(|r| self.resolve_value_expression(r, loc, is_cache_enabled))
                     .collect();
                 // enumerate combinations & additoinal resolving with shell execution
                 // cf. RValue::concretize
@@ -402,11 +412,13 @@ impl Analyzer {
                 }
             }
         }
-        self.cache_resolved_values(value.clone(), loc.clone(), result.clone());
+        if is_cache_enabled {
+            self.cache_resolved_values(value.clone(), loc.clone(), result.clone());
+        }
         result
     }
 
-    fn resolve_chain(&mut self, chain: Chain) -> HashSet<String> {
+    fn resolve_chain(&self, chain: Chain, is_cache_enabled: bool) -> HashSet<String> {
         // resolve chain
         // 1. if unresolved is not empty, recursively call resolve_value_expression on them
         // 2. else, return resolved
@@ -414,12 +426,9 @@ impl Analyzer {
             chain
                 .resolved
                 .into_iter()
-                .chain(
-                    chain
-                        .unresolved
-                        .into_iter()
-                        .flat_map(|value| self.resolve_value_expression(&value, &chain.loc)),
-                )
+                .chain(chain.unresolved.into_iter().flat_map(|value| {
+                    self.resolve_value_expression(&value, &chain.loc, is_cache_enabled)
+                }))
                 .collect()
         } else {
             chain.resolved
@@ -427,14 +436,16 @@ impl Analyzer {
     }
 
     /// Given a variable, traverse the script backward to construct chain of values
-    fn construct_chain(&self, name: &str, loc: &Location) -> Option<Chain> {
+    fn construct_chain(&self, name: &str, loc: &Location, is_cache_enabled: bool) -> Option<Chain> {
         let as_ident = Identifier::Name(name.to_owned());
         let as_expr = ValueExpr::Var(name.to_owned(), loc.clone());
 
         let mut chain = Chain::new(as_ident.clone(), loc.clone());
-        if let Some(resolved) = self.get_cached_resolved_values(&as_expr, loc) {
-            chain.resolved.extend(resolved.clone());
-            return Some(chain);
+        if is_cache_enabled {
+            if let Some(resolved) = self.get_cached_resolved_values(&as_expr, loc) {
+                chain.resolved.extend(resolved.clone());
+                return Some(chain);
+            }
         }
         if self.fixed.contains_key(name) {
             chain.resolved.insert(self.fixed[name].to_owned());
@@ -481,7 +492,7 @@ impl Analyzer {
             match cmd.clone() {
                 MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) if lhs == name => {
                     let ifs = self.current_internal_field_separator(&def_loc);
-                    let vals = self.inspect_word(&rhs, &def_loc, ifs);
+                    let vals = self.vsa_inspect_word(&rhs, &def_loc, ifs);
                     let is_rhs_concrete =
                         vals.is_empty() || vals.iter().all(|v| matches!(v, ValueExpr::Lit(_)));
                     let found_dominant_initialization = is_rhs_concrete
@@ -507,7 +518,7 @@ impl Analyzer {
                 }) if var == name => {
                     let ifs = self.current_internal_field_separator(&def_loc);
                     for word in words {
-                        let vals = self.inspect_word(&word, &def_loc, ifs);
+                        let vals = self.vsa_inspect_word(&word, &def_loc, ifs);
                         for val in vals {
                             match val {
                                 ValueExpr::Lit(lit) => {
@@ -530,7 +541,7 @@ impl Analyzer {
         Some(chain)
     }
 
-    fn inspect_word(
+    pub(crate) fn vsa_inspect_word(
         &self,
         word: &AcWord,
         loc: &Location,
@@ -539,20 +550,26 @@ impl Analyzer {
         let mut values = Vec::new();
         match &word.0 {
             Word::Single(word) => {
-                values.extend(self.inspect_word_fragment(word, loc, internal_field_separator))
+                values.extend(self.vsa_inspect_word_fragment(word, loc, internal_field_separator))
             }
-            Word::Concat(words) => values.push(ValueExpr::Concat(
-                words
-                    .iter()
-                    .flat_map(|w| self.inspect_word_fragment(w, loc, internal_field_separator))
-                    .collect(),
-            )),
+            Word::Concat(words) => {
+                let mut current_word = Vec::new();
+                for w in words.iter() {
+                    let v = self.vsa_inspect_word_fragment(w, loc, internal_field_separator);
+                    if v.is_empty() {
+                        emit_word(&mut current_word, &mut values);
+                    } else {
+                        current_word.extend(v);
+                    }
+                }
+                emit_word(&mut current_word, &mut values);
+            }
             Word::Empty => values.push(ValueExpr::Lit(String::new())),
         }
         values
     }
 
-    fn inspect_word_fragment(
+    fn vsa_inspect_word_fragment(
         &self,
         word: &AcWordFragment,
         loc: &Location,
@@ -569,31 +586,50 @@ impl Analyzer {
                 );
             }
             Shell(WordFragment::DoubleQuoted(frags)) => {
+                // we have to conduct careful literal splitting due to the following reasons.
+                // 1. Sorry but the current autoconf parser cannot recognize concatenation of words
+                //    inside double quoted strings. For example, if we have "${a} prefix_${b}",
+                //    what we really want to see is the two words like '[Var("a"), Concat([Lit("prefix_"), Var("b")])]'.
+                //    However, what actually we get from the parser is just '[Var("a"), Lit(" prefix_"), Var("b")]'.
+                //    Here we have to find the boundary of concatenated words from ' prefix_'.
+                // 2. `IFS` can be other than just a whitespace, e.g. ':', which confuses us.
+
+                let mut current_word = Vec::new();
+
                 for f in frags {
                     match f {
                         WordFragment::Literal(lit) => {
-                            values.extend(
-                                self.split_literal_with_internal_field_separator(
-                                    lit,
-                                    internal_field_separator,
-                                )
-                                .into_iter()
-                                .map(|s| ValueExpr::Lit(s)),
-                            );
+                            let parts: Vec<&str> =
+                                lit.split(internal_field_separator.unwrap_or(' ')).collect();
+
+                            // First part stays with current word
+                            if !parts[0].is_empty() {
+                                current_word.push(ValueExpr::Lit(parts[0].to_string()));
+                            }
+
+                            // Each subsequent part creates a word boundary
+                            for part in &parts[1..] {
+                                emit_word(&mut current_word, &mut values);
+                                if !part.is_empty() {
+                                    current_word.push(ValueExpr::Lit(part.to_string()));
+                                }
+                            }
                         }
                         WordFragment::Param(Parameter::Var(var)) => {
-                            values.push(ValueExpr::Var(var.to_owned(), loc.clone()));
+                            current_word.push(ValueExpr::Var(var.to_owned(), loc.clone()));
                         }
                         WordFragment::Escaped(s) if s == "\n" => (),
                         w if internal_field_separator.is_some_and(|ifs| {
                             ifs.to_string() == self.pool.shell_word_to_string(w)
                         }) =>
                         {
-                            ()
+                            emit_word(&mut current_word, &mut values);
                         }
                         _ => todo!("{:?}", f),
                     }
                 }
+
+                emit_word(&mut current_word, &mut values);
             }
             Shell(WordFragment::Param(Parameter::Var(var))) => {
                 values.push(ValueExpr::Var(var.to_owned(), loc.clone()));
@@ -636,7 +672,9 @@ impl Analyzer {
             if let MayM4::Shell(ShellCommand::Assignment(_, rhs)) =
                 &self.get_node(ifs_loc.node_id).unwrap().cmd.0
             {
-                if let ValueExpr::Lit(lit) = self.inspect_word(rhs, &ifs_loc, None).pop().unwrap() {
+                if let ValueExpr::Lit(lit) =
+                    self.vsa_inspect_word(rhs, &ifs_loc, None).pop().unwrap()
+                {
                     internal_field_separator.replace(lit.chars().next().unwrap());
                 }
             }
@@ -663,18 +701,25 @@ impl Analyzer {
     }
 
     fn serialize_vsa_cache(&self) {
-        let path = PathBuf::from_str("/tmp/vsa_cache.bin").unwrap();
+        let path = self.get_vsa_cache_path();
         let config = bincode::config::standard();
         let content = bincode::encode_to_vec(&self.vsa_cache, config).unwrap();
         std::fs::write(path, content).unwrap();
     }
 
     fn deserialize_vsa_cache(&mut self) {
-        let path = PathBuf::from_str("/tmp/vsa_cache.bin").unwrap();
+        let path = self.get_vsa_cache_path();
         if let Ok(content) = std::fs::read(path) {
             let config = bincode::config::standard();
             self.vsa_cache = bincode::decode_from_slice(&content, config).unwrap().0;
         }
+    }
+
+    fn get_vsa_cache_path(&self) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+        self.path.to_str().unwrap().hash(&mut hasher);
+        let h = hasher.finish();
+        PathBuf::from(format!("/tmp/vsa_cache.{:x}.bin", h))
     }
 }
 
@@ -692,5 +737,15 @@ fn convert_identifier_to_value_expression(ident: Identifier, loc: Location) -> V
                 })
                 .collect(),
         ),
+    }
+}
+
+fn emit_word(current_word: &mut Vec<ValueExpr>, values: &mut Vec<ValueExpr>) {
+    if !current_word.is_empty() {
+        if current_word.len() == 1 {
+            values.push(current_word.pop().unwrap());
+        } else {
+            values.push(ValueExpr::Concat(current_word.drain(..).collect()));
+        }
     }
 }

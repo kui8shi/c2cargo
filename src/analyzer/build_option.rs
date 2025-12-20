@@ -4,10 +4,10 @@ use super::{
     guard::{Atom, Guard, VarCond, VoL},
     Analyzer, M4Macro, NodeId,
 };
+use crate::utils::llm_analysis::LLMAnalysis;
 use crate::{
     analyzer::build_option::use_llm::BuildOptionLLMAnalysisResult, utils::glob::glob_enumerate,
 };
-use crate::{analyzer::AstVisitor, utils::llm_analysis::LLMAnalysis};
 use heck::ToSnakeCase;
 use itertools::Itertools;
 
@@ -40,6 +40,7 @@ pub(crate) struct CargoFeature {
     pub name: String,
     pub original_build_option: String,
     pub value_map: HashMap<String, FeatureState>,
+    pub enabled_by_default: Option<bool>,
 }
 
 /// doc
@@ -72,7 +73,7 @@ impl Analyzer {
         self.build_option_info = self.extract_build_options();
 
         // we add information to guards that touch build options.
-        self.convert_guards();
+        self.find_build_option_guards();
 
         // remove nodes related to disabling build options.
         // since cargo feature's additive nature, disabling build options is impossible.
@@ -88,6 +89,7 @@ impl Analyzer {
 
         // remove build option declaraton nodes from targets of later analyses
         self.remove_build_option_declarations();
+        self.apply_non_empty_property_of_cargo_features();
     }
 
     /// Analyze various properties of build options using LLMs
@@ -130,83 +132,7 @@ impl Analyzer {
                 .unwrap()
                 .insert(res.option_name.clone(), features);
         }
-    }
-
-    /// Generate Cargo features from BuildOptionLLMAnalysisResult
-    fn generate_cargo_features(&self, result: &BuildOptionLLMAnalysisResult) -> Vec<CargoFeature> {
-        let mut features = Vec::new();
-
-        if result.representatives.iter().sorted().eq(["no", "yes"]) {
-            // For boolean options, just use the option name as feature
-            features.push(CargoFeature {
-                name: result.option_name.clone(),
-                original_build_option: result.option_name.clone(),
-                value_map: HashMap::from_iter(
-                    [
-                        ("yes".to_owned(), FeatureState::positive()),
-                        ("no".to_owned(), FeatureState::negative()),
-                    ]
-                    .into_iter()
-                    .chain(
-                        result
-                            .aliases
-                            .iter()
-                            .map(|aliases| {
-                                aliases.iter().map(|(from, to)| {
-                                    let state = match to.as_str() {
-                                        "yes" => FeatureState::positive(),
-                                        "no" => FeatureState::negative(),
-                                        _ => unreachable!(),
-                                    };
-                                    (from.clone(), state)
-                                })
-                            })
-                            .flatten(),
-                    ),
-                ),
-            });
-        } else {
-            // For enum-like options, generate features by prefixing representatives with option_name
-            for representative in &result.representatives {
-                if representative == "no" {
-                    // the disabled state can be representated by turning off all other exclusive features
-                    // TODO: however we may have to treat this case more carefully.
-                    continue;
-                }
-                let feature_name = if &result.option_name == representative {
-                    result.option_name.clone()
-                } else {
-                    format!(
-                        "{}_{}",
-                        result.option_name,
-                        representative.replace("-", "_")
-                    )
-                };
-                features.push(CargoFeature {
-                    name: feature_name.clone(),
-                    original_build_option: result.option_name.clone(),
-                    value_map: HashMap::from_iter(
-                        [(representative.clone(), FeatureState::positive())]
-                            .into_iter()
-                            .chain(
-                                result
-                                    .aliases
-                                    .iter()
-                                    .map(|aliases| {
-                                        aliases.iter().map(|(from, to)| {
-                                            (to == representative)
-                                                .then_some((from.clone(), FeatureState::positive()))
-                                        })
-                                    })
-                                    .flatten()
-                                    .flatten(),
-                            ),
-                    ),
-                });
-            }
-        }
-
-        features
+        self.apply_non_empty_property_of_cargo_features();
     }
 
     /// doc
@@ -261,7 +187,7 @@ impl Analyzer {
         }
     }
 
-    fn convert_guards(&mut self) {
+    fn find_build_option_guards(&mut self) {
         let arg_vars = self
             .build_option_info
             .arg_var_to_option_name
@@ -272,7 +198,7 @@ impl Analyzer {
             block.guards = block
                 .guards
                 .iter()
-                .map(|guard| convert_guard_type_to_arg(&guard, &arg_vars))
+                .map(|guard| convert_guard_var_to_arg(&guard, &arg_vars))
                 .collect();
         }
     }
@@ -412,7 +338,7 @@ impl Analyzer {
                                                 .flat_map(|guard| match guard {
                                                     Guard::N(
                                                         false,
-                                                        Atom::Arg(name, VarCond::Yes),
+                                                        Atom::Arg(name, VarCond::True),
                                                     ) if arg_var != name => Some(name.to_owned()),
                                                     _ => None,
                                                 })
@@ -459,7 +385,7 @@ impl Analyzer {
             .keys()
             .collect::<Vec<_>>();
 
-        // Find all assignment nodes where build option variable is set to "yes"
+        // Find assignment nodes where build option variable's value is directly used
         for (node_id, node) in self
             .pool
             .nodes
@@ -510,6 +436,102 @@ impl Analyzer {
             self.remove_node(node_id);
         }
     }
+
+    /// Generate Cargo features from BuildOptionLLMAnalysisResult
+    fn generate_cargo_features(&self, result: &BuildOptionLLMAnalysisResult) -> Vec<CargoFeature> {
+        let mut features = Vec::new();
+
+        if result.representatives.iter().sorted().eq(["no", "yes"]) {
+            // For boolean options, just use the option name as feature
+            features.push(CargoFeature {
+                name: result.option_name.clone(),
+                original_build_option: result.option_name.clone(),
+                value_map: HashMap::from_iter(
+                    [
+                        ("yes".to_owned(), FeatureState::positive()),
+                        ("no".to_owned(), FeatureState::negative()),
+                    ]
+                    .into_iter()
+                    .chain(
+                        result
+                            .aliases
+                            .iter()
+                            .map(|aliases| {
+                                aliases.iter().map(|(from, to)| {
+                                    let state = match to.as_str() {
+                                        "yes" => FeatureState::positive(),
+                                        "no" => FeatureState::negative(),
+                                        _ => unreachable!(),
+                                    };
+                                    (from.clone(), state)
+                                })
+                            })
+                            .flatten(),
+                    ),
+                ),
+                enabled_by_default: result.enabled_by_default,
+            });
+        } else {
+            // For enum-like options, generate features by prefixing representatives with option_name
+            for representative in &result.representatives {
+                if representative == "no" {
+                    // the disabled state can be representated by turning off all other exclusive features
+                    // TODO: however we may have to treat this case more carefully.
+                    continue;
+                }
+                let feature_name = if &result.option_name == representative {
+                    result.option_name.clone()
+                } else {
+                    format!("{}_{}", result.option_name, representative.to_snake_case())
+                };
+                features.push(CargoFeature {
+                    name: feature_name.clone(),
+                    original_build_option: result.option_name.clone(),
+                    value_map: HashMap::from_iter(
+                        [(representative.clone(), FeatureState::positive())]
+                            .into_iter()
+                            .chain(
+                                result
+                                    .aliases
+                                    .iter()
+                                    .map(|aliases| {
+                                        aliases.iter().map(|(from, to)| {
+                                            (to == representative)
+                                                .then_some((from.clone(), FeatureState::positive()))
+                                        })
+                                    })
+                                    .flatten()
+                                    .flatten(),
+                            ),
+                    ),
+                    enabled_by_default: None,
+                });
+            }
+        }
+
+        features
+    }
+
+    fn apply_non_empty_property_of_cargo_features(&mut self) {
+        for (_, block) in self.blocks.iter_mut() {
+            let mut converted = Vec::new();
+            for guard in block.guards.iter() {
+                match convert_empty_argument_guards(
+                    &guard,
+                    &self.build_option_info.arg_var_to_option_name,
+                    &self.build_option_info.cargo_features,
+                ) {
+                    Ok(guard) => converted.push(guard),
+                    Err(true) => converted.push(Guard::confirmed(Atom::Tautology)),
+                    Err(false) => converted.push(Guard::negated(Atom::Tautology)),
+                }
+            }
+            if are_guards_contradictory(&converted) {
+                converted = vec![Guard::negated(Atom::Tautology)];
+            }
+            block.guards = converted;
+        }
+    }
 }
 
 fn is_arg_var_guarded(guard: &Guard, arg_var: &str) -> bool {
@@ -524,7 +546,7 @@ fn is_arg_var_guarded(guard: &Guard, arg_var: &str) -> bool {
     }
 }
 
-fn convert_guard_type_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
+fn convert_guard_var_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
     match guard {
         Guard::N(negated, atom) => match atom {
             Atom::Var(name, cond) if arg_vars.contains(name.as_str()) => {
@@ -534,12 +556,12 @@ fn convert_guard_type_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
         },
         Guard::And(v) => Guard::And(
             v.iter()
-                .map(|g| convert_guard_type_to_arg(g, &arg_vars))
+                .map(|g| convert_guard_var_to_arg(g, &arg_vars))
                 .collect(),
         ),
         Guard::Or(v) => Guard::Or(
             v.iter()
-                .map(|g| convert_guard_type_to_arg(g, &arg_vars))
+                .map(|g| convert_guard_var_to_arg(g, &arg_vars))
                 .collect(),
         ),
     }
@@ -578,4 +600,107 @@ fn normalize(values: Vec<String>) -> Vec<String> {
         literals.sort();
         literals.into_iter().take(MAX_NUM).collect()
     }
+}
+
+fn convert_empty_argument_guards(
+    guard: &Guard,
+    arg_var_to_option_name: &HashMap<String, String>,
+    cargo_features: &Option<HashMap<String, Vec<CargoFeature>>>,
+) -> Result<Guard, bool> {
+    match guard {
+        Guard::N(negated, atom) => match atom {
+            Atom::Arg(name, VarCond::Empty)
+                if arg_var_to_option_name.contains_key(name.as_str()) =>
+            {
+                // we found empty guards of arguments
+                // basically cargo features does not hold such empty values.
+                // we have to convert this guard to either
+                // 1. ⊤,
+                // 2. ⊥, or
+                // 3. default value of the corresponding cargo feature analyzed by the LLM.
+                let option_name = arg_var_to_option_name.get(name.as_str()).unwrap();
+                if let Some(features) = cargo_features
+                    .as_ref()
+                    .map(|m| m.get(option_name))
+                    .flatten()
+                {
+                    if features.len() == 1 {
+                        // boolean feature
+                        if let Some(enabled_by_default) = features[0].enabled_by_default {
+                            // has default value
+                            return Err(enabled_by_default ^ *negated);
+                        }
+                    }
+                }
+                // the argument variable found to have no valid state anymore.
+                // if negated, evaluated to ⊤,
+                // else, evaluated to ⊥.
+                return Err(*negated);
+            }
+            _ => Ok(guard.clone()),
+        },
+        Guard::And(v) => {
+            let mut converted = Vec::new();
+            for g in v {
+                match convert_empty_argument_guards(g, &arg_var_to_option_name, &cargo_features) {
+                    Ok(guard) => converted.push(guard),
+                    Err(true) => continue,
+                    Err(false) => return Err(false),
+                }
+            }
+            if converted.len() == 1 {
+                Ok(converted.pop().unwrap())
+            } else {
+                Ok(Guard::And(converted))
+            }
+        }
+        Guard::Or(v) => {
+            let mut converted = Vec::new();
+            for g in v {
+                match convert_empty_argument_guards(g, &arg_var_to_option_name, &cargo_features) {
+                    Ok(guard) => converted.push(guard),
+                    Err(true) => return Err(true),
+                    Err(false) => continue,
+                }
+            }
+            if converted.len() == 1 {
+                Ok(converted.pop().unwrap())
+            } else {
+                Ok(Guard::Or(converted))
+            }
+        }
+    }
+}
+
+fn are_guards_contradictory(guards: &[Guard]) -> bool {
+    let mut record = HashMap::new();
+    dbg!(&guards);
+    for guard in guards {
+        dbg!(&record);
+        match guard {
+            Guard::N(negated, Atom::Var(name, VarCond::True) | Atom::Arg(name, VarCond::True)) => {
+                let new = !negated;
+                if let Some(existing) = record.insert(name, new) {
+                    if new != existing {
+                        return true;
+                    }
+                }
+            }
+            Guard::N(
+                negated,
+                Atom::Var(name, VarCond::False) | Atom::Arg(name, VarCond::False),
+            ) => {
+                let new = *negated;
+                if let Some(existing) = record.insert(name, new) {
+                    if new != existing {
+                        return true;
+                    }
+                }
+            }
+            _ => {
+                // for simplicity ignore other guards
+            }
+        }
+    }
+    false
 }

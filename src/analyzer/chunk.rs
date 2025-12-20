@@ -260,11 +260,11 @@ impl Analyzer {
     fn examine_chunk_io(&mut self, chunk_id: ChunkId) {
         let chunk_start_loc = {
             let first_id = *self.chunks[chunk_id].nodes.first().unwrap();
-            self.node_start_loc(first_id)
+            self.get_location_of_node_start(first_id)
         };
         let chunk_end_loc = {
             let last_id = *self.chunks[chunk_id].nodes.last().unwrap();
-            self.node_end_loc(last_id)
+            self.get_location_of_node_end(last_id)
         };
 
         // Collect all variables defined within the chunk
@@ -609,7 +609,7 @@ impl Analyzer {
         ret
     }
 
-    pub(crate) fn make_chunk_skeletons(&mut self) {
+    pub(crate) fn construct_chunk_skeletons(&mut self) {
         let mut chunk_skeletons: HashMap<ChunkId, FunctionSkelton> = self
             .chunks
             .iter()
