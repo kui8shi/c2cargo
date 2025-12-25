@@ -82,23 +82,19 @@ impl LLMAnalysisOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
         }
 
         // 2b) representatives must not contain yes, no, and other literals.
-        if reps_set.contains("yes") && reps_set.contains("no") {
-            if reps_set.len() > 2 {
-                errors.push(format!(
+        if reps_set.contains("yes") && reps_set.contains("no") && reps_set.len() > 2 {
+            errors.push(format!(
                     r#"If "yes" and "no" are in representatives, they must not hold any other values: {:?}"#,
                     reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
                 ))
-            }
         }
 
         // 2c) binary representatives must contain yes and no.
-        if reps_set.len() <= 2 {
-            if !(reps_set.contains("yes") && reps_set.contains("no")) {
-                errors.push(format!(
+        if reps_set.len() <= 2 && !(reps_set.contains("yes") && reps_set.contains("no")) {
+            errors.push(format!(
                     r#"Binary representatives must contain yes and no. They must not hold any other values: {:?}"#,
                     reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
                 ))
-            }
         }
 
         // 3) aliases must partition the non-representatives:

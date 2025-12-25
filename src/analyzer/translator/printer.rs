@@ -149,23 +149,21 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
             let is_top = self.top_most.get().is_none();
             if is_top {
                 self.top_most.replace(Some(node_id));
-            } else {
-                if node.info.is_top_node() {
-                    let chunk_id = node.info.chunk_id.unwrap();
-                    if self.embedded_chunks.borrow().contains_key(&chunk_id) {
-                        return "".into();
-                    } else {
-                        let func_name = super::rust_func_placeholder_name(chunk_id);
-                        self.embedded_chunks
-                            .borrow_mut()
-                            .insert(chunk_id, func_name.clone());
-                        // the node beyond boundary should not be displayed.
-                        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
-                        let call_site = self
-                            .analyzer
-                            .print_chunk_skeleton_call_site(chunk_id, &func_name);
-                        return format!("{tab}{}", self.enclose_by_rust_tags(call_site, true));
-                    }
+            } else if node.info.is_top_node() {
+                let chunk_id = node.info.chunk_id.unwrap();
+                if self.embedded_chunks.borrow().contains_key(&chunk_id) {
+                    return "".into();
+                } else {
+                    let func_name = super::rust_func_placeholder_name(chunk_id);
+                    self.embedded_chunks
+                        .borrow_mut()
+                        .insert(chunk_id, func_name.clone());
+                    // the node beyond boundary should not be displayed.
+                    let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+                    let call_site = self
+                        .analyzer
+                        .print_chunk_skeleton_call_site(chunk_id, &func_name);
+                    return format!("{tab}{}", self.enclose_by_rust_tags(call_site, true));
                 }
             }
             let saved_node_cursor = self.node_cursor.replace(Some(node_id));
@@ -193,16 +191,12 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
         use autotools_parser::ast::minimal::WordFragment::{DoubleQuoted, Literal};
         match &word.0 {
             Empty => "".to_string(),
-            Concat(frags) => {
-                format!(
-                    "{}",
-                    frags
-                        .iter()
-                        .map(|w| self.display_may_m4_word(w))
-                        .collect::<Vec<String>>()
-                        .concat()
-                )
-            }
+            Concat(frags) => frags
+                .iter()
+                .map(|w| self.display_may_m4_word(w))
+                .collect::<Vec<String>>()
+                .concat()
+                .to_string(),
             Single(frag) => {
                 let s = self.display_may_m4_word(frag);
                 if should_quote {
@@ -353,19 +347,17 @@ impl<'a> TranslatingPrinter<'a> {
                         .build_option_info
                         .cargo_features
                         .as_ref()
-                        .map(|cargo_features| {
+                        .and_then(|cargo_features| {
                             cargo_features
                                 .get(option_name.as_str())
-                                .map(|features| {
+                                .and_then(|features| {
                                     features.iter().find_map(|feature| {
                                         feature.value_map.get(value).map(|feature_state| {
                                             (feature.name.as_str(), feature_state)
                                         })
                                     })
                                 })
-                                .flatten()
                         })
-                        .flatten()
                 };
                 match var_cond {
                     VarCond::True => {
@@ -705,7 +697,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
 
     fn display_cmd(&self, words: &[AcWord], indent_level: usize) -> String {
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
-        if let Some(first) = words.get(0) {
+        if let Some(first) = words.first() {
             if is_eval(first) {
                 // FIXME: for the simplicity, we have two assumptions here.
                 // 1. in eval assignments, only one dictionary gets touched, either written or read.
@@ -761,22 +753,21 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
         }
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         if redirects.len() == 2 {
-            match (&redirects[0], &redirects[1]) {
-                (Redirect::Write(_, file), Redirect::Heredoc(_, heredoc)) => {
-                    if let Word::Single(MayM4::Shell(WordFragment::Literal(filename))) = &file.0 {
-                        let rust_string = {
-                            let path = format!("Path::new(\"{}\")", filename);
-                            self.record_translated_fragment(path.clone());
-                            let content = self.display_word_as_format_string(heredoc);
-                            self.enclose_by_rust_tags(
-                                format!("write_file({}, &{})", path, content),
-                                false,
-                            )
-                        };
-                        return format!("{tab}{}", rust_string);
-                    }
+            if let (Redirect::Write(_, file), Redirect::Heredoc(_, heredoc)) =
+                (&redirects[0], &redirects[1])
+            {
+                if let Word::Single(MayM4::Shell(WordFragment::Literal(filename))) = &file.0 {
+                    let rust_string = {
+                        let path = format!("Path::new(\"{}\")", filename);
+                        self.record_translated_fragment(path.clone());
+                        let content = self.display_word_as_format_string(heredoc);
+                        self.enclose_by_rust_tags(
+                            format!("write_file({}, &{})", path, content),
+                            false,
+                        )
+                    };
+                    return format!("{tab}{}", rust_string);
                 }
-                _ => (),
             }
         }
         self.redirect_cmd_to_string(cmd, redirects, indent_level)
@@ -826,7 +817,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 );
             }
             "AC_DEFINE" => {
-                let key = match m4_macro.args.get(0).unwrap() {
+                let key = match m4_macro.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
                     M4Argument::Literal(lit) => lit.to_owned(),
                     _ => unreachable!(),
@@ -863,7 +854,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
             }
             "AC_DEFINE_UNQUOTED" => {
-                let (key_fstr, vars_in_key) = match m4_macro.args.get(0).unwrap() {
+                let (key_fstr, vars_in_key) = match m4_macro.args.first().unwrap() {
                     M4Argument::Word(word) => self.take_format_string_and_vars(word),
                     M4Argument::Literal(lit) => (lit.to_owned(), Vec::new()),
                     _ => unreachable!(),
@@ -965,9 +956,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
 fn should_guard_replaced(guard: &Guard) -> bool {
     match guard {
         Guard::N(_, atom) => should_atom_replaced(atom),
-        Guard::Or(guards) | Guard::And(guards) => {
-            guards.iter().any(|guard| should_guard_replaced(guard))
-        }
+        Guard::Or(guards) | Guard::And(guards) => guards.iter().any(should_guard_replaced),
     }
 }
 

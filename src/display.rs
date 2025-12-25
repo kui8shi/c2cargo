@@ -77,12 +77,10 @@ impl<U> DisplayNode for AutoconfPool<U> {
             let is_top = self.focus.get().is_none();
             if is_top {
                 self.focus.replace(Some(node_id));
-            } else {
-                if let Some(beyond_boundary) = &self.cross_boundary {
-                    if beyond_boundary(node) {
-                        // the node beyond boundary should not be displayed.
-                        return String::new();
-                    }
+            } else if let Some(beyond_boundary) = &self.cross_boundary {
+                if beyond_boundary(node) {
+                    // the node beyond boundary should not be displayed.
+                    return String::new();
                 }
             }
             use MayM4::*;
@@ -104,16 +102,12 @@ impl<U> DisplayNode for AutoconfPool<U> {
         use autotools_parser::ast::minimal::WordFragment::{DoubleQuoted, Literal};
         match &word.0 {
             Empty => "\"\"".to_string(),
-            Concat(frags) => {
-                format!(
-                    "{}",
-                    frags
-                        .iter()
-                        .map(|w| self.may_m4_word_to_string(w))
-                        .collect::<Vec<String>>()
-                        .concat()
-                )
-            }
+            Concat(frags) => frags
+                .iter()
+                .map(|w| self.may_m4_word_to_string(w))
+                .collect::<Vec<String>>()
+                .concat()
+                .to_string(),
             Single(frag) => {
                 let s = self.may_m4_word_to_string(frag);
                 if should_quote {
@@ -178,14 +172,12 @@ impl<U> AutoconfPool<U> {
         match arg {
             Literal(lit) => format!("[{}]", lit),
             Word(word) => self.display_word(word, false),
-            Array(words) => format!(
-                "{}",
-                words
-                    .iter()
-                    .map(|w| self.display_word(w, false))
-                    .collect::<Vec<String>>()
-                    .join(if words.len() < 10 { " " } else { &newline })
-            ),
+            Array(words) => words
+                .iter()
+                .map(|w| self.display_word(w, false))
+                .collect::<Vec<String>>()
+                .join(if words.len() < 10 { " " } else { &newline })
+                .to_string(),
             Program(prog) => format!("[{}]", prog.replace("\n", &newline)),
             Commands(cmds) => {
                 if !cmds.is_empty() {

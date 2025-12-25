@@ -38,24 +38,24 @@ impl Analyzer {
         self.top_ids.retain(|&id| id != node_id);
 
         // Clean up any references in other data structures
-        self.var_definitions.as_mut().map(|v| {
+        if let Some(v) = self.var_definitions.as_mut() {
             v.retain(|_, locations| {
                 locations.retain(|loc| loc.node_id != node_id);
                 !locations.is_empty()
             })
-        });
-        self.var_propagated_definitions.as_mut().map(|v| {
+        }
+        if let Some(v) = self.var_propagated_definitions.as_mut() {
             v.retain(|_, locations| {
                 locations.retain(|loc| loc.node_id != node_id);
                 !locations.is_empty()
             })
-        });
-        self.var_usages.as_mut().map(|v| {
+        }
+        if let Some(v) = self.var_usages.as_mut() {
             v.retain(|_, locations| {
                 locations.retain(|loc| loc.node_id != node_id);
                 !locations.is_empty()
             })
-        });
+        }
 
         // Remove the node's child blocks
         for block_id in self.get_node(node_id).unwrap().info.branches.clone() {
@@ -157,16 +157,17 @@ impl Analyzer {
                     else_branch,
                 } => {
                     if branch_index < conditionals.len() {
-                        conditionals
-                            .get_mut(branch_index)
-                            .map(|pair| pair.body.retain(|id| *id != node_id));
+                        if let Some(pair) = conditionals.get_mut(branch_index) {
+                            pair.body.retain(|id| *id != node_id)
+                        }
                     } else {
                         else_branch.retain(|id| *id != node_id);
                     }
                 }
                 ShellCommand::Case { word: _, arms } => {
-                    arms.get_mut(branch_index)
-                        .map(|pair| pair.body.retain(|id| *id != node_id));
+                    if let Some(pair) = arms.get_mut(branch_index) {
+                        pair.body.retain(|id| *id != node_id)
+                    }
                 }
                 ShellCommand::Brace(body) | ShellCommand::Subshell(body) => {
                     body.retain(|id| *id != node_id);
@@ -188,11 +189,8 @@ impl Analyzer {
             },
             MayM4::Macro(m4_macro) => {
                 for arg in m4_macro.args.iter_mut() {
-                    match arg {
-                        M4Argument::Commands(cmds) => {
-                            cmds.retain(|id| *id != node_id);
-                        }
-                        _ => (),
+                    if let M4Argument::Commands(cmds) = arg {
+                        cmds.retain(|id| *id != node_id);
                     }
                 }
             }

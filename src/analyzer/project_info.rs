@@ -29,7 +29,7 @@ impl Analyzer {
             .iter()
             .chain(self.project_info.h_files.iter())
             .map(|p| p.as_path())
-            .chain(template_files.into_iter())
+            .chain(template_files)
             .map(|path| (path.to_owned(), load_source(path)))
             .collect::<HashMap<_, _>>();
         self.project_info.source_contents.replace(contents);
@@ -64,8 +64,7 @@ impl Analyzer {
                 self.project_info
                     .dynamic_links
                     .iter()
-                    .map(|(_, to)| to.iter())
-                    .flatten(),
+                    .flat_map(|(_, to)| to.iter()),
             )
             .map(|p| p.as_path())
             .collect::<HashSet<_>>()

@@ -22,7 +22,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::process::exit(1);
     }
 
-    analysis::analysis(&Path::new(path)).await?;
+    analysis::analysis(Path::new(path)).await?;
     // dbg!(analyzer.find_case_matches(&["host".into(), "host_cpu".into()]));
     // migrate(&analyzer)?;
     Ok(())

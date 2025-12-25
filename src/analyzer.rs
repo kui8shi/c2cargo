@@ -18,7 +18,6 @@ use autotools_parser::{
         Arithmetic, MayM4, Parameter, Redirect,
     },
     lexer::Lexer,
-    m4_macro::SideEffect,
     parse::autoconf::NodeParser,
 };
 use build_option::BuildOptionInfo;
@@ -667,7 +666,7 @@ impl Analyzer {
         // FIXME: We really don't want this variable. But the matching logic is incorrect
         // (e.g. $USER_VARIABLE -> SER_VARIABLE)
         .replace("$U", "");
-        std::fs::read_to_string(&path).unwrap();
+        std::fs::read_to_string(path).unwrap();
         // Move to the project directory
         let project_dir = path.parent().unwrap().to_owned();
         std::env::set_current_dir(&project_dir).expect("Unable to move to the project directory.");
@@ -796,7 +795,7 @@ impl Analyzer {
     /// Get command that defines a variable before
     pub fn get_last_definition(&self, var_name: &str, node_id: NodeId) -> Option<NodeId> {
         if let Some(node) = self.pool.get(node_id) {
-            if let Some(user_loc) = node.info.usages.get(var_name).map(|v| v.first()).flatten() {
+            if let Some(user_loc) = node.info.usages.get(var_name).and_then(|v| v.first()) {
                 return self.get_definition(var_name).and_then(|v| {
                     v.iter()
                         .rev()
@@ -843,7 +842,7 @@ impl Analyzer {
         // for now instead, we use this dumb logic.
         self.get_propagated_definition(var_name)
             .into_iter()
-            .flat_map(|prop_def_locs| prop_def_locs.into_iter())
+            .flat_map(|prop_def_locs| prop_def_locs.iter())
             .find(|prop_def| {
                 self.collect_descendant_nodes_per_node(prop_def.node_id, false, true)
                     .contains(&def_loc.node_id)
@@ -892,7 +891,7 @@ impl Analyzer {
     /// Get command that defines a variable before, with consideration for the condition
     pub fn get_dominant_definition(&self, var_name: &str, node_id: NodeId) -> Option<Location> {
         if let Some(node) = self.pool.get(node_id) {
-            if let Some(use_loc) = node.info.usages.get(var_name).map(|v| v.first()).flatten() {
+            if let Some(use_loc) = node.info.usages.get(var_name).and_then(|v| v.first()) {
                 let defs = self
                     .get_definition(var_name)
                     .into_iter()
@@ -1051,12 +1050,11 @@ impl Analyzer {
                     n.info
                         .branches
                         .iter()
-                        .map(|block_id| {
+                        .filter_map(|block_id| {
                             self.blocks
                                 .get(*block_id)
                                 .map(|block| block.nodes.clone().into_iter())
                         })
-                        .flatten()
                         .flatten()
                         .filter(|id| self.node_exists(*id))
                         .collect(),

@@ -114,7 +114,7 @@ impl Analyzer {
     /// run type inference
     pub(crate) fn run_type_inference(&mut self) {
         self.inferred_types
-            .replace(TypeInferrer::run_type_inference(&self));
+            .replace(TypeInferrer::run_type_inference(self));
         self.convert_guards_for_numeric_boolean();
     }
 
@@ -137,7 +137,7 @@ impl Analyzer {
             block.guards = block
                 .guards
                 .iter()
-                .map(|guard| convert_guard_numeric_boolean(&guard, &bool_vars))
+                .map(|guard| convert_guard_numeric_boolean(guard, &bool_vars))
                 .collect();
         }
     }
@@ -351,8 +351,8 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
 
     fn visit_condition(&mut self, cond: &Condition<NodeId, AcWord>) {
         use Operator::*;
-        match cond {
-            Condition::Cond(op) => match op {
+        if let Condition::Cond(op) = cond {
+            match op {
                 Eq(lhs, rhs) | Neq(lhs, rhs) => {
                     if let Some(lit) = as_shell(rhs).and_then(as_literal) {
                         if let Some(var) = as_shell(lhs).and_then(as_var) {
@@ -383,8 +383,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                         self.add_type_hint(var, UsedAsPath);
                     }
                 }
-            },
-            _ => (),
+            }
         }
         self.walk_condition(cond);
     }
@@ -460,7 +459,7 @@ fn convert_guard_numeric_boolean(guard: &Guard, bool_vars: &HashSet<&str>) -> Gu
     match guard {
         Guard::N(negated, atom) => match atom {
             Atom::Var(name, VarCond::Eq(VoL::Lit(lit)))
-                if bool_vars.contains(name.as_str()) && is_numeric(&lit) =>
+                if bool_vars.contains(name.as_str()) && is_numeric(lit) =>
             {
                 Guard::N(
                     false,
@@ -478,12 +477,12 @@ fn convert_guard_numeric_boolean(guard: &Guard, bool_vars: &HashSet<&str>) -> Gu
         },
         Guard::And(v) => Guard::And(
             v.iter()
-                .map(|g| convert_guard_numeric_boolean(g, &bool_vars))
+                .map(|g| convert_guard_numeric_boolean(g, bool_vars))
                 .collect(),
         ),
         Guard::Or(v) => Guard::Or(
             v.iter()
-                .map(|g| convert_guard_numeric_boolean(g, &bool_vars))
+                .map(|g| convert_guard_numeric_boolean(g, bool_vars))
                 .collect(),
         ),
     }

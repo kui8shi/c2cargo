@@ -254,10 +254,8 @@ impl Analyzer {
         let mut ret = Vec::new();
         for block in self.blocks_guarded_by_variable(var_name) {
             children.extend(block.nodes.iter());
-            if !children.contains(&block.parent) {
-                if !ret.contains(&block.parent) {
-                    ret.push(block.parent)
-                }
+            if !children.contains(&block.parent) && !ret.contains(&block.parent) {
+                ret.push(block.parent)
             }
         }
         ret
@@ -289,7 +287,7 @@ impl<'a> GuardAnalyzer<'a> {
 
         // record parent-child relation ships
         for &id in node_ids {
-            assert!(self.get_node(parent).unwrap().range.len() > 0);
+            assert!(!self.get_node(parent).unwrap().range.is_empty());
             self.analyzer.link_body_to_parent(id, parent, new_block_id);
 
             if self.get_node(id).unwrap().range.is_empty() {
@@ -388,13 +386,9 @@ impl<'a> GuardAnalyzer<'a> {
         }
 
         match &w1.0 {
-            Word::Empty => {
-                if let Some(var) = as_shell(w2).and_then(as_var) {
-                    Some(Guard::confirmed(Atom::Var(var.to_owned(), VarCond::Empty)))
-                } else {
-                    None
-                }
-            }
+            Word::Empty => as_shell(w2)
+                .and_then(as_var)
+                .map(|var| Guard::confirmed(Atom::Var(var.to_owned(), VarCond::Empty))),
             Word::Single(MayM4::Shell(w1)) => {
                 if let WordFragment::Subst(subst) = w1 {
                     match &**subst {
@@ -468,7 +462,7 @@ impl<'a> GuardAnalyzer<'a> {
             Word::Concat(concat) if concat.len() == 2 => {
                 if let Some(w2) = as_shell(w2) {
                     if let Some(frags) = concat
-                        .into_iter()
+                        .iter()
                         .map(|w| match w {
                             MayM4::Shell(shell) => Some(shell.clone()),
                             _ => None,
@@ -623,7 +617,7 @@ impl<'a> GuardAnalyzer<'a> {
         if let Some(word) = as_shell(word) {
             let word = if let &WordFragment::DoubleQuoted(frags) = &word {
                 if frags.len() == 1 {
-                    frags.first().clone().unwrap()
+                    frags.first().unwrap()
                 } else {
                     word
                 }
@@ -633,7 +627,7 @@ impl<'a> GuardAnalyzer<'a> {
             if let WordFragment::Subst(subst) = &word {
                 match &**subst {
                     ParameterSubstitution::Command(cmds) if cmds.len() == 1 => {
-                        Some(Guard::confirmed(Atom::Cmd(cmds.first().unwrap().clone())))
+                        Some(Guard::confirmed(Atom::Cmd(*cmds.first().unwrap())))
                     }
                     _ => None,
                 }
@@ -712,7 +706,7 @@ impl<'a> GuardAnalyzer<'a> {
                         }
                     }
                 }
-            } else if let &WordFragment::DoubleQuoted(ref frags) = word {
+            } else if let WordFragment::DoubleQuoted(frags) = word {
                 let pattern_string = self.analyzer.display_word(pattern);
                 let vars: Vec<String> = frags
                     .iter()
@@ -847,7 +841,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
             self.negate_last_guard();
         }
         if !else_branch.is_empty() {
-            self.record_block(&else_branch);
+            self.record_block(else_branch);
         }
         for c in else_branch {
             self.visit_node(*c);
@@ -895,7 +889,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
             }
         }
         let mut removing_arm_indexes = Vec::new();
-        for (arm_index, arm) in arms.into_iter().enumerate() {
+        for (arm_index, arm) in arms.iter().enumerate() {
             let mut guard = Guard::make_or(
                 arm.patterns
                     .iter()
@@ -973,10 +967,10 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
 }
 
 fn analyze_path(word: &AcWord) -> (Vec<VoL>, bool) {
-    const SLASH: &'static str = "/";
+    const SLASH: &str = "/";
     let trim_slash = |w| {
         if as_literal(w).is_some_and(|s| s.starts_with(SLASH)) {
-            let trimmed = as_literal(&w).unwrap()[0..].to_string();
+            let trimmed = as_literal(w).unwrap()[0..].to_string();
             vec![
                 WordFragment::Literal(SLASH.into()),
                 WordFragment::Literal(trimmed),
@@ -1020,14 +1014,14 @@ fn analyze_path(word: &AcWord) -> (Vec<VoL>, bool) {
     };
     if words.len() > 1
         && !words[1..]
-            .into_iter()
+            .iter()
             .step_by(2)
             .all(|w| as_literal(w).is_some_and(|s| s == SLASH))
     {
-        dbg!(&words[1..].into_iter().step_by(2).collect::<Vec<_>>());
+        dbg!(&words[1..].iter().step_by(2).collect::<Vec<_>>());
         panic!("unsupported path syntax: {:?}", words);
     }
-    let path = words.iter().step_by(2).filter_map(|w| as_vol(w)).collect();
+    let path = words.iter().step_by(2).filter_map(as_vol).collect();
     (path, is_absolute)
 }
 

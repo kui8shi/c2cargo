@@ -104,10 +104,10 @@ pub(super) enum AmValue {
     Concat(Vec<Self>),
 }
 
-impl Into<AmValue> for &Vec<AmIdent> {
-    fn into(self) -> AmValue {
-        let v = self
-            .into_iter()
+impl From<&Vec<AmIdent>> for AmValue {
+    fn from(val: &Vec<AmIdent>) -> Self {
+        let v = val
+            .iter()
             .map(|i| match i {
                 AmIdent::Raw(s) => AmValue::Lit(s.into()),
                 AmIdent::Template(t) => AmValue::Var(t.into()),
@@ -183,7 +183,7 @@ impl Analyzer {
 
         for path in self.project_info.am_files.clone() {
             let automake = self.analyze_automake_file(&path, vec![]);
-            self.automake_mut().files.insert(path.into(), automake);
+            self.automake_mut().files.insert(path, automake);
         }
         let files = self.automake().files.keys().cloned().collect::<Vec<_>>();
         self.project_info.am_files.extend(files);
@@ -192,7 +192,8 @@ impl Analyzer {
     }
 
     fn analyze_automake_file(&mut self, path: &Path, mut condition: Vec<AmGuard>) -> AutomakeFile {
-        let path = std::fs::canonicalize(path).expect(&format!("Unable to find {:?}", path));
+        let path =
+            std::fs::canonicalize(path).unwrap_or_else(|_| panic!("Unable to find {:?}", path));
         let project_dir = self.project_info.project_dir.clone();
         let contents = load_automake_file(&path, &project_dir);
         let lexer = Lexer::new(contents.chars());
@@ -295,7 +296,7 @@ impl Analyzer {
                 );
                 automake
                     .libraries
-                    .entry(dir.to_owned().into())
+                    .entry(dir.to_owned())
                     .or_default()
                     .push(target);
             }
@@ -323,7 +324,7 @@ impl Analyzer {
                 );
                 automake
                     .programs
-                    .entry(dir.to_owned().into())
+                    .entry(dir.to_owned())
                     .or_default()
                     .push(target);
             }
@@ -429,11 +430,11 @@ impl Analyzer {
                     for ref var in self.resolve_automake_identifier(ident) {
                         if vars.contains_key(var) {
                             resolved.extend(
-                                self.resolve_automake_var(&vars, var)
-                                    .into_iter()
-                                    .filter_map(|with_guard| {
+                                self.resolve_automake_var(vars, var).into_iter().filter_map(
+                                    |with_guard| {
                                         with_guard.am_cond.is_empty().then_some(with_guard.value)
-                                    }),
+                                    },
+                                ),
                             );
                         } else {
                             resolved.insert(AmValue::Var(var.to_owned()));
@@ -444,11 +445,10 @@ impl Analyzer {
                 AmVar::Template(template) => HashSet::from([AmValue::Var(template.to_owned())]),
                 _ => Default::default(),
             },
-            _ => Default::default(),
         };
         if let Some(vals) = vars.get(var) {
-            vals.into_iter()
-                .map(|val| {
+            vals.iter()
+                .flat_map(|val| {
                     let values = match &val.value.0 {
                         Word::Empty => Vec::new(),
                         Word::Single(word) => resolve_word(word).into_iter().collect(),
@@ -464,7 +464,6 @@ impl Analyzer {
                         am_cond: val.am_cond.clone(),
                     })
                 })
-                .flatten()
                 .collect()
         } else {
             vec![WithGuard {
@@ -477,7 +476,7 @@ impl Analyzer {
     fn resolve_automake_value(&self, val: &WithGuard<AmValue>) -> HashSet<WithGuard<String>> {
         match &val.value {
             AmValue::Var(var) => self
-                .resolve_var(&var, None, false)
+                .resolve_var(var, None, false)
                 .into_iter()
                 .map(|s| WithGuard {
                     value: s,
@@ -570,8 +569,8 @@ impl Analyzer {
                     result.extend(
                         self.resolve_var(&var, None, false)
                             .into_iter()
-                            .map(|value| PathBuf::from(value))
-                            .flat_map(|path| find_files(path))
+                            .map(PathBuf::from)
+                            .flat_map(&find_files)
                             .map(|path| WithGuard {
                                 value: path,
                                 am_cond: Default::default(),
@@ -595,7 +594,7 @@ impl Analyzer {
     fn resolve_automake_identifier(&self, ident: &Vec<AmIdent>) -> Vec<String> {
         enumerate_combinations(
             ident
-                .into_iter()
+                .iter()
                 .map(|i| match i {
                     AmIdent::Raw(n) => HashSet::from([n.clone()]),
                     AmIdent::Template(t) => self.resolve_var(t, None, false),
@@ -611,13 +610,13 @@ impl Analyzer {
         let resolve_word = |w: &MayAm<_, _>| match w {
             MayAm::Shell(w) => {
                 if let Some(lit) = as_literal(w) {
-                    return HashSet::from([lit.to_owned()]);
+                    HashSet::from([lit.to_owned()])
                 } else {
                     Default::default()
                 }
             }
             MayAm::Automake(am_var) => match am_var {
-                AmVar::Template(template) => self.resolve_var(&template, None, false),
+                AmVar::Template(template) => self.resolve_var(template, None, false),
                 // an automake identifier is assumed not to have any make parameters (e.g. $(var)) embedded.
                 _ => Default::default(),
             },
@@ -657,9 +656,7 @@ impl Analyzer {
                             vars.insert(name, values.clone());
                         }
                         AmAssignOp::Append => {
-                            vars.entry(name)
-                                .or_insert_with(Vec::new)
-                                .extend(values.clone());
+                            vars.entry(name).or_default().extend(values.clone());
                         }
                     }
                 }
@@ -690,13 +687,7 @@ impl Analyzer {
 
     fn extract_source_files(&mut self) {
         for (_, am_file) in self.automake.as_ref().unwrap().files.iter() {
-            for target in am_file
-                .libraries
-                .get("lib")
-                .iter()
-                .map(|v| v.iter())
-                .flatten()
-            {
+            for target in am_file.libraries.get("lib").iter().flat_map(|v| v.iter()) {
                 self.project_info.c_files.extend(
                     target
                         .sources
@@ -712,8 +703,8 @@ impl Analyzer {
                 am_file
                     .built_sources
                     .iter()
-                    .cloned()
-                    .filter(|v| v.extension().is_some_and(|ext| ext == "c")),
+                    .filter(|&v| v.extension().is_some_and(|ext| ext == "c"))
+                    .cloned(),
             );
         }
     }
@@ -724,8 +715,8 @@ impl Analyzer {
                 am_file
                     .built_sources
                     .iter()
-                    .cloned()
-                    .filter(|v| v.extension().is_some_and(|ext| ext == "h")),
+                    .filter(|&v| v.extension().is_some_and(|ext| ext == "h"))
+                    .cloned(),
             );
         }
         let will_be_generated = self
@@ -738,18 +729,16 @@ impl Analyzer {
                 self.project_info
                     .dynamic_links
                     .iter()
-                    .map(|(from, _)| from.iter())
-                    .flatten(),
+                    .flat_map(|(from, _)| from.iter()),
             )
             .collect::<HashSet<_>>();
         self.project_info.h_files.extend(
             self.project_info
                 .c_files
                 .iter()
-                .map(|c_file| {
+                .flat_map(|c_file| {
                     get_included_headers(c_file, &self.project_info.project_dir).into_iter()
                 })
-                .flatten()
                 .filter(|h| !will_be_generated.contains(&h))
                 .collect::<HashSet<_>>(),
         );
@@ -815,7 +804,7 @@ fn load_automake_file(path: &Path, project_dir: &Path) -> String {
 
                 // Resolve the full path of the included file
                 let include_path =
-                    resolve_path(&file, path, &project_dir).expect("Failed at resolving a path.");
+                    resolve_path(&file, path, project_dir).expect("Failed at resolving a path.");
                 // Recursively load the included file
                 let full_read_path = project_dir.join(&include_path);
                 load_automake_file(&full_read_path, project_dir)

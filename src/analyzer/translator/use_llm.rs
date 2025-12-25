@@ -72,7 +72,7 @@ fn get_predefinition(required_funcs: &[&str]) -> String {
         ),
     ]);
     std::iter::once("default_modules")
-        .chain(required_funcs.into_iter().cloned())
+        .chain(required_funcs.iter().cloned())
         .map(|key| predefinitions.get(key).unwrap())
         .join("\n")
 }
@@ -122,7 +122,7 @@ impl LLMAnalysisOutput<TranslationEvidence> for TranslationOutput {
                 .arg(tmp.path())
                 .stderr(std::process::Stdio::piped())
                 .output()
-                .expect(&format!("Executing: rustc has failed"));
+                .expect("Executing: rustc has failed");
 
             let stderr = String::from_utf8_lossy(&output.stderr);
             for line in stderr.lines() {

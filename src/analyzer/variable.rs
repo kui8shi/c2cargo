@@ -51,7 +51,7 @@ impl Identifier {
         match self {
             Self::Name(_) => None,
             Self::Indirect(s) => Some(vec![s.to_owned()]),
-            Self::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            Self::Concat(v) => Some(v.iter().filter_map(|e| e.vars()).flatten().collect()),
         }
     }
 
@@ -59,7 +59,7 @@ impl Identifier {
         match self {
             Self::Name(_) => vec![None],
             Self::Indirect(s) => vec![Some(s.to_owned())],
-            Self::Concat(v) => v.iter().map(|e| e.positional_vars()).flatten().collect(),
+            Self::Concat(v) => v.iter().flat_map(|e| e.positional_vars()).collect(),
         }
     }
 }
@@ -69,9 +69,9 @@ impl ValueExpr {
         match self {
             Self::Lit(_) => None,
             Self::Var(s, _) => Some(vec![s.to_owned()]),
-            Self::Concat(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
-            Self::DynName(v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
-            Self::Shell(_, v) => Some(v.iter().map(|e| e.vars()).flatten().flatten().collect()),
+            Self::Concat(v) => Some(v.iter().filter_map(|e| e.vars()).flatten().collect()),
+            Self::DynName(v) => Some(v.iter().filter_map(|e| e.vars()).flatten().collect()),
+            Self::Shell(_, v) => Some(v.iter().filter_map(|e| e.vars()).flatten().collect()),
         }
     }
 }
@@ -222,14 +222,13 @@ impl<'a> VariableAnalyzer<'a> {
                         .get_block(*block_id)
                         .nodes
                         .iter()
-                        .map(|id| {
+                        .flat_map(|id| {
                             let node = self.analyzer.get_node(*id).unwrap();
                             node.info
                                 .definitions
                                 .keys()
                                 .chain(node.info.propagated_definitions.keys())
                         })
-                        .flatten()
                         .cloned()
                         .collect::<HashSet<_>>()
                 })
@@ -417,7 +416,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
     }
 
     fn visit_command(&mut self, cmd_words: &[AcWord]) {
-        if let Some(first) = cmd_words.get(0) {
+        if let Some(first) = cmd_words.first() {
             if is_eval(first) {
                 if let Some(Word::Concat(frags)) = cmd_words.get(1).map(|t| &t.0) {
                     // FIXME: eval_loc's `order_in_expr` is inprecisely fixed to 0.
@@ -492,8 +491,7 @@ impl Analyzer {
             .pool
             .nodes
             .iter()
-            .map(|(_, n)| n.info.definitions.iter())
-            .flatten()
+            .flat_map(|(_, n)| n.info.definitions.iter())
             .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
                 acc.entry(name.clone()).or_default().extend(locs.clone());
                 acc
@@ -509,8 +507,7 @@ impl Analyzer {
             .pool
             .nodes
             .iter()
-            .map(|(_, n)| n.info.propagated_definitions.iter())
-            .flatten()
+            .flat_map(|(_, n)| n.info.propagated_definitions.iter())
             .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
                 acc.entry(name.clone()).or_default().extend(locs.clone());
                 acc
@@ -527,8 +524,7 @@ impl Analyzer {
             .pool
             .nodes
             .iter()
-            .map(|(_, n)| n.info.usages.iter())
-            .flatten()
+            .flat_map(|(_, n)| n.info.usages.iter())
             .fold(HashMap::new(), |mut acc: VariableMap, (name, locs)| {
                 acc.entry(name.clone()).or_default().extend(locs.clone());
                 acc

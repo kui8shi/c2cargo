@@ -89,17 +89,17 @@ impl Analyzer {
             .collect::<Vec<_>>();
         evals.sort_by_key(|(_, _, loc)| loc.clone());
         for (ident, value, loc) in evals.iter() {
-            self.resolve_eval(&ident, &value, &loc);
+            self.resolve_eval(ident, value, loc);
         }
         self.divided_vars
             .replace(self.vsa_cache.borrow().recorded_divided_vars.clone());
         // Add def use chains caused by dynamic identifier
         let mut def_use_edges = Vec::new();
         let mut new_locs = Vec::new();
-        for (name, divided) in self.divided_vars().into_iter() {
+        for (name, divided) in self.divided_vars().iter() {
             if let Some(def_locs) = self.get_definition(name) {
                 for def_loc in def_locs {
-                    for (eval_loc, _) in &divided.eval_locs {
+                    for eval_loc in divided.eval_locs.keys() {
                         def_use_edges.push((def_loc.node_id, eval_loc.node_id, name.to_owned()));
                         new_locs.push((name.to_owned(), eval_loc.clone()));
                     }
@@ -301,7 +301,7 @@ impl Analyzer {
     ) -> HashSet<String> {
         let mut result = HashSet::new();
         if is_cache_enabled {
-            if let Some(resolved) = self.get_cached_resolved_values(&value, loc) {
+            if let Some(resolved) = self.get_cached_resolved_values(value, loc) {
                 return resolved;
             }
         }
@@ -369,8 +369,7 @@ impl Analyzer {
                     let var_name = var_names.next().unwrap();
                     let vals = combos
                         .into_iter()
-                        .map(|combo| combo.into_iter())
-                        .flatten()
+                        .flat_map(|combo| combo.into_iter())
                         .collect::<Vec<_>>();
                     let mut tmp =
                         tempfile::NamedTempFile::new().expect("Unable to create a temporary file");
@@ -388,7 +387,7 @@ impl Analyzer {
                         .arg("-c")
                         .arg(xargs_script.clone())
                         .output()
-                        .expect(&format!("Executing: {} has failed", xargs_script));
+                        .unwrap_or_else(|_| panic!("Executing: {} has failed", xargs_script));
                     let stdout_string = String::from_utf8(output.stdout)
                         .expect("Unable to convert utf-8 to String.");
                     if !stdout_string.is_empty() {
@@ -402,7 +401,7 @@ impl Analyzer {
                             .arg(shell_string.clone())
                             .envs(env_pairs)
                             .output()
-                            .expect(&format!("Executing: {} has failed", shell_string));
+                            .unwrap_or_else(|_| panic!("Executing: {} has failed", shell_string));
                         let stdout_string = String::from_utf8(output.stdout)
                             .expect("Unable to convert utf-8 to String.");
                         if !stdout_string.is_empty() {
@@ -582,7 +581,7 @@ impl Analyzer {
                 values.extend(
                     self.split_literal_with_internal_field_separator(lit, internal_field_separator)
                         .into_iter()
-                        .map(|s| ValueExpr::Lit(s)),
+                        .map(ValueExpr::Lit),
                 );
             }
             Shell(WordFragment::DoubleQuoted(frags)) => {
@@ -656,7 +655,6 @@ impl Analyzer {
             Shell(w) => {
                 let lit = self.pool.shell_word_to_string(w);
                 if internal_field_separator.is_some_and(|ifs| ifs.to_string() == lit) {
-                    ()
                 } else {
                     values.push(ValueExpr::Lit(lit));
                 }
@@ -745,7 +743,7 @@ fn emit_word(current_word: &mut Vec<ValueExpr>, values: &mut Vec<ValueExpr>) {
         if current_word.len() == 1 {
             values.push(current_word.pop().unwrap());
         } else {
-            values.push(ValueExpr::Concat(current_word.drain(..).collect()));
+            values.push(ValueExpr::Concat(std::mem::take(current_word)));
         }
     }
 }

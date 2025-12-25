@@ -329,10 +329,9 @@ impl<'a> AstVisitor for Flattener<'a> {
             // Then C should belong to B's top-level group, not A's.
             self.parent_stack
                 .iter()
-                .rposition(|p| p.flatten) // Find rightmost flattened ancestor
-                .and_then(|i| {
-                    // If we found a flattened ancestor, look at what comes after it
-                    Some(if i + 1 < self.parent_stack.len() {
+                .rposition(|p| p.flatten)
+                .map(|i| {
+                    if i + 1 < self.parent_stack.len() {
                         // There's a node after the flattened ancestor - use that as top_id
                         // This node represents the "container" for children of the flattened ancestor
                         self.parent_stack[i + 1].node_id
@@ -340,7 +339,7 @@ impl<'a> AstVisitor for Flattener<'a> {
                         // No node after the flattened ancestor - this node becomes its own top
                         // This happens when we're directly under a flattened node
                         node_id
-                    })
+                    }
                 })
                 .unwrap_or(top_most) // Fallback: if no flattened ancestors, use topmost
         };
@@ -380,7 +379,7 @@ impl<'a> AstVisitor for Flattener<'a> {
             {
                 let start = self.get_node(cur).unwrap().range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
-                    if !(prev <= start) {
+                    if prev > start {
                         dbg!(
                             &self.get_node(cur).unwrap().range,
                             cur,
@@ -460,7 +459,7 @@ impl<'a> AstVisitor for Flattener<'a> {
             {
                 let start = self.get_node(cur).unwrap().range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
-                    if !(prev <= start) {
+                    if prev > start {
                         dbg!(cur, self.last_range_start);
                         panic!();
                     }
@@ -530,7 +529,7 @@ impl<'a> AstVisitor for Flattener<'a> {
             {
                 let start = self.get_node(cur).unwrap().range_start().unwrap();
                 if let Some(prev) = self.last_range_start {
-                    if !(prev <= start) {
+                    if prev > start {
                         dbg!(cur, self.last_range_start);
                         panic!();
                     }
@@ -581,7 +580,7 @@ impl<'a> AstVisitor for Flattener<'a> {
                     self.flattened_top_ids.extend(else_branch);
                     self.walk_body(else_branch);
                 } else {
-                    let brace_id = self.insert_brace(cur, &else_branch);
+                    let brace_id = self.insert_brace(cur, else_branch);
                     new_else_branch.push(brace_id);
                     self.parent_stack.push(ParentInfo {
                         node_id: brace_id,

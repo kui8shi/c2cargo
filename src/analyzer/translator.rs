@@ -53,7 +53,7 @@ impl Analyzer {
                 "callsite: {}",
                 self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
             );
-            let printer = TranslatingPrinter::new(&self);
+            let printer = TranslatingPrinter::new(self);
             for &id in chunk.nodes.iter() {
                 println!("{}", &printer.print_node(id));
             }
@@ -177,7 +177,7 @@ impl Analyzer {
                 .unwrap()
                 .nodes
                 .iter()
-                .map(|nid| format!("{}", &printer.print_node(*nid)))
+                .map(|nid| printer.print_node(*nid).to_string())
                 .join("\n");
             let header = format!(
                 "{} {{{}\n  ",
@@ -215,11 +215,7 @@ impl Analyzer {
             .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
             .await;
 
-        results.extend(
-            llm_analysis_results
-                .into_iter()
-                .map(|res| (res.id.clone(), res)),
-        );
+        results.extend(llm_analysis_results.into_iter().map(|res| (res.id, res)));
 
         for chunk_id in results.keys().cloned().collect::<Vec<_>>() {
             for (id, placeholder) in depending_funcs.get(&chunk_id).unwrap() {
@@ -231,22 +227,6 @@ impl Analyzer {
         }
 
         results
-        // for res in results {
-        //     let func_def = format!(
-        //         "fn {}{} {{\n  {}\n}}",
-        //         res.rust_func_name,
-        //         self.print_chunk_skeleton_signature(res.id),
-        //         self.print_chunk_skeleton_body_header(res.id)
-        //             .into_iter()
-        //             .chain(res.rust_func_body.split("\n").map(|s| s.to_owned()))
-        //             .chain(std::iter::once(
-        //                 self.print_chunk_skeleton_body_footer(res.id)
-        //             ))
-        //             .filter(|s| !s.is_empty())
-        //             .join("\n  "),
-        //     );
-        //     println!("Chunk {} (After):\n{}", res.id, func_def)
-        // }
     }
 
     fn get_translation_inputs(&self) -> Vec<(TranslationInput, TranslationEvidence)> {
@@ -260,7 +240,7 @@ impl Analyzer {
                 .unwrap()
                 .nodes
                 .iter()
-                .map(|nid| format!("{}", &printer.print_node(*nid)))
+                .map(|nid| printer.print_node(*nid).to_string())
                 .join("\n");
             let header = format!(
                 "{} {{{}\n  ",

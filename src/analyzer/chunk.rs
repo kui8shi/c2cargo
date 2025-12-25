@@ -185,7 +185,7 @@ impl Analyzer {
                     {
                         // Found relation within lookahead - add all lookahead nodes to chunk
                         current_chunk.extend(lookahead_nodes[..=last_related_idx].iter());
-                        i = i + last_related_idx; // Skip ahead (will be incremented at loop end)
+                        i += last_related_idx; // Skip ahead (will be incremented at loop end)
                     } else {
                         // No relation found in lookahead - cut here and start new chunk
                         if !current_chunk.is_empty() {
@@ -218,8 +218,7 @@ impl Analyzer {
             .unwrap()
             .info
             .parent
-            .map(|parent| self.get_node(parent).unwrap().info.chunk_id)
-            .flatten();
+            .and_then(|parent| self.get_node(parent).unwrap().info.chunk_id);
         let range = (
             self.get_node(*nodes.first().unwrap())
                 .unwrap()
@@ -232,8 +231,7 @@ impl Analyzer {
         );
         let descendant_nodes = nodes
             .iter()
-            .map(|id| self.collect_descendant_nodes_per_node(*id, true, true))
-            .flatten()
+            .flat_map(|id| self.collect_descendant_nodes_per_node(*id, true, true))
             .collect();
         let new_chunk_id = self.chunks.insert(Chunk {
             nodes: nodes.to_vec(),
@@ -251,7 +249,9 @@ impl Analyzer {
                 .chunk_id
                 .replace(new_chunk_id);
         }
-        parent.map(|id| self.chunks[id].children.push(new_chunk_id));
+        if let Some(id) = parent {
+            self.chunks[id].children.push(new_chunk_id)
+        }
 
         new_chunk_id
     }
@@ -288,8 +288,7 @@ impl Analyzer {
                                 .any(|id| self.get_node(*id).is_some_and(|n| n.info.is_top_node()))
                         })
                     })
-                    .map(|id| self.get_node(id).unwrap().info.bounds.keys())
-                    .flatten()
+                    .flat_map(|id| self.get_node(id).unwrap().info.bounds.keys())
                     .cloned(),
             );
         }
@@ -428,14 +427,13 @@ impl Analyzer {
         let visible_vars = self
             .chunks
             .iter()
-            .map(|(id, c)| {
+            .flat_map(|(id, c)| {
                 c.io.imported
                     .keys()
                     .chain(c.io.exported.keys())
                     .chain(c.io.bounded.iter())
                     .zip(std::iter::repeat(id))
             })
-            .flatten()
             .fold(HashMap::new(), |mut acc, (k, v)| {
                 acc.entry(k.to_owned())
                     .or_insert_with(HashSet::new)
@@ -457,9 +455,7 @@ impl Analyzer {
             {
                 continue;
             }
-            let cids = cids
-                .into_iter()
-                .sorted_by_key(|id| self.chunks[**id].range.0);
+            let cids = cids.iter().sorted_by_key(|id| self.chunks[**id].range.0);
             let mut current_scope = Scope::default();
             for &cid in cids.rev() {
                 let chunk = &self.chunks[cid];
@@ -734,14 +730,14 @@ impl Analyzer {
         }
         for s in chunk_skeletons.values_mut() {
             s.args
-                .sort_by_key(|(is_mut, name, _)| (is_mut.clone(), name.clone()));
+                .sort_by_key(|(is_mut, name, _)| (*is_mut, name.clone()));
             s.maps.sort();
             s.declared
-                .sort_by_key(|(is_mut, name, _)| (is_mut.clone(), name.clone()));
+                .sort_by_key(|(is_mut, name, _)| (*is_mut, name.clone()));
             s.return_to_bind
-                .sort_by_key(|(is_mut, name, _)| (is_mut.clone(), name.clone()));
+                .sort_by_key(|(is_mut, name, _)| (*is_mut, name.clone()));
             s.pass_through_args
-                .sort_by_key(|(is_mut, name, _)| (is_mut.clone(), name.clone()));
+                .sort_by_key(|(is_mut, name, _)| (*is_mut, name.clone()));
             s.pass_through_maps.sort();
         }
         self.chunk_skeletons.replace(chunk_skeletons);
@@ -829,7 +825,7 @@ impl Analyzer {
             .collect::<Vec<_>>();
         match return_elements.len() {
             0 => String::new(),
-            1 => format!("{}", return_elements.first().unwrap()),
+            1 => return_elements.first().unwrap().to_string(),
             _ => format!("({})", return_elements.join(", ")),
         }
     }

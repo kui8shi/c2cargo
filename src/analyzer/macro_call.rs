@@ -126,7 +126,7 @@ impl Analyzer {
     fn consume_error_macros(&mut self) {
         let macro_calls = self.macro_calls.as_ref().unwrap();
         if let Some(v) = macro_calls.get("AX_PREFIX_CONFIG_H") {
-            if let Some((_id, m4_macro)) = v.first().clone() {
+            if let Some((_id, m4_macro)) = v.first() {
                 if let Some(lit) = m4_macro.get_arg_as_literal(1) {
                     self.cpp_prefix.replace(lit + "_");
                 }
@@ -218,8 +218,7 @@ impl Analyzer {
                     if let Some(tags) = macro_call
                         .effects
                         .as_ref()
-                        .map(|side_effects| side_effects.tags.as_ref())
-                        .flatten()
+                        .and_then(|side_effects| side_effects.tags.as_ref())
                     {
                         for (dst, src) in tags {
                             let dst = PathBuf::from(dst);
@@ -246,8 +245,7 @@ impl Analyzer {
                     if let Some(tags) = macro_call
                         .effects
                         .as_ref()
-                        .map(|side_effects| side_effects.tags.as_ref())
-                        .flatten()
+                        .and_then(|side_effects| side_effects.tags.as_ref())
                     {
                         for (dst, src) in tags {
                             let mut is_automake = false;
@@ -373,7 +371,7 @@ impl Analyzer {
                 .into_iter()
                 .flatten()
             {
-                let key = match macro_call.args.get(0) {
+                let key = match macro_call.args.first() {
                     Some(M4Argument::Word(word)) => {
                         if let Some(lit) = as_shell(word).and_then(as_literal) {
                             lit.to_owned()
@@ -416,12 +414,12 @@ impl Analyzer {
                     let from = self
                         .resolve_value_expression(&value_exprs[0], &loc, false)
                         .into_iter()
-                        .map(|s| PathBuf::from(s))
+                        .map(PathBuf::from)
                         .collect::<Vec<_>>();
                     let to = self
                         .resolve_value_expression(&value_exprs[1], &loc, false)
                         .into_iter()
-                        .map(|s| PathBuf::from(s))
+                        .map(PathBuf::from)
                         .filter(|path| self.project_info.project_dir.join(path).exists())
                         .collect::<Vec<_>>();
                     self.project_info.dynamic_links.push((from, to));
@@ -450,8 +448,7 @@ impl Analyzer {
                     .effects
                     .as_ref()
                     .iter()
-                    .map(|e| e.am_conds.iter().flatten())
-                    .flatten()
+                    .flat_map(|e| e.am_conds.iter().flatten())
                 {
                     am_cond_to_guard.insert(am_cond_name.to_owned(), guard.clone());
                     //s.analyzer.automake
@@ -481,19 +478,17 @@ impl Analyzer {
                     let vars: Vec<&Var> = effects
                         .shell_vars
                         .iter()
-                        .map(|v| {
+                        .flat_map(|v| {
                             v.iter().filter(|var| var.is_defined()).filter(|var| {
                                 self.is_var_used(var.name.as_str())
                                     || self.is_substituted(var.name.as_str())
                             })
                         })
-                        .flatten()
                         .collect::<Vec<_>>();
                     let cpps: Vec<&CPP> = effects
                         .cpp_symbols
                         .iter()
-                        .map(|v| v.iter())
-                        .flatten()
+                        .flat_map(|v| v.iter())
                         .collect::<Vec<_>>();
                     if vars.iter().all(|var| var.value.is_some())
                         && cpps.iter().all(|cpp| cpp.value.is_some())
@@ -501,12 +496,7 @@ impl Analyzer {
                         let macro_name = macro_call.name.clone();
                         let vars = vars
                             .iter()
-                            .map(|var| {
-                                (
-                                    var.name.clone(),
-                                    (var.attrs.clone(), var.value.clone().unwrap()),
-                                )
-                            })
+                            .map(|var| (var.name.clone(), (var.attrs, var.value.clone().unwrap())))
                             .collect::<HashMap<_, _>>();
                         let cpps = cpps
                             .iter()
@@ -612,14 +602,14 @@ impl Analyzer {
             .as_ref()
             .unwrap()
             .iter()
-            .cloned()
-            .filter(|var_name| {
+            .filter(|&var_name| {
                 self.get_scopes(var_name.as_str()).is_some_and(|scopes| {
                     scopes
                         .first()
                         .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
                 })
             })
+            .cloned()
             .collect::<HashSet<String>>();
         self.env_vars.replace(env_vars);
     }

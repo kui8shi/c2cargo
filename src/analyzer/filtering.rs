@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use autotools_parser::ast::{node::ShellCommand, MayM4, Redirect};
 
-use crate::analyzer::{as_literal, as_shell, macro_call};
+use crate::analyzer::{as_literal, as_shell};
 
 use super::Analyzer;
 
@@ -29,16 +29,12 @@ impl Analyzer {
                             _ => false,
                         }
                     }) {
-                        match &self.get_node(*id).unwrap().cmd.0 {
-                            Shell(Cmd(cmd_words)) => {
-                                match as_shell(cmd_words.first().unwrap()).and_then(as_literal) {
-                                    Some("cat" | "echo") => {
-                                        remove_nodes.insert(node_id);
-                                    }
-                                    _ => (),
-                                }
+                        if let Shell(Cmd(cmd_words)) = &self.get_node(*id).unwrap().cmd.0 {
+                            if let Some("cat" | "echo") =
+                                as_shell(cmd_words.first().unwrap()).and_then(as_literal)
+                            {
+                                remove_nodes.insert(node_id);
                             }
-                            _ => (),
                         }
                     }
                 }
@@ -51,11 +47,10 @@ impl Analyzer {
                         }
                     }) =>
                 {
-                    match as_shell(cmd_words.first().unwrap()).and_then(as_literal) {
-                        Some("cat" | "echo") => {
-                            remove_nodes.insert(node_id);
-                        }
-                        _ => (),
+                    if let Some("cat" | "echo") =
+                        as_shell(cmd_words.first().unwrap()).and_then(as_literal)
+                    {
+                        remove_nodes.insert(node_id);
                     }
                 }
                 _ => (),

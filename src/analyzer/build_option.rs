@@ -193,7 +193,7 @@ impl Analyzer {
             block.guards = block
                 .guards
                 .iter()
-                .map(|guard| convert_guard_var_to_arg(&guard, &arg_vars))
+                .map(|guard| convert_guard_var_to_arg(guard, &arg_vars))
                 .collect();
         }
     }
@@ -207,7 +207,7 @@ impl Analyzer {
             .collect::<HashMap<_, _>>();
         for build_option in build_options.values_mut() {
             build_option.declaration = self.display_node(build_option.decl_id);
-            let mut target_var_stack = Vec::from(build_option.vars.clone());
+            let mut target_var_stack = build_option.vars.clone();
             let mut visited = HashSet::new();
             while let Some(var) = target_var_stack.pop() {
                 if !visited.contains(&var) {
@@ -325,21 +325,20 @@ impl Analyzer {
                                 nodes_to_remove.push(node_id);
                                 // check if the assign node is guarded by other arg vars.
                                 if let Some(another_arg_var) =
-                                    self.block_of_node(node_id)
-                                        .map(|block| {
-                                            block
-                                                .guards
-                                                .iter()
-                                                .flat_map(|guard| match guard {
-                                                    Guard::N(
-                                                        false,
-                                                        Atom::Arg(name, VarCond::True),
-                                                    ) if arg_var != name => Some(name.to_owned()),
-                                                    _ => None,
-                                                })
-                                                .next()
-                                        })
-                                        .flatten()
+                                    self.block_of_node(node_id).and_then(|block| {
+                                        block
+                                            .guards
+                                            .iter()
+                                            .flat_map(|guard| match guard {
+                                                Guard::N(false, Atom::Arg(name, VarCond::True))
+                                                    if arg_var != name =>
+                                                {
+                                                    Some(name.to_owned())
+                                                }
+                                                _ => None,
+                                            })
+                                            .next()
+                                    })
                                 {
                                     if let Some(dependent_option_name) = self
                                         .build_option_info
@@ -447,22 +446,16 @@ impl Analyzer {
                         ("no".to_owned(), FeatureState::negative()),
                     ]
                     .into_iter()
-                    .chain(
-                        result
-                            .aliases
-                            .iter()
-                            .map(|aliases| {
-                                aliases.iter().map(|(from, to)| {
-                                    let state = match to.as_str() {
-                                        "yes" => FeatureState::positive(),
-                                        "no" => FeatureState::negative(),
-                                        _ => unreachable!(),
-                                    };
-                                    (from.clone(), state)
-                                })
-                            })
-                            .flatten(),
-                    ),
+                    .chain(result.aliases.iter().flat_map(|aliases| {
+                        aliases.iter().map(|(from, to)| {
+                            let state = match to.as_str() {
+                                "yes" => FeatureState::positive(),
+                                "no" => FeatureState::negative(),
+                                _ => unreachable!(),
+                            };
+                            (from.clone(), state)
+                        })
+                    })),
                 ),
                 enabled_by_default: result.enabled_by_default,
             });
@@ -489,13 +482,12 @@ impl Analyzer {
                                 result
                                     .aliases
                                     .iter()
-                                    .map(|aliases| {
+                                    .flat_map(|aliases| {
                                         aliases.iter().map(|(from, to)| {
                                             (to == representative)
                                                 .then_some((from.clone(), FeatureState::positive()))
                                         })
                                     })
-                                    .flatten()
                                     .flatten(),
                             ),
                     ),
@@ -513,7 +505,7 @@ impl Analyzer {
             let mut converted = Vec::new();
             for guard in block.guards.iter() {
                 match convert_empty_argument_guards(
-                    &guard,
+                    guard,
                     &self.build_option_info.arg_var_to_option_name,
                     &self.build_option_info.cargo_features,
                 ) {
@@ -546,18 +538,18 @@ fn convert_guard_var_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
     match guard {
         Guard::N(negated, atom) => match atom {
             Atom::Var(name, cond) if arg_vars.contains(name.as_str()) => {
-                Guard::N(negated.clone(), Atom::Arg(name.clone(), cond.clone()))
+                Guard::N(*negated, Atom::Arg(name.clone(), cond.clone()))
             }
             _ => guard.clone(),
         },
         Guard::And(v) => Guard::And(
             v.iter()
-                .map(|g| convert_guard_var_to_arg(g, &arg_vars))
+                .map(|g| convert_guard_var_to_arg(g, arg_vars))
                 .collect(),
         ),
         Guard::Or(v) => Guard::Or(
             v.iter()
-                .map(|g| convert_guard_var_to_arg(g, &arg_vars))
+                .map(|g| convert_guard_var_to_arg(g, arg_vars))
                 .collect(),
         ),
     }
@@ -572,7 +564,7 @@ fn enumerate_literal(guard: &Guard) -> Vec<String> {
             VarCond::Match(glob) if !glob.contains("*") => glob_enumerate(glob),
             _ => Default::default(),
         },
-        Guard::And(v) | Guard::Or(v) => v.iter().map(|g| enumerate_literal(g)).flatten().collect(),
+        Guard::And(v) | Guard::Or(v) => v.iter().flat_map(enumerate_literal).collect(),
         _ => Default::default(),
     }
 }
@@ -615,11 +607,7 @@ fn convert_empty_argument_guards(
                 // 2. ⊥, or
                 // 3. default value of the corresponding cargo feature analyzed by the LLM.
                 let option_name = arg_var_to_option_name.get(name.as_str()).unwrap();
-                if let Some(features) = cargo_features
-                    .as_ref()
-                    .map(|m| m.get(option_name))
-                    .flatten()
-                {
+                if let Some(features) = cargo_features.as_ref().and_then(|m| m.get(option_name)) {
                     if features.len() == 1 {
                         // boolean feature
                         if let Some(enabled_by_default) = features[0].enabled_by_default {
@@ -631,14 +619,14 @@ fn convert_empty_argument_guards(
                 // the argument variable found to have no valid state anymore.
                 // if negated, evaluated to ⊤,
                 // else, evaluated to ⊥.
-                return Err(*negated);
+                Err(*negated)
             }
             _ => Ok(guard.clone()),
         },
         Guard::And(v) => {
             let mut converted = Vec::new();
             for g in v {
-                match convert_empty_argument_guards(g, &arg_var_to_option_name, &cargo_features) {
+                match convert_empty_argument_guards(g, arg_var_to_option_name, cargo_features) {
                     Ok(guard) => converted.push(guard),
                     Err(true) => continue,
                     Err(false) => return Err(false),
@@ -653,7 +641,7 @@ fn convert_empty_argument_guards(
         Guard::Or(v) => {
             let mut converted = Vec::new();
             for g in v {
-                match convert_empty_argument_guards(g, &arg_var_to_option_name, &cargo_features) {
+                match convert_empty_argument_guards(g, arg_var_to_option_name, cargo_features) {
                     Ok(guard) => converted.push(guard),
                     Err(true) => return Err(true),
                     Err(false) => continue,

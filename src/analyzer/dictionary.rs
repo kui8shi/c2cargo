@@ -79,9 +79,9 @@ impl From<String> for DictId {
     }
 }
 
-impl Into<String> for DictId {
-    fn into(self) -> String {
-        self.0
+impl From<DictId> for String {
+    fn from(val: DictId) -> Self {
+        val.0
     }
 }
 
@@ -144,8 +144,7 @@ fn make_dictionary_value(value_expr: &ValueExpr, eval_loc: &Location) -> Vec<Dic
         ValueExpr::Var(var, _) => vec![DictionaryValue::Var(var.clone())],
         ValueExpr::Concat(value_exprs) => value_exprs
             .iter()
-            .map(|v| make_dictionary_value(v, eval_loc))
-            .flatten()
+            .flat_map(|v| make_dictionary_value(v, eval_loc))
             .collect(),
         v @ ValueExpr::DynName(_) => {
             let ident: Option<Identifier> = v.into();
@@ -223,11 +222,7 @@ fn search_dictionary_from_eval_assignment_lhs(
         let keys = vars.into_iter().map(DictionaryKey::Var).collect();
         let op = DictionaryOperation::Write;
         let names = vec![make_dictionary_variable_name(&dict_id)];
-        let assigned_value = if let Some(rhs) = rhs {
-            Some(make_dictionary_value(rhs, eval_loc))
-        } else {
-            None
-        };
+        let assigned_value = rhs.as_ref().map(|rhs| make_dictionary_value(rhs, eval_loc));
 
         Some((dict_id, keys, op, names, None, assigned_value))
     } else {
@@ -250,8 +245,7 @@ impl Analyzer {
         let _num_vars_in_lhs = lhs.vars().map(|v| v.len()).unwrap_or(0);
         let _num_vars_in_rhs = rhs
             .as_ref()
-            .map(|r| r.vars().map(|v| v.len()))
-            .flatten()
+            .and_then(|r| r.vars().map(|v| v.len()))
             .unwrap_or(0);
 
         // Currently this ordering is determined independently of what is
@@ -277,10 +271,10 @@ impl Analyzer {
                 access.assigned_value = assigned_value;
                 // add candidates of the dictionary name
                 for name_candidate in name_candidates {
-                    if !name_candidate.is_empty() {
-                        if !recipe.name_candidates.contains(&name_candidate) {
-                            recipe.name_candidates.push(name_candidate);
-                        }
+                    if !name_candidate.is_empty()
+                        && !recipe.name_candidates.contains(&name_candidate)
+                    {
+                        recipe.name_candidates.push(name_candidate);
                     }
                 }
 
@@ -309,7 +303,7 @@ impl Analyzer {
         for (identifier, (expr, eval_loc)) in self
             .eval_assigns()
             .iter()
-            .flat_map(|(ident, evals)| std::iter::repeat(ident).zip(evals.into_iter()))
+            .flat_map(|(ident, evals)| std::iter::repeat(ident).zip(evals.iter()))
         {
             self.inspect_eval_assignment(&mut recipes, identifier, expr, eval_loc.clone());
         }
@@ -442,8 +436,8 @@ impl Analyzer {
             assert!(!divided.eval_locs.is_empty());
             let mut keys_for_evals = divided
                 .eval_locs
-                .iter()
-                .map(|(_, div)| div.mapping.iter().map(|(_, v)| v).collect::<Vec<_>>());
+                .values()
+                .map(|div| div.mapping.iter().map(|(_, v)| v).collect::<Vec<_>>());
             let dict_keys = if !keys_for_evals.clone().all_equal() {
                 // Detected omission of keys. We need to find what keys are omitted.
                 let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
@@ -531,7 +525,7 @@ impl Analyzer {
                 filled_up_keys.push(key);
             }
             accesses
-                .get_mut(&eval_loc)
+                .get_mut(eval_loc)
                 .unwrap()
                 .keys
                 .replace(filled_up_keys);
@@ -588,10 +582,7 @@ impl Analyzer {
         let num_keys = dict.accesses.values().next().map(|a| a.keys.len()).unwrap();
         let key_type = match num_keys {
             1 => "String".into(),
-            _ => format!(
-                "({})",
-                std::iter::repeat("String").take(num_keys).join(", ")
-            ),
+            _ => format!("({})", std::iter::repeat_n("String", num_keys).join(", ")),
         };
         let value_type = dict.value_type.print();
         format!("HashMap<{}, {}>", key_type, value_type)

@@ -1,4 +1,4 @@
-pub(super) const MACROS_BLACKLIST: &[&'static str] = &[
+pub(super) const MACROS_BLACKLIST: &[&str] = &[
     "AC_INIT",
     "AM_INIT_AUTOMAKE",
     "AC_SYS_POSIX_TERMIOS",

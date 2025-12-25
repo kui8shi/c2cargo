@@ -46,7 +46,7 @@ pub(super) enum CPPMigrationType {
 
 impl Analyzer {
     pub(super) fn query_cpp_migration_policy(&self, key: &str) -> Option<&CPPMigraionPolicy> {
-        let symbol = self.may_prefix_cpp_symbol(&key);
+        let symbol = self.may_prefix_cpp_symbol(key);
         self.conditional_compilation_map
             .as_ref()
             .unwrap()
@@ -77,8 +77,7 @@ impl Analyzer {
             .as_ref()
             .unwrap()
             .values()
-            .map(|effects| effects.cpps.iter())
-            .flatten()
+            .flat_map(|effects| effects.cpps.iter())
             .collect::<HashMap<_, _>>();
 
         let mut map = ConditionalCompilationMap::default();
@@ -147,7 +146,7 @@ impl Analyzer {
 /// Handles macro expansions recursively and ignores trivial boolean checks (e.g., `if (SYMBOL)`).
 fn detect_value_usage(target_symbol: &str, contents: &[&str]) -> bool {
     let mut visited_symbols = HashSet::new();
-    check_usage_recursive(target_symbol, &contents, &mut visited_symbols)
+    check_usage_recursive(target_symbol, contents, &mut visited_symbols)
 }
 
 fn check_usage_recursive(symbol: &str, contents: &[&str], visited: &mut HashSet<String>) -> bool {
@@ -184,10 +183,10 @@ fn check_usage_recursive(symbol: &str, contents: &[&str], visited: &mut HashSet<
                     let macro_value = caps.get(2).map_or("", |m| m.as_str());
 
                     // If our symbol appears in the RHS, check if the macro itself (LHS) is used as a value.
-                    if symbol_re.is_match(macro_value) {
-                        if check_usage_recursive(macro_name, contents, visited) {
-                            return true;
-                        }
+                    if symbol_re.is_match(macro_value)
+                        && check_usage_recursive(macro_name, contents, visited)
+                    {
+                        return true;
                     }
                 }
                 continue;
