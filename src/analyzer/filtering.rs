@@ -2,7 +2,7 @@ use std::collections::HashSet;
 
 use autotools_parser::ast::{node::ShellCommand, MayM4, Redirect};
 
-use crate::analyzer::{as_literal, as_shell};
+use crate::analyzer::{as_literal, as_shell, macro_call};
 
 use super::Analyzer;
 
@@ -42,7 +42,7 @@ impl Analyzer {
                         }
                     }
                 }
-                MayM4::Shell(ShellCommand::Cmd(cmd_words))
+                Shell(Cmd(cmd_words))
                     if node.info.parent.is_some_and(|parent| {
                         match &self.get_node(parent).unwrap().cmd.0 {
                             // we need to skip commands wrapped by these components.

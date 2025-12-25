@@ -137,7 +137,10 @@ pub(crate) trait LLMAnalysis {
                                     return Ok(result);
                                 }
                                 Err(errs) => {
-                                    println!("Error:\n{}", errs.iter().map(|e| format!("  {}", e)).collect::<String>());
+                                    println!(
+                                        "Error:\n{}",
+                                        errs.iter().map(|e| format!("  {}", e)).collect::<String>()
+                                    );
                                     last_errors = Some(errs);
                                     last_raw_json = Some(text);
                                     if attempt < MAX_RETRIES - 1 {

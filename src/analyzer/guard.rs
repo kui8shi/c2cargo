@@ -798,7 +798,6 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 self.record_block(&[**cmd]);
                 self.visit_node(**cmd)
             }
-            _ => {}
         }
         self.in_condition = was_in_condition;
     }
@@ -949,33 +948,6 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 _ => unreachable!(),
             }
         }
-        // if is_platform_branch {
-        //     let mut conditionals = Vec::new();
-        //     let mut else_branch = Vec::new();
-        //     for (arm_index, arm) in arms.iter().enumerate() {
-        //         let node_id = self.cursor.unwrap();
-        //         let block_id = self.analyzer.get_node(node_id).unwrap().info.branches[arm_index];
-        //         let guard = self.analyzer.get_block(block_id).guards.last().unwrap();
-        //         let is_else_branch = match guard {
-        //             Guard::N(false, Atom::Var(_, VarCond::MatchAny)) => true,
-        //             _ => false,
-        //         };
-        //         if is_else_branch {
-        //             else_branch = arm.body.clone();
-        //         } else {
-        //             let dummy_cond = Condition::Cond(Operator::Empty(AcWord(Word::Empty)));
-        //             let dummy_guard_body_pair = GuardBodyPair {
-        //                 condition: dummy_cond,
-        //                 body: arm.body.clone(),
-        //             };
-        //             conditionals.push(dummy_guard_body_pair);
-        //         }
-        //     }
-        //     ShellCommand::If {
-        //         conditionals,
-        //         else_branch,
-        //     };
-        // }
         self.guard_stack = saved_stack;
     }
 

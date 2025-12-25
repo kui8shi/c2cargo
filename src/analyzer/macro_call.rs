@@ -5,10 +5,26 @@ use std::{
 
 use autotools_parser::{
     ast::{node::AcCommand, MayM4},
-    m4_macro,
+    m4_macro::{M4Argument, Var, VarAttrs, CPP, MACROS},
 };
+use regex::Regex;
+
+use crate::analyzer::{as_literal, as_shell};
 
 use super::{Analyzer, AstVisitor, M4Macro, Node, NodeId, ShellCommand};
+
+mod macros_list;
+
+/// Represent side effects of fixed macros
+#[derive(Debug, Default, Clone)]
+pub(super) struct FixedMacroSideEffect {
+    /// name of the macro
+    pub macro_name: String,
+    /// shell variables
+    pub vars: HashMap<String, (VarAttrs, String)>,
+    /// cpp symbols
+    pub cpps: HashMap<String, Option<String>>,
+}
 
 /// Visitor to find case statements branching given variables.
 #[derive(Debug)]
@@ -47,13 +63,13 @@ impl<'a> MacroFinder<'a> {
                     if let Some(required) = sig.require.as_ref() {
                         for name in required {
                             if !called.contains_key(name) {
-                                let required_sig = m4_macro::MACROS.get(name).unwrap();
+                                let required_sig = MACROS.get(name).unwrap();
                                 if required_sig.is_oneshot {
                                     oneshot_calls.insert(name.to_owned());
                                 }
                                 let effects =
                                     (!required_sig.has_no_exports()).then_some(required_sig.into());
-                                let required_call = m4_macro::M4Macro::new_with_side_effect(
+                                let required_call = M4Macro::new_with_side_effect(
                                     name.to_owned(),
                                     Vec::new(),
                                     effects,
@@ -94,8 +110,11 @@ impl Analyzer {
         let macro_calls = MacroFinder::find_macro_calls(self);
         self.macro_calls.replace(macro_calls);
         self.consume_error_macros();
+        self.consume_m4sh_internal_macros();
+        self.consume_autoconf_internal_macros();
+        self.consume_notice_macros();
         self.consume_msg_only_macros();
-        self.consume_instantiating_macros();
+        self.consume_config_macros();
         self.consume_subst_macros();
         self.consume_prereq_macros();
         self.consume_arg_macros();
@@ -109,7 +128,7 @@ impl Analyzer {
         if let Some(v) = macro_calls.get("AX_PREFIX_CONFIG_H") {
             if let Some((_id, m4_macro)) = v.first().clone() {
                 if let Some(lit) = m4_macro.get_arg_as_literal(1) {
-                    self.cpp_symbol_prefix.replace(lit.to_uppercase() + "_");
+                    self.cpp_prefix.replace(lit + "_");
                 }
             }
         }
@@ -122,6 +141,54 @@ impl Analyzer {
                     }
                 }
             }
+        }
+    }
+
+    fn consume_m4sh_internal_macros(&mut self) {
+        let mut remove_nodes = HashSet::new();
+        let macro_calls = self.macro_calls.as_ref().unwrap();
+        for m4sh_internal_macro in ["AS_INIT", "AS_ME_PREPARE", "AS_UNAME"] {
+            if let Some(v) = macro_calls.get(m4sh_internal_macro) {
+                for (node_id, _) in v {
+                    remove_nodes.insert(*node_id);
+                }
+            }
+        }
+
+        for id in remove_nodes {
+            self.remove_node(id);
+        }
+    }
+
+    fn consume_autoconf_internal_macros(&mut self) {
+        let mut remove_nodes = HashSet::new();
+        let macro_calls = self.macro_calls.as_ref().unwrap();
+        for autoconf_internal_macro in ["AC_CONFIG_SRCDIR"] {
+            if let Some(v) = macro_calls.get(autoconf_internal_macro) {
+                for (node_id, _) in v {
+                    remove_nodes.insert(*node_id);
+                }
+            }
+        }
+
+        for id in remove_nodes {
+            self.remove_node(id);
+        }
+    }
+
+    fn consume_notice_macros(&mut self) {
+        let mut remove_nodes = HashSet::new();
+        let macro_calls = self.macro_calls.as_ref().unwrap();
+        for notice_macro in ["AC_PREREQ", "AC_COPYRIGHT", "AC_REVISION", "AH_TOP"] {
+            if let Some(v) = macro_calls.get(notice_macro) {
+                for (node_id, _) in v {
+                    remove_nodes.insert(*node_id);
+                }
+            }
+        }
+
+        for id in remove_nodes {
+            self.remove_node(id);
         }
     }
 
@@ -141,11 +208,40 @@ impl Analyzer {
         }
     }
 
-    fn consume_instantiating_macros(&mut self) {
+    fn consume_config_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
         let macro_calls = self.macro_calls.as_ref().unwrap();
-        for instantiating_macro in ["AC_CONFIG_FILES", "AC_OUTPUT"] {
-            if let Some(v) = macro_calls.get(instantiating_macro) {
+
+        for config_macro in ["AC_CONFIG_HEADERS"] {
+            if let Some(v) = macro_calls.get(config_macro) {
+                for (node_id, macro_call) in v {
+                    if let Some(tags) = macro_call
+                        .effects
+                        .as_ref()
+                        .map(|side_effects| side_effects.tags.as_ref())
+                        .flatten()
+                    {
+                        for (dst, src) in tags {
+                            let dst = PathBuf::from(dst);
+                            let src = if let Some(src) = src {
+                                PathBuf::from(src)
+                            } else {
+                                let mut path = dst.clone();
+                                path.add_extension("in");
+                                path
+                            };
+                            if src.exists() {
+                                self.project_info.config_files.push((dst, src));
+                            }
+                        }
+                    }
+                    remove_nodes.insert(*node_id);
+                }
+            }
+        }
+
+        for subst_macro in ["AC_CONFIG_FILES", "AC_OUTPUT"] {
+            if let Some(v) = macro_calls.get(subst_macro) {
                 for (node_id, macro_call) in v {
                     if let Some(tags) = macro_call
                         .effects
@@ -172,7 +268,7 @@ impl Analyzer {
                                 if is_automake {
                                     self.project_info.am_files.push(src.clone());
                                 }
-                                self.project_info.subst_files.push((src, dst));
+                                self.project_info.subst_files.push((dst, src));
                             }
                         }
                     }
@@ -237,20 +333,69 @@ impl Analyzer {
 
     fn consume_cpp_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
+        let mut cpp_defs = HashSet::new();
         let macro_calls = self.macro_calls.as_ref().unwrap();
-        for cpp_macro in ["AH_VERBATIM"] {
-            for (id, _) in macro_calls.get(cpp_macro).cloned().into_iter().flatten() {
+
+        for cpp_verbatim_macro in ["AH_VERBATIM"] {
+            for (id, macro_call) in macro_calls
+                .get(cpp_verbatim_macro)
+                .cloned()
+                .into_iter()
+                .flatten()
+            {
+                let template = macro_call.get_arg_as_program(1).unwrap();
+                let undef_re = Regex::new(r"^#undef\s+(?<key>[A-Z0-9_]+)").unwrap();
+                for cap in undef_re.captures_iter(&template) {
+                    let key = cap.name("key").unwrap().as_str().to_string();
+                    cpp_defs.insert(key);
+                }
                 remove_nodes.insert(id);
+            }
+        }
+
+        for cpp_template_macro in ["AH_TEMPLATE"] {
+            for (id, macro_call) in macro_calls
+                .get(cpp_template_macro)
+                .cloned()
+                .into_iter()
+                .flatten()
+            {
+                let key = macro_call.get_arg_as_literal(0).unwrap();
+                cpp_defs.insert(key);
+                remove_nodes.insert(id);
+            }
+        }
+
+        for cpp_define_macro in ["AC_DEFINE", "AC_DEFINE_UNQUOTED"] {
+            for (_, macro_call) in macro_calls
+                .get(cpp_define_macro)
+                .cloned()
+                .into_iter()
+                .flatten()
+            {
+                let key = match macro_call.args.get(0) {
+                    Some(M4Argument::Word(word)) => {
+                        if let Some(lit) = as_shell(word).and_then(as_literal) {
+                            lit.to_owned()
+                        } else {
+                            continue;
+                        }
+                    }
+                    Some(M4Argument::Literal(lit)) => lit.clone(),
+                    _ => unreachable!(),
+                };
+                cpp_defs.insert(key);
             }
         }
 
         for id in remove_nodes {
             self.remove_node(id);
         }
+
+        self.cpp_defs.replace(cpp_defs);
     }
 
-    pub(super) fn consume_link_macros(&mut self) {
-        let mut remove_nodes = HashSet::new();
+    pub(super) fn analyze_link_macros(&mut self) {
         let macro_calls = self.macro_calls.as_ref().unwrap();
         for ac_link_macro in ["AC_CONFIG_LINKS"] {
             for (id, macro_call) in macro_calls
@@ -281,12 +426,7 @@ impl Analyzer {
                         .collect::<Vec<_>>();
                     self.project_info.dynamic_links.push((from, to));
                 }
-                remove_nodes.insert(id);
             }
-        }
-
-        for id in remove_nodes {
-            // self.remove_node(id);
         }
     }
 
@@ -325,11 +465,73 @@ impl Analyzer {
             self.remove_node(id);
         }
     }
+
+    // froze macros for legacy systems
+    pub(super) fn froze_macros(&mut self) {
+        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let mut side_effects_of_fixed_macros = HashMap::new();
+        for legacy_compiler_macro in macros_list::MACROS_BLACKLIST {
+            for (id, macro_call) in macro_calls
+                .get(*legacy_compiler_macro)
+                .cloned()
+                .into_iter()
+                .flatten()
+            {
+                if let Some(effects) = macro_call.effects {
+                    let vars: Vec<&Var> = effects
+                        .shell_vars
+                        .iter()
+                        .map(|v| {
+                            v.iter().filter(|var| var.is_defined()).filter(|var| {
+                                self.is_var_used(var.name.as_str())
+                                    || self.is_substituted(var.name.as_str())
+                            })
+                        })
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    let cpps: Vec<&CPP> = effects
+                        .cpp_symbols
+                        .iter()
+                        .map(|v| v.iter())
+                        .flatten()
+                        .collect::<Vec<_>>();
+                    if vars.iter().all(|var| var.value.is_some())
+                        && cpps.iter().all(|cpp| cpp.value.is_some())
+                    {
+                        let macro_name = macro_call.name.clone();
+                        let vars = vars
+                            .iter()
+                            .map(|var| {
+                                (
+                                    var.name.clone(),
+                                    (var.attrs.clone(), var.value.clone().unwrap()),
+                                )
+                            })
+                            .collect::<HashMap<_, _>>();
+                        let cpps = cpps
+                            .iter()
+                            .map(|cpp| (cpp.name.clone(), cpp.value.clone().unwrap()))
+                            .collect::<HashMap<_, _>>();
+                        side_effects_of_fixed_macros.insert(
+                            id,
+                            FixedMacroSideEffect {
+                                macro_name,
+                                vars,
+                                cpps,
+                            },
+                        );
+                    }
+                }
+            }
+        }
+        self.side_effects_of_frozen_macros
+            .replace(side_effects_of_fixed_macros);
+    }
 }
 
 impl Analyzer {
-    pub(super) fn aggregate_cpp_symbols(&mut self) {
-        let cpp_symbols = self
+    pub(super) fn aggregate_cpp_defs(&mut self) {
+        let cpp_defs = self
             .macro_calls
             .as_ref()
             .unwrap()
@@ -342,26 +544,22 @@ impl Analyzer {
                     .and_then(|e| e.cpp_symbols.as_ref())
                     .into_iter()
                     .flatten()
-                    .map(|symbol| {
-                        if let Some(prefix) = &self.cpp_symbol_prefix {
-                            prefix.clone() + symbol
-                        } else {
-                            symbol.clone()
-                        }
-                    })
-            })
-            .filter(|symbol| {
-                self.project_info
-                    .c_files
-                    .iter()
-                    .chain(self.project_info.h_files.iter())
-                    .any(|path| std::fs::read_to_string(path).unwrap().contains(symbol))
+                    .map(|sym| sym.name.clone())
             })
             .collect::<HashSet<String>>();
-        self.cpp_symbols.replace(cpp_symbols);
+        self.cpp_defs.as_mut().unwrap().extend(cpp_defs);
     }
 
     pub(super) fn aggregate_subst_vars(&mut self) {
+        let contents = self
+            .project_info
+            .subst_files
+            .iter()
+            .map(|(_, src)| {
+                let bytes = std::fs::read(src).unwrap();
+                String::from_utf8_lossy(&bytes).into_owned()
+            })
+            .collect::<Vec<_>>();
         let subst_vars = self
             .macro_calls
             .as_ref()
@@ -380,11 +578,7 @@ impl Analyzer {
                     .into_iter()
                     .flatten()
             })
-            .filter(|var_name| {
-                self.project_info.subst_files.iter().any(|(src, _)| {
-                    std::fs::read_to_string(src).is_ok_and(|content| content.contains(var_name))
-                })
-            })
+            .filter(|var_name| contents.iter().any(|c| c.contains(var_name)))
             .collect::<HashSet<String>>();
         self.subst_vars.replace(subst_vars);
     }

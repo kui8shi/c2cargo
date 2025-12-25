@@ -6,6 +6,8 @@ use std::{
 use crate::analyzer::{
     as_literal, as_shell,
     build_option::FeatureState,
+    chunk::ChunkId,
+    conditional_compilation::CPPMigrationType,
     dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue},
     guard::{Atom, VarCond, VoL},
     location::Location,
@@ -22,7 +24,7 @@ use autotools_parser::{
         },
         Arithmetic, MayM4, Parameter, Redirect,
     },
-    m4_macro::M4Argument,
+    m4_macro::{M4Argument, VarUsage},
 };
 
 use itertools::Itertools;
@@ -46,12 +48,14 @@ pub(crate) struct TranslatingPrinter<'a> {
     in_format_string: Cell<bool>,
     /// When `in_format_string` is set to true, we record appeared variables here.
     formatted_vars: RefCell<Vec<String>>,
+    /// Appeared chunks when embedding
+    embedded_chunks: RefCell<HashMap<ChunkId, String>>,
     /// Whether we have found a usage of redirection.
     found_redirection: Cell<bool>,
     /// Whether we have found a usage of sed command.
     found_sed: Cell<bool>,
     /// Whether we have found a checking of libraries.
-    found_lib_check: Cell<bool>,
+    found_ac_define: Cell<bool>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -87,9 +91,10 @@ impl<'a> TranslatingPrinter<'a> {
             translated_fragments: RefCell::new(Vec::new()),
             in_format_string: Cell::new(false),
             formatted_vars: RefCell::new(Vec::new()),
+            embedded_chunks: RefCell::new(HashMap::new()),
             found_redirection: Cell::new(false),
             found_sed: Cell::new(false),
-            found_lib_check: Cell::new(false),
+            found_ac_define: Cell::new(false),
         }
     }
 
@@ -105,7 +110,7 @@ impl<'a> TranslatingPrinter<'a> {
         self.translated_fragments.borrow_mut().push(frag);
     }
 
-    pub fn collect_translated_fragments(&self) -> Vec<String> {
+    pub fn get_translated_fragments(&self) -> Vec<String> {
         self.translated_fragments.borrow().clone()
     }
 
@@ -124,10 +129,15 @@ impl<'a> TranslatingPrinter<'a> {
         if self.found_sed.get() {
             ret.push("regex");
         }
-        if self.found_lib_check.get() {
-            ret.push("check_library");
-        }
         ret
+    }
+
+    pub fn get_embedded_chunks(&self) -> HashMap<ChunkId, String> {
+        self.embedded_chunks.borrow().clone()
+    }
+
+    pub fn get_tab_width() -> usize {
+        Self::TAB_WIDTH
     }
 }
 
@@ -141,8 +151,21 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
                 self.top_most.replace(Some(node_id));
             } else {
                 if node.info.is_top_node() {
-                    // the node beyond boundary should not be displayed.
-                    return String::new();
+                    let chunk_id = node.info.chunk_id.unwrap();
+                    if self.embedded_chunks.borrow().contains_key(&chunk_id) {
+                        return "".into();
+                    } else {
+                        let func_name = super::rust_func_placeholder_name(chunk_id);
+                        self.embedded_chunks
+                            .borrow_mut()
+                            .insert(chunk_id, func_name.clone());
+                        // the node beyond boundary should not be displayed.
+                        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+                        let call_site = self
+                            .analyzer
+                            .print_chunk_skeleton_call_site(chunk_id, &func_name);
+                        return format!("{tab}{}", self.enclose_by_rust_tags(call_site, true));
+                    }
                 }
             }
             let saved_node_cursor = self.node_cursor.replace(Some(node_id));
@@ -169,7 +192,7 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
         use autotools_parser::ast::minimal::Word::*;
         use autotools_parser::ast::minimal::WordFragment::{DoubleQuoted, Literal};
         match &word.0 {
-            Empty => "\"\"".to_string(),
+            Empty => "".to_string(),
             Concat(frags) => {
                 format!(
                     "{}",
@@ -242,9 +265,6 @@ impl<'a> TranslatingPrinter<'a> {
         access: &DictionaryAccess,
         _value_type: &DataType,
     ) -> String {
-        if access.operation != DictionaryOperation::Read {
-            dbg!(dict_name, access, _value_type);
-        }
         debug_assert_eq!(access.operation, DictionaryOperation::Read);
         let keys = access
             .keys
@@ -354,7 +374,7 @@ impl<'a> TranslatingPrinter<'a> {
                             may_negate(feature_name.into(), negated)
                         } else {
                             // fallback
-                            format!("{}", option_name)
+                            may_negate(option_name.into(), false ^ negated)
                         }
                     }
                     VarCond::False => {
@@ -362,7 +382,7 @@ impl<'a> TranslatingPrinter<'a> {
                             let negated = feature_state.is_negative() ^ negated;
                             may_negate(feature_name.into(), negated)
                         } else {
-                            format!("not({})", option_name)
+                            may_negate(option_name.into(), true ^ negated)
                         }
                     }
                     VarCond::Eq(VoL::Lit(lit)) => {
@@ -370,7 +390,7 @@ impl<'a> TranslatingPrinter<'a> {
                             let negated = feature_state.is_negative() ^ negated;
                             may_negate(feature_name.into(), negated)
                         } else {
-                            format!("{}_{}", option_name, lit)
+                            may_negate(format!("{}_{}", option_name, lit), false ^ negated)
                         }
                     }
                     _ => {
@@ -423,7 +443,7 @@ impl<'a> TranslatingPrinter<'a> {
     fn display_word_as_format_string(&self, word: &AcWord) -> String {
         let (format_string, vars) = self.take_format_string_and_vars(word);
         if vars.is_empty() {
-            format!("{format_string}.to_string()")
+            format!("\"{format_string}\".to_string()")
         } else {
             format!(
                 "format!(\"{}\", {})",
@@ -692,7 +712,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 // 2. the side where the dictionary appears, we won't see any other expressions
                 //    such as literals.
                 let node_id = self.node_cursor.get().unwrap();
-                if let Some((loc, (dict_name, access, value_type))) = self
+                if let Some((_, (dict_name, access, value_type))) = self
                     .dict_accesses
                     .iter()
                     .find(|(loc, _)| loc.node_id == node_id)
@@ -710,9 +730,6 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                                 .display_dictionary_write(dict_name, access, value_type, &rhs);
                         }
                         DictionaryOperation::Read => {
-                            if access.assigned_to.is_none() {
-                                dbg!(&dict_name, &access, &value_type, &loc);
-                            }
                             let lhs = access.assigned_to.clone().unwrap();
                             let rhs = self.enclose_by_rust_tags(
                                 self.display_dictionary_read(dict_name, access, value_type),
@@ -769,6 +786,24 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
 impl<'a> DisplayM4 for TranslatingPrinter<'a> {
     fn display_m4_macro(&self, m4_macro: &M4Macro, indent_level: usize) -> String {
         let tab = " ".repeat(indent_level * Self::M4_TAB_WIDTH);
+        let node_id = self.node_cursor.get().unwrap();
+        if let Some(effects) = self
+            .analyzer
+            .side_effects_of_frozen_macros
+            .as_ref()
+            .unwrap()
+            .get(&node_id)
+        {
+            return effects
+                .vars
+                .iter()
+                .map(|(name, (attrs, value))| match attrs.usage {
+                    VarUsage::Defined => format!("{tab}{}=\"{}\"", name, value),
+                    VarUsage::Append => format!("{tab}{}=\"{} {}\"", name, name, value),
+                    VarUsage::Referenced => unreachable!(),
+                })
+                .join("\n");
+        }
         if let Some(effects) = &m4_macro.effects {
             if let Some(shell_vars) = &effects.shell_vars {
                 for var in shell_vars {
@@ -796,17 +831,33 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     M4Argument::Literal(lit) => lit.to_owned(),
                     _ => unreachable!(),
                 };
-                let value = {
+                let eq_value = {
                     let value = m4_macro.get_arg_as_literal(1).unwrap_or_default();
                     match value.as_str() {
                         "0" | "1" | "" => {
                             // should be a boolean
-                            String::new()
+                            "".into()
                         }
-                        _ => format!("=\"{value}\""),
+                        _ => format!("={value}"),
                     }
                 };
-                let cargo_instruction = format!("\"cargo::rustc-cfg={}{}\"", key, value);
+                let cargo_instruction = if let Some(cpp_migration_policy) =
+                    self.analyzer.query_cpp_migration_policy(key.as_str())
+                {
+                    match &cpp_migration_policy.mig_type {
+                        CPPMigrationType::Cfg => {
+                            let key = cpp_migration_policy.key.as_ref().unwrap();
+                            format!("\"cargo::rustc-cfg={}{}\"", key, eq_value)
+                        }
+                        CPPMigrationType::Env => {
+                            let key = cpp_migration_policy.key.as_ref().unwrap();
+                            format!("\"cargo::rustc-env={}{}\"", key, eq_value)
+                        }
+                        _ => return "".into(),
+                    }
+                } else {
+                    format!("\"cargo::rustc-cfg={}{}\"", key, eq_value)
+                };
                 self.record_translated_fragment(cargo_instruction.clone());
                 let print_line = format!("println!({});", cargo_instruction);
                 return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
@@ -827,55 +878,83 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     "0" | "1" | "" => {
                         // should be a boolean
                         assert!(vars_in_value.is_empty());
-                        String::new()
+                        "".into()
                     }
-                    _ => format!("=\"{value_fstr}\""),
+                    _ => format!("={value_fstr}"),
                 };
-                let cargo_instruction =
-                    format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr);
-                self.record_translated_fragment(cargo_instruction.clone());
-                let print_line = if vars_in_key.is_empty() && vars_in_value.is_empty() {
-                    format!("println!({});", cargo_instruction)
-                } else {
-                    format!(
+                if !vars_in_key.is_empty() {
+                    if !vars_in_value.is_empty() {
+                        todo!();
+                    }
+                    let cargo_instruction =
+                        format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr);
+                    self.record_translated_fragment(cargo_instruction.clone());
+                    let print_line = format!(
                         "println!({}, {});",
                         cargo_instruction,
-                        vars_in_key.iter().chain(vars_in_value.iter()).join(", ")
-                    )
-                };
-                return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
+                        vars_in_key.iter().map(|var| format!("&{}", var)).join(", ")
+                    );
+                    return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
+                } else {
+                    let cargo_instruction = if let Some(cpp_migration_policy) =
+                        self.analyzer.query_cpp_migration_policy(key_fstr.as_str())
+                    {
+                        match &cpp_migration_policy.mig_type {
+                            CPPMigrationType::Cfg => {
+                                format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr)
+                            }
+                            CPPMigrationType::Env => {
+                                format!("\"cargo::rustc-env={}{}\"", key_fstr, eq_value_fstr)
+                            }
+                            _ => return "".into(),
+                        }
+                    } else {
+                        format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr)
+                    };
+                    self.record_translated_fragment(cargo_instruction.clone());
+                    let print_line = if vars_in_value.is_empty() {
+                        format!("println!({});", cargo_instruction,)
+                    } else {
+                        format!(
+                            "println!({}, {});",
+                            cargo_instruction,
+                            vars_in_value.iter().join(", ")
+                        )
+                    };
+                    return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
+                }
             }
             "AC_CHECK_LIB" => {
-                let first_arg_as_word = m4_macro.get_arg_as_word(0).unwrap();
-                let lib_name = as_shell(&first_arg_as_word).and_then(as_literal).unwrap();
-                let pkg_config_call = format!(r#"check_library("{}")"#, lib_name);
-                let commands_when_found = match m4_macro.get_arg_as_cmd(2) {
-                    Some(cmds) => cmds
-                        .iter()
-                        .map(|c| self.display_node(*c, indent_level + 1))
-                        .collect::<Vec<String>>()
-                        .join("\n"),
-                    None => "".into(),
-                };
-                let commands_when_not_found = match m4_macro.get_arg_as_cmd(3) {
-                    Some(cmds) => cmds
-                        .iter()
-                        .map(|c| self.display_node(*c, indent_level + 1))
-                        .collect::<Vec<String>>()
-                        .join("\n"),
-                    None => "".into(),
-                };
-                let gen_tab = |nest: usize| " ".repeat((indent_level + nest) * Self::M4_TAB_WIDTH);
-                let tab_nest1 = gen_tab(1);
-                self.found_lib_check.set(true);
-                return format!(
-                    "{tab}{}{{\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab}}}",
-                    self.enclose_by_rust_tags(pkg_config_call, true),
-                    self.enclose_by_rust_tags("Some(library) => ".into(), false),
-                    commands_when_found,
-                    self.enclose_by_rust_tags("None => ".into(), false),
-                    commands_when_not_found,
-                );
+                // let first_arg_as_word = m4_macro.get_arg_as_word(0).unwrap();
+                // let lib_name = as_shell(&first_arg_as_word).and_then(as_literal).unwrap();
+                // let pkg_config_call = format!(r#"check_library("{}")"#, lib_name);
+                // let commands_when_found = match m4_macro.get_arg_as_cmd(2) {
+                //     Some(cmds) => cmds
+                //         .iter()
+                //         .map(|c| self.display_node(*c, indent_level + 1))
+                //         .collect::<Vec<String>>()
+                //         .join("\n"),
+                //     None => "".into(),
+                // };
+                // let commands_when_not_found = match m4_macro.get_arg_as_cmd(3) {
+                //     Some(cmds) => cmds
+                //         .iter()
+                //         .map(|c| self.display_node(*c, indent_level + 1))
+                //         .collect::<Vec<String>>()
+                //         .join("\n"),
+                //     None => "".into(),
+                // };
+                // let gen_tab = |nest: usize| " ".repeat((indent_level + nest) * Self::M4_TAB_WIDTH);
+                // let tab_nest1 = gen_tab(1);
+                // self.found_lib_check.set(true);
+                // return format!(
+                //     "{tab}{}{{\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab}}}",
+                //     self.enclose_by_rust_tags(pkg_config_call, true),
+                //     self.enclose_by_rust_tags("Some(library) => ".into(), false),
+                //     commands_when_found,
+                //     self.enclose_by_rust_tags("None => ".into(), false),
+                //     commands_when_not_found,
+                // );
             }
             _ => (),
         }

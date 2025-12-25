@@ -1,8 +1,15 @@
 use itertools::Itertools;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use use_llm::{TranslationEvidence, TranslationInput};
 
-use crate::{analyzer::type_inference::DataType, utils::llm_analysis::LLMAnalysis};
+use crate::{
+    analyzer::{
+        chunk::ChunkId,
+        translator::{printer::TranslatingPrinter, use_llm::TranslationOutput},
+        type_inference::DataType,
+    },
+    utils::llm_analysis::LLMAnalysis,
+};
 
 use super::Analyzer;
 
@@ -46,13 +53,14 @@ impl Analyzer {
                 "callsite: {}",
                 self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
             );
-            let printer = printer::TranslatingPrinter::new(&self);
+            let printer = TranslatingPrinter::new(&self);
             for &id in chunk.nodes.iter() {
                 println!("{}", &printer.print_node(id));
             }
         }
         println!("======================");
-        let _env_init = self
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        let env_init = self
             .env_vars
             .as_ref()
             .unwrap()
@@ -85,15 +93,15 @@ impl Analyzer {
                         });
                 let mutability = if write_exists { "mut " } else { "    " };
                 format!(
-                    "let {}{}: {} = {};",
+                    "{tab}let {}{}: {} = {};",
                     mutability,
                     name,
                     data_type.print(),
                     expression
                 )
             })
-            .collect::<Vec<_>>();
-        let _default_init = self
+            .join("\n");
+        let default_init = self
             .var_usages
             .as_ref()
             .unwrap()
@@ -120,24 +128,132 @@ impl Analyzer {
                     "    "
                 };
                 format!(
-                    "let {}{}: {} = Default::default();",
+                    "{tab}let {}{}: {} = Default::default();",
                     mutability,
                     name,
                     data_type.print()
                 )
             })
-            .collect::<Vec<_>>();
-        // self.translate_chunks().await;
+            .join("\n");
+        let top_func_calls = self
+            .chunks
+            .iter()
+            .filter(|(_, chunk)| chunk.parent.is_none())
+            .map(|(chunk_id, chunk)| {
+                let call_site = self.print_chunk_skeleton_call_site(
+                    chunk_id,
+                    &rust_func_placeholder_name(chunk_id),
+                );
+                format!("{tab}{call_site}")
+            })
+            .join("\n");
+        println!(
+            "fn main() {{\n{}\n{}\n{}\n}}",
+            &env_init, &default_init, &top_func_calls
+        );
+        let func_defs = self
+            .chunks
+            .iter()
+            .map(|(chunk_id, chunk)| {
+                self.get_rust_func_definition(chunk_id, &rust_func_placeholder_name(chunk_id), "")
+            })
+            .join("\n\n");
+        println!("{}", func_defs);
+        //let translated = self.translate_chunks().await;
     }
 
     /// Translate chunk using LLMs
-    pub(crate) async fn translate_chunks(&self) {
+    async fn translate_chunks(&self) -> HashMap<ChunkId, TranslationOutput> {
+        let mut results: HashMap<ChunkId, TranslationOutput> = Default::default();
         let mut user = use_llm::LLMUser::new();
         let mut inputs = Vec::new();
-        for (chunk_id, _) in self.chunks.iter().skip(276).take(1) {
-            // for chunk_id in [124] {
+        let mut depending_funcs = HashMap::new();
+        for (chunk_id, _) in self.chunks.iter() {
             // conduct llm analysis
-            let printer = printer::TranslatingPrinter::new(self);
+            let printer = TranslatingPrinter::new(self);
+            let script = self
+                .chunks
+                .get(chunk_id)
+                .unwrap()
+                .nodes
+                .iter()
+                .map(|nid| format!("{}", &printer.print_node(*nid)))
+                .join("\n");
+            let header = format!(
+                "{} {{{}\n  ",
+                self.print_chunk_skeleton_signature(chunk_id),
+                {
+                    let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n  ");
+                    if header.is_empty() {
+                        "".into()
+                    } else {
+                        format!("\n  {}", header)
+                    }
+                }
+            );
+            let footer = format!("{}\n}}", {
+                let footer = self.print_chunk_skeleton_body_footer(chunk_id);
+                if footer.is_empty() {
+                    "".into()
+                } else {
+                    format!("\n  {}", footer)
+                }
+            });
+            let skeleton = format!("{}{{body}}{}", header, footer);
+            let required_funcs = printer.get_required_rust_funcs();
+            depending_funcs.insert(chunk_id, printer.get_embedded_chunks());
+            let input = TranslationInput::new(chunk_id, script, skeleton.clone(), &required_funcs);
+            let evidence = TranslationEvidence {
+                rust_snippets: printer.get_translated_fragments(),
+                header,
+                footer,
+            };
+            inputs.push((input, evidence));
+        }
+
+        let llm_analysis_results = user
+            .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
+            .await;
+
+        results.extend(
+            llm_analysis_results
+                .into_iter()
+                .map(|res| (res.id.clone(), res)),
+        );
+
+        for chunk_id in results.keys().cloned().collect::<Vec<_>>() {
+            for (id, placeholder) in depending_funcs.get(&chunk_id).unwrap() {
+                if let Some(new_name) = results.get(id).map(|o| o.rust_func_name.clone()) {
+                    let out = results.get_mut(&chunk_id).unwrap();
+                    out.rust_func_body = out.rust_func_body.replace(placeholder, &new_name);
+                }
+            }
+        }
+
+        results
+        // for res in results {
+        //     let func_def = format!(
+        //         "fn {}{} {{\n  {}\n}}",
+        //         res.rust_func_name,
+        //         self.print_chunk_skeleton_signature(res.id),
+        //         self.print_chunk_skeleton_body_header(res.id)
+        //             .into_iter()
+        //             .chain(res.rust_func_body.split("\n").map(|s| s.to_owned()))
+        //             .chain(std::iter::once(
+        //                 self.print_chunk_skeleton_body_footer(res.id)
+        //             ))
+        //             .filter(|s| !s.is_empty())
+        //             .join("\n  "),
+        //     );
+        //     println!("Chunk {} (After):\n{}", res.id, func_def)
+        // }
+    }
+
+    fn get_translation_inputs(&self) -> Vec<(TranslationInput, TranslationEvidence)> {
+        let mut inputs = Vec::new();
+        for (chunk_id, _) in self.chunks.iter() {
+            // conduct llm analysis
+            let printer = TranslatingPrinter::new(self);
             let script = self
                 .chunks
                 .get(chunk_id)
@@ -172,31 +288,38 @@ impl Analyzer {
             println!("Chunk {} (Before):\n{}", chunk_id, &script);
             let input = TranslationInput::new(chunk_id, script, skeleton.clone(), &required_funcs);
             let evidence = TranslationEvidence {
-                fixed_values: printer.collect_translated_fragments(),
+                rust_snippets: printer.get_translated_fragments(),
                 header,
                 footer,
             };
             inputs.push((input, evidence));
         }
-
-        let results = user
-            .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
-            .await;
-        for res in results {
-            let func_def = format!(
-                "fn {}{} {{\n  {}\n}}",
-                res.rust_func_name,
-                self.print_chunk_skeleton_signature(res.id),
-                self.print_chunk_skeleton_body_header(res.id)
-                    .into_iter()
-                    .chain(res.rust_func_body.split("\n").map(|s| s.to_owned()))
-                    .chain(std::iter::once(
-                        self.print_chunk_skeleton_body_footer(res.id)
-                    ))
-                    .filter(|s| !s.is_empty())
-                    .join("\n  "),
-            );
-            println!("Chunk {} (After):\n{}", res.id, func_def)
-        }
+        inputs
     }
+
+    fn get_rust_func_definition(
+        &self,
+        chunk_id: ChunkId,
+        func_name: &str,
+        func_body: &str,
+    ) -> String {
+        let func_def = format!(
+            "fn {}{} {{\n  {}\n}}",
+            func_name,
+            self.print_chunk_skeleton_signature(chunk_id),
+            self.print_chunk_skeleton_body_header(chunk_id)
+                .into_iter()
+                .chain(func_body.split("\n").map(|s| s.to_owned()))
+                .chain(std::iter::once(
+                    self.print_chunk_skeleton_body_footer(chunk_id)
+                ))
+                .filter(|s| !s.is_empty())
+                .join("\n  "),
+        );
+        func_def
+    }
+}
+
+fn rust_func_placeholder_name(chunk_id: ChunkId) -> String {
+    format!("func{}", chunk_id)
 }

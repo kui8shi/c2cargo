@@ -1,6 +1,9 @@
 //! Provides the higher level on-time analyses to improve parsing
 use std::{
-    cell::RefCell, cmp::Ordering, collections::{HashMap, HashSet}, path::{Path, PathBuf}
+    cell::RefCell,
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    path::{Path, PathBuf},
 };
 
 use automake::AutomakeAnalyzer;
@@ -15,6 +18,7 @@ use autotools_parser::{
         Arithmetic, MayM4, Parameter, Redirect,
     },
     lexer::Lexer,
+    m4_macro::SideEffect,
     parse::autoconf::NodeParser,
 };
 use build_option::BuildOptionInfo;
@@ -23,32 +27,39 @@ use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
 use platform_support::PlatformSupport;
+use project_info::ProjectInfo;
 use type_inference::{DataType, TypeHint};
 
-use value_set_analysis::{DividedVariable, VSACache};
 use flatten::Flattener;
 use location::{ExecId, Location};
+use value_set_analysis::{DividedVariable, VSACache};
 use variable::{Identifier, ValueExpr, VariableAnalyzer};
 
 use slab::Slab;
 
-use crate::display::AutoconfPool;
+use crate::{
+    analyzer::{
+        conditional_compilation::ConditionalCompilationMap, macro_call::FixedMacroSideEffect,
+    },
+    display::AutoconfPool,
+};
 
 mod automake;
-mod conditional_compilation;
 mod build_option;
 mod chunk;
+mod conditional_compilation;
 mod dictionary;
-mod value_set_analysis;
 mod filtering;
 mod flatten;
 mod guard;
 mod location;
 mod macro_call;
 mod platform_support;
+mod project_info;
 mod removal;
 mod translator;
 mod type_inference;
+mod value_set_analysis;
 mod variable;
 
 type VariableMap = HashMap<String, Vec<Location>>;
@@ -382,9 +393,7 @@ pub trait AstVisitor: Sized {
             Condition::Eval(cmd) => {
                 self.visit_node(**cmd);
             }
-            Condition::ReturnZero(cmd) => {
-                self.visit_node(**cmd)
-            }
+            Condition::ReturnZero(cmd) => self.visit_node(**cmd),
         }
     }
 
@@ -559,17 +568,6 @@ impl Default for AnalyzerOptions {
     }
 }
 
-#[derive(Debug, Default)]
-struct ProjectInfo {
-    project_dir: PathBuf,
-    c_files: Vec<PathBuf>,
-    h_files: Vec<PathBuf>,
-    subst_files: Vec<(PathBuf, PathBuf)>,
-    am_files: Vec<PathBuf>,
-    dynamic_links: Vec<(Vec<PathBuf>, Vec<PathBuf>)>,
-    _config_header: PathBuf,
-}
-
 /// Analyzer which conducts various kinds of analyses:
 /// 1. construction of a dependency graph by tracking variable usages
 /// 2. flattening of large commands
@@ -618,10 +616,14 @@ pub struct Analyzer {
     divided_vars: Option<HashMap<String, DividedVariable>>,
     /// all m4 macro calls
     macro_calls: Option<HashMap<String, Vec<(NodeId, M4Macro)>>>,
-    /// prefix for all cpp symbols
-    cpp_symbol_prefix: Option<String>,
-    /// all cpp symbols
-    cpp_symbols: Option<HashSet<String>>,
+    /// prefix for all cpp symbol definitions
+    cpp_prefix: Option<String>,
+    /// all cpp symbol definitions
+    cpp_defs: Option<HashSet<String>>,
+    /// record side effects of fixed macros
+    side_effects_of_frozen_macros: Option<HashMap<NodeId, FixedMacroSideEffect>>,
+    /// conditional compilation map
+    conditional_compilation_map: Option<ConditionalCompilationMap>,
     /// all susbstitued variables
     subst_vars: Option<HashSet<String>>,
     /// all input variables which are defined in m4 macros and are candidates of environmental variables.
@@ -723,13 +725,18 @@ impl Analyzer {
         s.make_dictionary_instances();
 
         // analyze filesystem links
-        s.consume_link_macros();
+        s.analyze_link_macros();
 
         println!("==================== AUTOMAKE =======================");
         // Analyze automake files
         s.analyze_automake_files();
-        s.consume_automake_macros();
+        s.aggregate_cpp_defs();
         s.aggregate_subst_vars();
+        s.froze_macros();
+        s.consume_automake_macros();
+
+        s.load_project_files();
+        println!("==================== CCP =======================");
         s.create_conditional_compilation_map();
 
         s.remove_unused_variables();
@@ -748,28 +755,6 @@ impl Analyzer {
         s.aggregate_env_vars();
 
         s.construct_chunk_skeletons();
-        // dbg!(&s
-        //     .dicts
-        //     .as_ref()
-        //     .unwrap()
-        //     .iter()
-        //     .filter(|d| {
-        //         let mut map = HashSet::new();
-        //         for k in d.accesses.keys() {
-        //             if map.contains(&k.node_id) {
-        //                 // two dict accesses in one node
-        //                 return true;
-        //             }
-        //             map.insert(k.node_id);
-        //         }
-        //         false
-        //     })
-        //     .map(|d| (
-        //         &d.name,
-        //         &d.value_type,
-        //         d.accesses.iter().sorted_by_key(|(k, _)| k.node_id)
-        //     ))
-        //     .collect::<Vec<_>>());
 
         s
     }

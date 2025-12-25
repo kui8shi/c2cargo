@@ -109,11 +109,6 @@ impl Analyzer {
             .cargo_features
             .replace(Default::default());
         for res in results {
-            let _build_option = self
-                .build_option_info
-                .build_options
-                .get(&res.option_name)
-                .unwrap();
             if res.representatives.iter().sorted().eq(["no", "yes"]) {
                 println!("{}: YesNo", res.option_name);
             } else {
@@ -124,7 +119,7 @@ impl Analyzer {
             }
 
             // Generate Cargo features
-            let features = self.generate_cargo_features(&res);
+            let features = self.construct_cargo_features(&res);
             println!("Cargo features for {}: {:?}", res.option_name, features);
             self.build_option_info
                 .cargo_features
@@ -136,7 +131,7 @@ impl Analyzer {
     }
 
     /// doc
-    fn extract_build_options(&mut self) -> BuildOptionInfo {
+    fn extract_build_options(&self) -> BuildOptionInfo {
         let mut ret = BuildOptionInfo::default();
         let mut target_macro_calls = Vec::new();
         for target_macro_name in ["AC_ARG_WITH", "AC_ARG_ENABLE"] {
@@ -438,7 +433,7 @@ impl Analyzer {
     }
 
     /// Generate Cargo features from BuildOptionLLMAnalysisResult
-    fn generate_cargo_features(&self, result: &BuildOptionLLMAnalysisResult) -> Vec<CargoFeature> {
+    fn construct_cargo_features(&self, result: &BuildOptionLLMAnalysisResult) -> Vec<CargoFeature> {
         let mut features = Vec::new();
 
         if result.representatives.iter().sorted().eq(["no", "yes"]) {
@@ -512,6 +507,7 @@ impl Analyzer {
         features
     }
 
+    /// convert some conditions according to the assumption of empty properties of cargo features
     fn apply_non_empty_property_of_cargo_features(&mut self) {
         for (_, block) in self.blocks.iter_mut() {
             let mut converted = Vec::new();
@@ -674,9 +670,7 @@ fn convert_empty_argument_guards(
 
 fn are_guards_contradictory(guards: &[Guard]) -> bool {
     let mut record = HashMap::new();
-    dbg!(&guards);
     for guard in guards {
-        dbg!(&record);
         match guard {
             Guard::N(negated, Atom::Var(name, VarCond::True) | Atom::Arg(name, VarCond::True)) => {
                 let new = !negated;

@@ -323,6 +323,5 @@ pub(crate) async fn analysis(path: &Path) -> Result<(), Box<dyn std::error::Erro
     analyzer.translate().await;
     println!("translate() completed successfully");
 
-
     Ok(())
 }

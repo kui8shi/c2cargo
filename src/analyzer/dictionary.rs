@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use itertools::Itertools;
 
 use super::{
-    value_set_analysis::IdentifierDivision,
     location::Location,
     type_inference::DataType,
+    value_set_analysis::IdentifierDivision,
     variable::{Identifier, ValueExpr},
     Analyzer,
 };
@@ -588,7 +588,10 @@ impl Analyzer {
         let num_keys = dict.accesses.values().next().map(|a| a.keys.len()).unwrap();
         let key_type = match num_keys {
             1 => "String".into(),
-            _ => format!("({})", std::iter::repeat("String").take(num_keys).join(", ")),
+            _ => format!(
+                "({})",
+                std::iter::repeat("String").take(num_keys).join(", ")
+            ),
         };
         let value_type = dict.value_type.print();
         format!("HashMap<{}, {}>", key_type, value_type)

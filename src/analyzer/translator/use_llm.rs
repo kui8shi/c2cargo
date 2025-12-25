@@ -54,13 +54,20 @@ fn get_predefinition(required_funcs: &[&str]) -> String {
 }"#,
         ),
         (
-            "pkg_config",
-            r#"use pkg_config;
-fn run_pkg_config(name: &str) -> Option<pkg_config::Library> {
-  pkg_config::Config::new()
-    .cargo_metadata(true)
-    .probe(name)
-    .ok()
+            "define_cfg",
+            r#"fn define_cfg(key: &str, value: Option<&str>) {
+  println!("cargo:rustc-check-cfg=cfg({})", key);
+  if let Some(value) = value {
+    println!("cargo:rustc-cfg={}={}", key, value);
+  } else {
+    println!("cargo:rustc-cfg={}", key);
+  }
+}"#,
+        ),
+        (
+            "define_env",
+            r#"fn define_env(key: &str, value: &str) {
+  println!("cargo:rustc-env={}={}", key, value);
 }"#,
         ),
     ]);
@@ -72,7 +79,7 @@ fn run_pkg_config(name: &str) -> Option<pkg_config::Library> {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(super) struct TranslationEvidence {
-    pub fixed_values: Vec<String>,
+    pub rust_snippets: Vec<String>,
     pub header: String,
     pub footer: String,
 }
@@ -82,18 +89,20 @@ impl LLMAnalysisOutput<TranslationEvidence> for TranslationOutput {
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
     fn validate(&self, evidence: &TranslationEvidence) -> Result<(), Vec<String>> {
         let mut err = Vec::new();
-        for val in evidence.fixed_values.iter() {
-            if !self.rust_func_body.contains(val) {
+        for rust_snippet in evidence.rust_snippets.iter() {
+            if !self.rust_func_body.contains(rust_snippet) {
                 err.push(format!(
                     "The translated output must contains a Rust snippet '{}' exactly.",
-                    val
+                    rust_snippet
                 ));
             }
         }
-        match detect_no_op_patterns(&self.rust_func_body, &evidence.fixed_values) {
+        // no-op check
+        match detect_no_op_patterns(&self.rust_func_body, &evidence.rust_snippets) {
             Ok(_) => (),
             Err(e) => err.extend(e),
         }
+        // compile check
         {
             let rust_func = format!(
                 "{}\nfn {}{}{}{}",
