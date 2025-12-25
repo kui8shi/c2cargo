@@ -19,46 +19,46 @@ mod use_llm;
 impl Analyzer {
     /// Analyze commands and build the dependency graph
     pub async fn translate(&mut self) {
-        println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
-        let mut exported = HashSet::new();
-        for (i, chunk) in self.chunks.iter() {
-            exported.extend(chunk.io.exported.clone());
-            let last_id = *chunk.nodes.last().unwrap();
-            println!(
-                "Chunk {}: parent: {:?}, nodes {:?} , exit {:?}",
-                i,
-                chunk.parent,
-                chunk
-                    .nodes
-                    .iter()
-                    .map(|id| (
-                        *id,
-                        self.collect_descendant_nodes_per_node(*id, true, false)
-                    ))
-                    .map(|(id, nodes)| (
-                        id,
-                        nodes
-                            .into_iter()
-                            .map(|i| self.get_node(i).unwrap().info.exec_id)
-                            .sorted()
-                            .collect::<Vec<_>>()
-                    ))
-                    .collect::<Vec<_>>(),
-                self.get_node(last_id).unwrap().info.exit,
-            );
-            println!("signature: {}", self.print_chunk_skeleton_signature(i));
-            println!("header: {:?}", self.print_chunk_skeleton_body_header(i));
-            println!("footer: {}", self.print_chunk_skeleton_body_footer(i));
-            println!(
-                "callsite: {}",
-                self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
-            );
-            let printer = TranslatingPrinter::new(self);
-            for &id in chunk.nodes.iter() {
-                println!("{}", &printer.print_node(id));
-            }
-        }
-        println!("======================");
+        // println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
+        // let mut exported = HashSet::new();
+        // for (i, chunk) in self.chunks.iter() {
+        //     exported.extend(chunk.io.exported.clone());
+        //     let last_id = *chunk.nodes.last().unwrap();
+        //     println!(
+        //         "Chunk {}: parent: {:?}, nodes {:?} , exit {:?}",
+        //         i,
+        //         chunk.parent,
+        //         chunk
+        //             .nodes
+        //             .iter()
+        //             .map(|id| (
+        //                 *id,
+        //                 self.collect_descendant_nodes_per_node(*id, true, false)
+        //             ))
+        //             .map(|(id, nodes)| (
+        //                 id,
+        //                 nodes
+        //                     .into_iter()
+        //                     .map(|i| self.get_node(i).unwrap().info.exec_id)
+        //                     .sorted()
+        //                     .collect::<Vec<_>>()
+        //             ))
+        //             .collect::<Vec<_>>(),
+        //         self.get_node(last_id).unwrap().info.exit,
+        //     );
+        //     println!("signature: {}", self.print_chunk_skeleton_signature(i));
+        //     println!("header: {:?}", self.print_chunk_skeleton_body_header(i));
+        //     println!("footer: {}", self.print_chunk_skeleton_body_footer(i));
+        //     println!(
+        //         "callsite: {}",
+        //         self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
+        //     );
+        //     let printer = TranslatingPrinter::new(self);
+        //     for &id in chunk.nodes.iter() {
+        //         println!("{}", &printer.print_node(id));
+        //     }
+        // }
+        // println!("======================");
         let tab = " ".repeat(TranslatingPrinter::get_tab_width());
         let env_init = self
             .env_vars
@@ -151,15 +151,20 @@ impl Analyzer {
             "fn main() {{\n{}\n{}\n{}\n}}",
             &env_init, &default_init, &top_func_calls
         );
-        let func_defs = self
-            .chunks
-            .iter()
-            .map(|(chunk_id, chunk)| {
-                self.get_rust_func_definition(chunk_id, &rust_func_placeholder_name(chunk_id), "")
-            })
-            .join("\n\n");
-        println!("{}", func_defs);
-        //let translated = self.translate_chunks().await;
+        // let translated = self.translate_chunks().await;
+        // let func_defs = self
+        //     .chunks
+        //     .iter()
+        //     .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
+        //     .map(|(chunk_id, _)| {
+        //         self.get_rust_func_definition(
+        //             chunk_id,
+        //             &rust_func_placeholder_name(chunk_id),
+        //             &translated.get(&chunk_id).unwrap().rust_func_body,
+        //         )
+        //     })
+        //     .join("\n\n");
+        // println!("{}", func_defs);
     }
 
     /// Translate chunk using LLMs
@@ -168,7 +173,7 @@ impl Analyzer {
         let mut user = use_llm::LLMUser::new();
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
-        for (chunk_id, _) in self.chunks.iter() {
+        for (chunk_id, _) in self.chunks.iter().skip(20).take(1) {
             // conduct llm analysis
             let printer = TranslatingPrinter::new(self);
             let script = self

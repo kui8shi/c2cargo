@@ -511,7 +511,12 @@ impl Analyzer {
                         {
                             // Turns out the variable to be defined **conditionally** in the chunk.
                             current_scope.overwriters.push(cid);
+                        } else if self.is_substituted(&var) {
+                            // the variable will be exported to the outside of configure.ac,
+                            // therefore it's scope is global.
+                            current_scope.writers.push(cid);
                         } else {
+                            // we try to minimize the scope by considering the common parental chunk.
                             let mut common_parent = self.get_parental_chunk_sequence(cid);
                             for other in current_scope
                                 .overwriters
@@ -541,7 +546,10 @@ impl Analyzer {
                     _ => unreachable!(),
                 }
             }
-            if !current_scope.overwriters.is_empty() || !current_scope.readers.is_empty() {
+            if !current_scope.overwriters.is_empty()
+                || !current_scope.readers.is_empty()
+                || self.is_substituted(&var)
+            {
                 if let Some(may_first_def) = current_scope.writers.pop() {
                     if current_scope
                         .writers
@@ -630,13 +638,13 @@ impl Analyzer {
                 }
                 for cid in scope.writers.iter() {
                     let current = chunk_skeletons.get_mut(cid).unwrap();
-                    if !current.return_to_bind.is_empty() || current.return_to_subst.is_some() {
+                    if !current.return_to_bind.is_empty() || current.return_to_overwrite.is_some() {
                         current
                             .args
                             .push((true, var.to_owned(), self.get_inferred_type(var)));
                     } else {
                         current
-                            .return_to_subst
+                            .return_to_overwrite
                             .replace((var.to_owned(), self.get_inferred_type(var)));
                     }
                 }
@@ -750,7 +758,7 @@ pub(crate) struct FunctionSkelton {
     maps: Vec<(bool, String)>,
     declared: Vec<(bool, String, DataType)>,
     return_to_bind: Vec<(bool, String, DataType)>,
-    return_to_subst: Option<(String, DataType)>,
+    return_to_overwrite: Option<(String, DataType)>,
     pass_through_args: Vec<(bool, String, DataType)>,
     pass_through_maps: Vec<(bool, String)>,
 }
@@ -788,7 +796,7 @@ impl Analyzer {
             .return_to_bind
             .iter()
             .map(|(_, _, ty)| ty)
-            .chain(sk.return_to_subst.iter().map(|(_, ty)| ty))
+            .chain(sk.return_to_overwrite.iter().map(|(_, ty)| ty))
             .map(|ty| ty.print())
             .collect::<Vec<_>>();
         let return_signature = match return_elements.len() {
@@ -821,7 +829,7 @@ impl Analyzer {
             .return_to_bind
             .iter()
             .map(|(_, name, _)| name.clone())
-            .chain(sk.return_to_subst.iter().map(|(name, _)| name.clone()))
+            .chain(sk.return_to_overwrite.iter().map(|(name, _)| name.clone()))
             .collect::<Vec<_>>();
         match return_elements.len() {
             0 => String::new(),
@@ -851,7 +859,7 @@ impl Analyzer {
                     .map(|(is_mut, name)| format!("&{}{}", print_mut(*is_mut), name)),
             )
             .join(", ");
-        let retval_usage = if let Some((name, _)) = &sk.return_to_subst {
+        let retval_usage = if let Some((name, _)) = &sk.return_to_overwrite {
             format!("{} = ", name)
         } else {
             match sk.return_to_bind.len() {

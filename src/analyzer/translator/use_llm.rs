@@ -39,7 +39,7 @@ fn get_predefinition(required_funcs: &[&str]) -> String {
     let predefinitions = HashMap::from([
         (
             "default_modules",
-            "use std::{fs, io::Write, path::{Path, PathBuf}};",
+            "use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};",
         ),
         ("regex", "use regex;"),
         (
@@ -105,7 +105,7 @@ impl LLMAnalysisOutput<TranslationEvidence> for TranslationOutput {
         // compile check
         {
             let rust_func = format!(
-                "{}\nfn {}{}{}{}",
+                "{}\nfn main() {{}}\nfn {}{}{}{}",
                 get_predefinition(&["regex", "write_file"]),
                 self.rust_func_name,
                 evidence.header,
@@ -113,22 +113,74 @@ impl LLMAnalysisOutput<TranslationEvidence> for TranslationOutput {
                 evidence.footer
             );
             println!("{}", &rust_func);
-            let mut tmp = tempfile::NamedTempFile::new().unwrap();
-            writeln!(tmp, "{}", rust_func).expect("writing");
-            let output = std::process::Command::new("rustc")
-                .arg("--emit=metadata") // compile only metadata, fast
-                .arg("-W")
-                .arg("unused_variables")
-                .arg(tmp.path())
+            let check_dir = std::path::Path::new("/tmp/rust_check");
+            let src_dir = check_dir.join("src");
+
+            // Create project directory if it doesn't exist
+            std::fs::create_dir_all(&src_dir).unwrap_or_else(|_| {});
+
+            // Create Cargo.toml if it doesn't exist
+            let cargo_toml_path = check_dir.join("Cargo.toml");
+            if !cargo_toml_path.exists() {
+                let cargo_toml = r#"[package]
+name = "rust_check"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+regex = "1.0"
+"#;
+                std::fs::write(&cargo_toml_path, cargo_toml).expect("writing Cargo.toml");
+            }
+
+            // Write the code to validate
+            let main_rs_path = src_dir.join("main.rs");
+            std::fs::write(&main_rs_path, rust_func).expect("writing main.rs");
+
+            // Run cargo check with JSON output
+            let output = std::process::Command::new("cargo")
+                .arg("check")
+                .arg("--message-format=json")
+                .current_dir(check_dir)
+                .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
                 .output()
-                .expect("Executing: rustc has failed");
+                .expect("Executing: cargo check has failed");
 
+            let stdout = String::from_utf8_lossy(&output.stdout);
             let stderr = String::from_utf8_lossy(&output.stderr);
-            for line in stderr.lines() {
-                if line.contains("error") || line.contains("warning") {
-                    println!("{}", line.trim());
+
+            // Parse JSON messages for errors
+            let mut has_errors = false;
+            for line in stdout.lines() {
+                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(line) {
+                    if msg["reason"] == "compiler-message" {
+                        if let Some(level) = msg["message"]["level"].as_str() {
+                            if level == "error" {
+                                has_errors = true;
+                                if let Some(text) = msg["message"]["message"].as_str() {
+                                    println!("Error: {}", text);
+                                    err.push(format!("Compilation error: {}", text));
+                                }
+                            }
+                        }
+                    }
                 }
+            }
+
+            // Also check stderr for non-JSON errors
+            if !stderr.is_empty() {
+                for line in stderr.lines() {
+                    if line.contains("error") {
+                        has_errors = true;
+                        println!("{}", line.trim());
+                        err.push(format!("Compilation error: {}", line.trim()));
+                    }
+                }
+            }
+
+            if !output.status.success() && !has_errors {
+                err.push("Compilation failed with unknown error".to_string());
             }
         }
         if err.is_empty() {
