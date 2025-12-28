@@ -5,12 +5,12 @@ use std::{
 
 use regex::{Captures, Regex};
 
-use crate::analyzer::Analyzer;
+use super::{automake::WithGuard, Analyzer};
 
 #[derive(Debug, Default)]
 pub(crate) struct ProjectInfo {
     pub project_dir: PathBuf,
-    pub c_files: Vec<PathBuf>,
+    pub c_files: Vec<WithGuard<PathBuf>>,
     pub h_files: Vec<PathBuf>,
     pub built_files: Vec<PathBuf>,
     pub config_files: Vec<(PathBuf, PathBuf)>,
@@ -18,30 +18,35 @@ pub(crate) struct ProjectInfo {
     pub am_files: Vec<PathBuf>,
     pub dynamic_links: Vec<(Vec<PathBuf>, Vec<PathBuf>)>,
     pub source_contents: Option<HashMap<PathBuf, String>>,
+    pub template_contents: Option<HashMap<PathBuf, String>>,
 }
 
 impl Analyzer {
     pub(crate) fn load_project_files(&mut self) {
-        let template_files = self.get_template_files();
-        let contents = self
-            .project_info
-            .c_files
-            .iter()
-            .chain(self.project_info.h_files.iter())
-            .map(|p| p.as_path())
-            .chain(template_files)
+        let template_contents = self
+            .get_project_template_paths()
+            .into_iter()
             .map(|path| (path.to_owned(), load_source(path)))
             .collect::<HashMap<_, _>>();
-        self.project_info.source_contents.replace(contents);
+        self.project_info
+            .template_contents
+            .replace(template_contents);
+
+        let source_contents = self
+            .get_project_source_paths()
+            .into_iter()
+            .map(|path| (path.to_owned(), load_source(path)))
+            .collect::<HashMap<_, _>>();
+        self.project_info.source_contents.replace(source_contents);
     }
 
     pub(crate) fn get_project_source_paths(&self) -> Vec<&Path> {
         self.project_info
-            .source_contents
-            .as_ref()
-            .unwrap()
-            .keys()
-            .map(|s| s.as_path())
+            .c_files
+            .iter()
+            .map(|w| &w.value)
+            .chain(self.project_info.h_files.iter())
+            .map(|p| p.as_path())
             .collect()
     }
 
@@ -55,7 +60,7 @@ impl Analyzer {
             .collect()
     }
 
-    fn get_template_files(&self) -> HashSet<&Path> {
+    fn get_project_template_paths(&self) -> HashSet<&Path> {
         self.project_info
             .subst_files
             .iter()
@@ -68,6 +73,16 @@ impl Analyzer {
             )
             .map(|p| p.as_path())
             .collect::<HashSet<_>>()
+    }
+
+    pub(crate) fn get_project_template_contents(&self) -> Vec<&str> {
+        self.project_info
+            .template_contents
+            .as_ref()
+            .unwrap()
+            .values()
+            .map(|s| s.as_str())
+            .collect()
     }
 }
 

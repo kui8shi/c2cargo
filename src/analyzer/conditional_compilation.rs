@@ -4,39 +4,47 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::{HashMap, HashSet},
     ops::Range,
+    path::PathBuf,
 };
 
-#[derive(Debug, PartialEq)]
-enum CCVoL {
-    /// Matches @VAR_NAME@ or "@VAR_NAME@"
-    SubstVar(String),
-    /// Matches "string" or 123
-    Literal(String),
-}
-
 #[derive(Debug)]
-struct ACSubstVarToCPPSymbol {
-    pub condition: Option<String>,
-    pub lhs: String,
-    pub rhs: Option<CCVoL>,
+enum ACSubstVarToCPPSymbol {
+    /// The expected case:
+    /// #if @VAR@
+    ///     #define SYMBOL
+    /// #endif
+    Condition(String, String),
+    /// The expected case:
+    /// #define SYMBOL @VAR@
+    Subst(String, String),
 }
 
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 pub(super) struct ConditionalCompilationMap {
-    map: HashMap<String, CPPMigraionPolicy>,
+    pub cpp_map: HashMap<String, CCMigraionPolicy>,
+    pub subst_to_cpp_map: HashMap<String, CCMigraionPolicy>,
+    pub src_incl_map: HashMap<PathBuf, Vec<SourceInclusionCondition>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub(super) struct CPPMigraionPolicy {
+pub(super) struct SourceInclusionCondition {
+    pub negated: bool,
+    pub cfg_key: String,
+    #[serde(skip_serializing)]
+    pub am_conditional_name: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(super) struct CCMigraionPolicy {
     #[serde(rename = "type")]
-    pub mig_type: CPPMigrationType,
+    pub mig_type: CCMigrationType,
     pub key: Option<String>,
     pub value: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
-pub(super) enum CPPMigrationType {
+pub(super) enum CCMigrationType {
     Cfg,
     Env,
     Fixed,
@@ -45,26 +53,22 @@ pub(super) enum CPPMigrationType {
 }
 
 impl Analyzer {
-    pub(super) fn query_cpp_migration_policy(&self, key: &str) -> Option<&CPPMigraionPolicy> {
+    pub(super) fn query_conditional_compilation_migration_policy(
+        &self,
+        key: &str,
+    ) -> Option<&CCMigraionPolicy> {
         let symbol = self.may_prefix_cpp_symbol(key);
-        self.conditional_compilation_map
-            .as_ref()
-            .unwrap()
-            .map
+        let ccm = self.conditional_compilation_map.as_ref().unwrap();
+        ccm.cpp_map
             .get(&symbol)
+            .or(ccm.subst_to_cpp_map.get(&symbol))
     }
 
     pub(super) fn create_conditional_compilation_map(&mut self) {
-        let mut cpp_defs = self.cpp_defs.clone().unwrap();
-        for file in self.project_info.subst_files.iter().map(|(_, src)| src) {
-            let path = self.project_info.project_dir.join(file);
-            let bytes = std::fs::read(path).unwrap();
-            let content = String::from_utf8_lossy(&bytes);
-            for res in parse_ac_subst_header(&content) {
-                cpp_defs.insert(res.lhs);
-            }
-        }
-        let cpp_defs = cpp_defs
+        let cpp_defs = self
+            .cpp_defs
+            .clone()
+            .unwrap()
             .into_iter()
             .filter(|symbol| {
                 self.get_project_source_contents()
@@ -72,7 +76,7 @@ impl Analyzer {
                     .any(|c| c.contains(symbol))
             })
             .collect::<HashSet<_>>();
-        let fixed_cpp_defs = self
+        let fixed_cpp_values = self
             .side_effects_of_frozen_macros
             .as_ref()
             .unwrap()
@@ -80,49 +84,102 @@ impl Analyzer {
             .flat_map(|effects| effects.cpps.iter())
             .collect::<HashMap<_, _>>();
 
-        let mut map = ConditionalCompilationMap::default();
+        let mut cpp_map = HashMap::default();
         for symbol in cpp_defs {
             assert!(!symbol.is_empty());
             let symbol_may_prefixed = self.may_prefix_cpp_symbol(&symbol);
-            let cc_entry = if let Some(fixed) = fixed_cpp_defs.get(&symbol_may_prefixed) {
+            let cc_entry = if let Some(fixed) = fixed_cpp_values.get(&symbol_may_prefixed) {
                 if let Some(value) = fixed {
                     if value == "1" {
-                        CPPMigraionPolicy {
-                            mig_type: CPPMigrationType::Set,
+                        CCMigraionPolicy {
+                            mig_type: CCMigrationType::Set,
                             key: None,
                             value: None,
                         }
                     } else {
-                        CPPMigraionPolicy {
-                            mig_type: CPPMigrationType::Fixed,
+                        CCMigraionPolicy {
+                            mig_type: CCMigrationType::Fixed,
                             key: None,
                             value: Some(value.clone()),
                         }
                     }
                 } else {
-                    CPPMigraionPolicy {
-                        mig_type: CPPMigrationType::Unset,
+                    CCMigraionPolicy {
+                        mig_type: CCMigrationType::Unset,
                         key: None,
                         value: None,
                     }
                 }
-            } else if detect_value_usage(&symbol_may_prefixed, &self.get_project_source_contents())
-            {
-                CPPMigraionPolicy {
-                    mig_type: CPPMigrationType::Env,
-                    key: Some(symbol.clone()),
-                    value: None,
-                }
             } else {
-                CPPMigraionPolicy {
-                    mig_type: CPPMigrationType::Cfg,
-                    key: Some(symbol.to_lowercase()),
-                    value: None,
+                let contents = self
+                    .get_project_source_contents()
+                    .into_iter()
+                    .chain(self.get_project_template_contents().into_iter())
+                    .collect::<Vec<_>>();
+                if detect_value_usage(&symbol_may_prefixed, &contents) {
+                    CCMigraionPolicy {
+                        mig_type: CCMigrationType::Env,
+                        key: Some(symbol.clone()),
+                        value: None,
+                    }
+                } else {
+                    CCMigraionPolicy {
+                        mig_type: CCMigrationType::Cfg,
+                        key: Some(symbol.to_lowercase()),
+                        value: None,
+                    }
                 }
             };
-            map.map.insert(symbol_may_prefixed, cc_entry);
+            cpp_map.insert(symbol_may_prefixed, cc_entry);
         }
-        self.conditional_compilation_map.replace(map);
+        let mut subst_to_cpp_map = HashMap::new();
+        for file in self.project_info.subst_files.iter().map(|(_, src)| src) {
+            let path = self.project_info.project_dir.join(file);
+            let bytes = std::fs::read(path).unwrap();
+            let content = String::from_utf8_lossy(&bytes);
+            for res in parse_ac_subst_header(&content, &self.get_project_source_contents()) {
+                match res {
+                    ACSubstVarToCPPSymbol::Condition(subst, symbol) => {
+                        let policy = CCMigraionPolicy {
+                            mig_type: CCMigrationType::Cfg,
+                            key: Some(symbol.to_lowercase()),
+                            value: None,
+                        };
+                        subst_to_cpp_map.insert(subst, policy);
+                    }
+                    ACSubstVarToCPPSymbol::Subst(subst, symbol) => {
+                        let policy = CCMigraionPolicy {
+                            mig_type: CCMigrationType::Env,
+                            key: Some(symbol),
+                            value: None,
+                        };
+                        subst_to_cpp_map.insert(subst, policy);
+                    }
+                };
+            }
+        }
+        let mut src_incl_map = HashMap::new();
+        for file in self.project_info.c_files.iter() {
+            if file.am_cond.len() > 0 {
+                let conditionals = file
+                    .am_cond
+                    .iter()
+                    .map(|c| SourceInclusionCondition {
+                        negated: c.negated,
+                        cfg_key: c.var.to_lowercase(),
+                        am_conditional_name: c.var.clone(),
+                    })
+                    .collect::<Vec<_>>();
+                src_incl_map.insert(file.value.clone(), conditionals);
+            }
+        }
+        let ccm = ConditionalCompilationMap {
+            cpp_map,
+            subst_to_cpp_map,
+            src_incl_map,
+        };
+        println!("{}", serde_json::to_string_pretty(&ccm).unwrap());
+        self.conditional_compilation_map.replace(ccm);
     }
 
     fn may_prefix_cpp_symbol(&self, symbol: &str) -> String {
@@ -206,7 +263,10 @@ fn check_usage_recursive(symbol: &str, contents: &[&str], visited: &mut HashSet<
     false
 }
 
-fn parse_ac_subst_header(content: &str) -> Vec<ACSubstVarToCPPSymbol> {
+fn parse_ac_subst_header(
+    subst_header: &str,
+    source_contents: &[&str],
+) -> Vec<ACSubstVarToCPPSymbol> {
     let mut results = Vec::new();
     let mut processed_ranges: Vec<Range<usize>> = Vec::new();
 
@@ -216,10 +276,11 @@ fn parse_ac_subst_header(content: &str) -> Vec<ACSubstVarToCPPSymbol> {
     // Regex for define: #define LHS [RHS]
     // Note: rhs captures everything until end of line/comment
     let define_re =
-        Regex::new(r"(?m)^\s*#define\s+(?<lhs>[A-Z0-9_]+)(?:\s+(?<rhs>[^\r\n]+))?$").unwrap();
+        Regex::new(r"(?m)^\s*#define[ \t]+(?<lhs>[A-Z0-9_]+)(?:[ \t]+(?<rhs>[^\r\n]+))?\s*$")
+            .unwrap();
 
     // 1. Process Conditional Blocks
-    for cap in block_re.captures_iter(content) {
+    for cap in block_re.captures_iter(subst_header) {
         let cond = cap.name("cond").unwrap().as_str().to_string();
         let block_content = cap.name("block").unwrap().as_str();
         let match_range = cap.get(0).unwrap().range();
@@ -227,39 +288,50 @@ fn parse_ac_subst_header(content: &str) -> Vec<ACSubstVarToCPPSymbol> {
         processed_ranges.push(match_range);
 
         for inner_cap in define_re.captures_iter(block_content) {
-            if let Some(entry) = create_entry(inner_cap, Some(cond.clone())) {
-                results.push(entry);
+            if let Some((symbol_name, may_subst_value)) = create_entry(inner_cap) {
+                match may_subst_value {
+                    None => {
+                        results.push(ACSubstVarToCPPSymbol::Condition(cond.clone(), symbol_name));
+                    }
+                    Some(_) if !detect_value_usage(&symbol_name, source_contents) => {
+                        results.push(ACSubstVarToCPPSymbol::Condition(cond.clone(), symbol_name));
+                    }
+                    _ => (),
+                }
             }
         }
     }
 
     // 2. Process Global definitions
-    for cap in define_re.captures_iter(content) {
+    for cap in define_re.captures_iter(subst_header) {
         let match_start = cap.get(0).unwrap().start();
 
         if processed_ranges.iter().any(|r| r.contains(&match_start)) {
             continue;
         }
 
-        if let Some(entry) = create_entry(cap, None) {
-            if entry.condition.is_none() {
-                match entry.rhs {
-                    Some(CCVoL::Literal(_)) | None => continue,
-                    _ => (),
+        if let Some((symbol_name, may_subst_value)) = create_entry(cap) {
+            match may_subst_value {
+                Some(subst_value) => {
+                    if detect_value_usage(&symbol_name, source_contents) {
+                        results.push(ACSubstVarToCPPSymbol::Subst(subst_value, symbol_name));
+                    } else {
+                        results.push(ACSubstVarToCPPSymbol::Condition(subst_value, symbol_name));
+                    }
                 }
+                _ => (),
             }
-            results.push(entry);
         }
     }
 
     results
 }
 
-fn create_entry(cap: regex::Captures, condition: Option<String>) -> Option<ACSubstVarToCPPSymbol> {
+fn create_entry(cap: regex::Captures) -> Option<(String, Option<String>)> {
     let lhs = cap.name("lhs").unwrap().as_str().to_string();
     let raw_rhs = cap.name("rhs").map(|m| m.as_str().trim());
 
-    let rhs_parsed = match raw_rhs {
+    let rhs = match raw_rhs {
         Some(s) if !s.is_empty() => {
             // Clean comments
             let comment_re = Regex::new(r"/\*.*?\*/").unwrap();
@@ -268,11 +340,11 @@ fn create_entry(cap: regex::Captures, condition: Option<String>) -> Option<ACSub
             if clean_s.is_empty() {
                 None
             } else if let Some(subst) = parse_substitution(&clean_s) {
-                // Priority Check: If it looks like a substitution (quoted or not), it is SubstVar
-                Some(CCVoL::SubstVar(subst))
+                // Priority Check: If it looks like a substitution (quoted or not), it is subst var
+                Some(subst)
             } else if is_literal(&clean_s) {
                 // Only if not a substitution, check if it is a literal
-                Some(CCVoL::Literal(clean_s))
+                None
             } else {
                 // Complex -> Ignore
                 return None;
@@ -281,11 +353,7 @@ fn create_entry(cap: regex::Captures, condition: Option<String>) -> Option<ACSub
         _ => None,
     };
 
-    Some(ACSubstVarToCPPSymbol {
-        condition,
-        lhs,
-        rhs: rhs_parsed,
-    })
+    Some((lhs, rhs))
 }
 
 /// Detects @VAR@ OR "@VAR@" and extracts VAR

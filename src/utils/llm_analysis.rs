@@ -8,9 +8,7 @@ use serde::{de::DeserializeOwned, Serialize};
 use std::time::Duration;
 use tokio::time::sleep;
 
-pub(crate) trait LLMAnalysisOutput<E>:
-    std::fmt::Debug + Serialize + DeserializeOwned
-{
+pub(crate) trait LLMOutput<E>: std::fmt::Debug + Serialize + DeserializeOwned {
     fn validate(&self, evidence: &E) -> Result<(), Vec<String>>;
 
     fn normalize(&mut self) {}
@@ -21,7 +19,7 @@ pub(crate) trait LLMAnalysisOutput<E>:
 pub(crate) trait LLMAnalysis {
     type Evidence;
     type Input: std::fmt::Debug + Clone + Serialize;
-    type Output: LLMAnalysisOutput<Self::Evidence>;
+    type Output: LLMOutput<Self::Evidence>;
 
     const MODEL: &str = "gpt-5-mini";
 

@@ -3,8 +3,9 @@ use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
 
 use super::{
-    AcWord, Analyzer, AstVisitor, Condition, GuardBodyPair, MayM4, Node, NodeId, Operator,
-    Parameter, ParameterSubstitution, PatternBodyPair, Redirect, ShellCommand, Word, WordFragment,
+    AcWord, Analyzer, AstVisitor, Condition, GuardBodyPair, MayM4, Node, NodeId, NodeInfo,
+    Operator, Parameter, ParameterSubstitution, PatternBodyPair, Redirect, ShellCommand, Word,
+    WordFragment,
 };
 
 use super::{as_literal, as_shell, as_var};
@@ -233,6 +234,7 @@ pub(super) struct GuardAnalyzer<'a> {
     range: Option<Vec<(usize, usize)>>,
     guard_stack: Vec<Guard>,
     in_condition: bool,
+    node_as_guard: Option<Guard>,
 }
 
 impl Analyzer {
@@ -270,6 +272,7 @@ impl<'a> GuardAnalyzer<'a> {
             range: None,
             guard_stack: Vec::new(),
             in_condition: false,
+            node_as_guard: None,
         };
         for node_id in s.analyzer.get_top_ids() {
             s.visit_top(node_id);
@@ -304,11 +307,6 @@ impl<'a> GuardAnalyzer<'a> {
             .push(new_block_id);
 
         new_block_id
-    }
-
-    fn negate_last_guard(&mut self) {
-        let guard = self.guard_stack.pop().unwrap();
-        self.guard_stack.push(guard.negate_whole());
     }
 
     fn equality(&self, w1: &AcWord, w2: &AcWord) -> Option<Guard> {
@@ -511,6 +509,34 @@ impl<'a> GuardAnalyzer<'a> {
         None
     }
 
+    fn is_true_command(&self, node_id: NodeId) -> Option<bool> {
+        use autotools_parser::ast::node::ShellCommand::*;
+        use MayM4::*;
+        if let Some(node) = self.get_node(node_id) {
+            match &node.cmd.0 {
+                Shell(Cmd(words)) if words.len() == 1 => {
+                    let first_word = words.first().unwrap();
+                    if let Some(command) = &as_shell(first_word) {
+                        match command {
+                            WordFragment::Literal(name) => match name.as_str() {
+                                "true" => return Some(true),
+                                "false" => return Some(false),
+                                _ => {}
+                            },
+                            WordFragment::Colon => {
+                                // ':' is a special command equivalent to 'true' command
+                                return Some(true);
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn condition_to_guard(&mut self, cond: &Condition<AcWord>) -> Guard {
         match cond {
             Condition::And(c1, c2) => Guard::And(vec![
@@ -530,10 +556,24 @@ impl<'a> GuardAnalyzer<'a> {
                     self.analyzer.get_node_mut(cmd).unwrap().range =
                         self.analyzer.get_node(parent).unwrap().range.clone();
                 }
-                Guard::N(true, Atom::Cmd(cmd))
+                if let Some(return_status) = self.is_true_command(cmd) {
+                    Guard::N(!return_status, Atom::Tautology)
+                } else {
+                    self.visit_node(cmd);
+                    if let Some(guard) = self.node_as_guard.take() {
+                        guard
+                    } else {
+                        Guard::confirmed(Atom::Cmd(cmd))
+                    }
+                }
             }
             Condition::Cond(op) => match op {
                 Operator::Eq(w1, w2) => {
+                    // visit words just for some recording
+                    self.visit_word(w1);
+                    self.visit_word(w2);
+
+                    // create Guard by unraveling test command conventions
                     let guard = if let Some(res) = self.equality(w1, w2) {
                         res
                     } else if let Some(res) = self.equality(w2, w1) {
@@ -545,6 +585,11 @@ impl<'a> GuardAnalyzer<'a> {
                     guard
                 }
                 Operator::Neq(w1, w2) => {
+                    // visit words just for some recording
+                    self.visit_word(w1);
+                    self.visit_word(w2);
+
+                    // create Guard by unraveling test command conventions
                     let guard = if let Some(res) = self.equality(w1, w2) {
                         res
                     } else if let Some(res) = self.equality(w2, w1) {
@@ -556,6 +601,11 @@ impl<'a> GuardAnalyzer<'a> {
                     guard.negate_whole()
                 }
                 Operator::Ge(w1, w2) => {
+                    // visit words just for some recording
+                    self.visit_word(w1);
+                    self.visit_word(w2);
+
+                    // narrowing scopes of supported syntaxes
                     if let Some(guard) = self.compare(w1, w2, VarCond::Ge, VarCond::Le) {
                         guard
                     } else {
@@ -564,6 +614,11 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
                 Operator::Gt(w1, w2) => {
+                    // visit words just for some recording
+                    self.visit_word(w1);
+                    self.visit_word(w2);
+
+                    // narrowing scopes of supported syntaxes
                     if let Some(guard) = self.compare(w1, w2, VarCond::Gt, VarCond::Lt) {
                         guard
                     } else {
@@ -572,6 +627,10 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
                 Operator::Le(w1, w2) => {
+                    // visit words just for some recording
+                    self.visit_word(w1);
+                    self.visit_word(w2);
+
                     if let Some(guard) = self.compare(w1, w2, VarCond::Le, VarCond::Ge) {
                         guard
                     } else {
@@ -580,6 +639,9 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
                 Operator::Lt(w1, w2) => {
+                    // visit words just for some recording
+                    self.visit_word(w1);
+                    self.visit_word(w2);
                     if let Some(guard) = self.compare(w1, w2, VarCond::Lt, VarCond::Gt) {
                         guard
                     } else {
@@ -588,6 +650,8 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
                 Operator::Empty(w) => {
+                    // visit words just for some recording
+                    self.visit_word(w);
                     if let Some(name) = as_shell(w).and_then(as_var) {
                         Guard::confirmed(Atom::Var(name.to_owned(), VarCond::Empty))
                     } else {
@@ -595,6 +659,9 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
                 Operator::NonEmpty(w) => {
+                    // visit words just for some recording
+                    self.visit_word(w);
+
                     if let Some(name) = as_shell(w).and_then(as_var) {
                         Guard::negated(Atom::Var(name.to_owned(), VarCond::Empty))
                     } else {
@@ -602,10 +669,16 @@ impl<'a> GuardAnalyzer<'a> {
                     }
                 }
                 Operator::Dir(w) | Operator::File(w) => {
+                    // visit words just for some recording
+                    self.visit_word(w);
+
                     let (path, is_absolute) = analyze_path(w);
                     Guard::confirmed(Atom::PathExists(path, is_absolute))
                 }
                 Operator::NoExists(w) => {
+                    // visit words just for some recording
+                    self.visit_word(w);
+
                     let (path, is_absolute) = analyze_path(w);
                     Guard::negated(Atom::PathExists(path, is_absolute))
                 }
@@ -728,6 +801,20 @@ impl<'a> GuardAnalyzer<'a> {
             None
         }
     }
+
+    fn negate_last_guard(&mut self) {
+        let guard = self.pop_guard().unwrap();
+        self.guard_stack.push(guard.negate_whole());
+    }
+
+    fn pop_guard(&mut self) -> Option<Guard> {
+        self.guard_stack.pop()
+    }
+
+    fn push_guard(&mut self, guard: Guard) {
+        let guard = simplify_guard(guard);
+        self.guard_stack.push(guard);
+    }
 }
 
 impl<'a> AstVisitor for GuardAnalyzer<'a> {
@@ -756,44 +843,10 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
     }
 
     fn visit_condition(&mut self, cond: &Condition<AcWord>) {
-        let was_in_condition = self.in_condition;
-        if !was_in_condition {
-            let guard = self.condition_to_guard(cond);
-            self.guard_stack.push(guard);
-            self.in_condition = true;
-        }
-        match cond {
-            Condition::Cond(op) => match op {
-                Operator::Eq(w1, w2)
-                | Operator::Neq(w1, w2)
-                | Operator::Ge(w1, w2)
-                | Operator::Gt(w1, w2)
-                | Operator::Le(w1, w2)
-                | Operator::Lt(w1, w2) => {
-                    self.visit_word(w1);
-                    self.visit_word(w2);
-                }
-                Operator::Empty(w)
-                | Operator::NonEmpty(w)
-                | Operator::Dir(w)
-                | Operator::File(w)
-                | Operator::NoExists(w) => self.visit_word(w),
-            },
-            Condition::Not(cond) => self.visit_condition(cond),
-            Condition::And(c1, c2) | Condition::Or(c1, c2) => {
-                self.visit_condition(c1);
-                self.visit_condition(c2);
-            }
-            Condition::Eval(cmd) => {
-                self.record_block(&[**cmd]);
-                self.visit_node(**cmd);
-            }
-            Condition::ReturnZero(cmd) => {
-                self.record_block(&[**cmd]);
-                self.visit_node(**cmd)
-            }
-        }
-        self.in_condition = was_in_condition;
+        self.in_condition = true;
+        let guard = self.condition_to_guard(cond);
+        self.push_guard(guard);
+        self.in_condition = false;
     }
 
     fn visit_parameter_substitution(&mut self, subs: &ParameterSubstitution<AcWord>) {
@@ -812,7 +865,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
         for c in &pair.body {
             self.visit_node(*c);
         }
-        self.guard_stack.pop();
+        self.pop_guard();
     }
 
     fn visit_brace(&mut self, body: &[NodeId]) {
@@ -856,7 +909,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
         }
         self.record_block(&[cmd]);
         self.visit_node(cmd);
-        self.guard_stack.pop();
+        self.pop_guard();
     }
 
     fn visit_pipe(&mut self, bang: bool, cmds: &[NodeId]) {
@@ -882,15 +935,16 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 }
             }
             if let Some(var_name) = as_var(w) {
-                if var_name == "host" {
-                    is_platform_branch = true;
-                }
-                // FIXME: host_cpu, host_os?
+                // FIXME: host_os?
+                is_platform_branch = match var_name {
+                    "host" | "host_cpu" => true,
+                    _ => false,
+                };
             }
         }
         let mut removing_arm_indexes = Vec::new();
         for (arm_index, arm) in arms.iter().enumerate() {
-            let mut guard = Guard::make_or(
+            let mut pattern_guard = Guard::make_or(
                 arm.patterns
                     .iter()
                     .map(|pattern| {
@@ -899,22 +953,28 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     })
                     .collect(),
             );
+            let is_match_any =
+                matches!(pattern_guard, Guard::N(_, Atom::Var(_, VarCond::MatchAny)));
             let unsupported_platform_branch_found = if is_platform_branch {
                 if let Some(converted) = self
                     .analyzer
                     .platform_support
-                    .check_supported_platform(&guard)
+                    .check_supported_platform(&pattern_guard)
                 {
-                    guard = converted;
+                    pattern_guard = converted;
                     false
                 } else {
-                    true
+                    if self.in_condition && is_match_any {
+                        false
+                    } else {
+                        true
+                    }
                 }
             } else {
                 false
             };
             if unsupported_platform_branch_found {
-                // why not use `remove_node` in removal.rs?
+                // why not call `remove_node` in removal.rs now?
                 // because `remove_node` depends on the block structure,
                 // that we are constructing now.
                 for node_id in arm.body.iter() {
@@ -922,8 +982,31 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     self.analyzer.pool.nodes.remove(*node_id);
                 }
                 removing_arm_indexes.push(arm_index);
+            } else if self.in_condition {
+                if arm.body.len() > 1 {
+                    todo!("multiple commands found in an arm of case statement that is used as a condition");
+                }
+                let cmd = arm.body.first().unwrap();
+                let cmd_guard = self.try_parse_test_command(*cmd).expect("unable to parse command in an arm of case statement that is used as a condition");
+                let arm_guard = if is_match_any {
+                    cmd_guard
+                } else {
+                    Guard::And(vec![pattern_guard, cmd_guard])
+                };
+                let case_as_guard = if let Some(guard) = self.node_as_guard.take() {
+                    match guard {
+                        Guard::Or(mut v) => {
+                            v.push(arm_guard);
+                            Guard::Or(v)
+                        }
+                        g => Guard::Or(vec![g, arm_guard]),
+                    }
+                } else {
+                    arm_guard
+                };
+                self.node_as_guard.replace(simplify_guard(case_as_guard));
             } else {
-                self.guard_stack.push(guard);
+                self.push_guard(pattern_guard);
                 self.record_block(&arm.body);
                 for c in &arm.body {
                     self.visit_node(*c);
@@ -942,6 +1025,12 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 _ => unreachable!(),
             }
         }
+        if self.in_condition {
+            if self.node_as_guard.is_none() {
+                self.node_as_guard
+                    .replace(Guard::confirmed(Atom::Tautology));
+            }
+        }
         self.guard_stack = saved_stack;
     }
 
@@ -952,7 +1041,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 M4Argument::Condition(cond) => {
                     self.visit_condition(cond);
                     self.record_block(&[]);
-                    self.guard_stack.pop();
+                    self.pop_guard();
                 }
                 M4Argument::Commands(cmds) => {
                     self.record_block(cmds);
@@ -1049,4 +1138,57 @@ fn split_glob_triplet(s: &str) -> Vec<String> {
     }
     parts.push(buf);
     parts
+}
+
+fn simplify_guard(guard: Guard) -> Guard {
+    match guard {
+        Guard::N(negated, atom) => Guard::N(negated, atom),
+        Guard::And(guards) => {
+            let mut reduced = Vec::new();
+            for g in guards {
+                if let Guard::N(negated, Atom::Tautology) = &g {
+                    if *negated {
+                        return Guard::negated(Atom::Tautology);
+                    }
+                } else {
+                    reduced.push(g);
+                }
+            }
+            if reduced.len() == 1 {
+                reduced.pop().unwrap()
+            } else {
+                Guard::And(reduced)
+            }
+        }
+        Guard::Or(guards) => {
+            let mut reduced = Vec::new();
+            for g in guards {
+                if let Guard::N(negated, Atom::Tautology) = &g {
+                    if !negated {
+                        return Guard::confirmed(Atom::Tautology);
+                    }
+                } else {
+                    reduced.push(g);
+                }
+            }
+            if reduced.len() == 1 {
+                reduced.pop().unwrap()
+            } else {
+                Guard::Or(reduced)
+            }
+        }
+    }
+}
+
+type TestCommandReParser = autotools_parser::ast::builder::AutoconfNodeBuilder<NodeInfo>;
+use autotools_parser::ast::builder::ConditionBuilder;
+impl<'a> GuardAnalyzer<'a> {
+    /// Helper method for the case when we want to reinterpret any commands that could be a condition
+    /// (e.g. test comamnd)
+    fn try_parse_test_command(&mut self, cmd: NodeId) -> Option<Guard> {
+        let mut p = TestCommandReParser::default();
+        p.nodes = self.analyzer.pool.nodes.clone(); // FIXME: too costly clone
+        let condition = p.make_condition(cmd).ok()?;
+        Some(self.condition_to_guard(&condition))
+    }
 }

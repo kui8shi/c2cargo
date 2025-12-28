@@ -318,7 +318,7 @@ impl Analyzer {
             })
             .filter(|(var, _)| {
                 !self
-                    .build_option_info
+                    .build_option_info()
                     .arg_var_to_option_name
                     .contains_key(var)
             })
@@ -369,7 +369,7 @@ impl Analyzer {
             })
             .filter(|(var, _)| {
                 !self
-                    .build_option_info
+                    .build_option_info()
                     .arg_var_to_option_name
                     .contains_key(var)
             })
@@ -405,7 +405,7 @@ impl Analyzer {
         let features = chunk_uses
             .into_iter()
             .filter(|(var, _)| {
-                self.build_option_info
+                self.build_option_info()
                     .arg_var_to_option_name
                     .contains_key(var.as_str())
             })
@@ -442,14 +442,14 @@ impl Analyzer {
             });
         for (var, cids) in visible_vars.iter() {
             if self
-                .build_option_info
+                .build_option_info()
                 .arg_var_to_option_name
                 .contains_key(var.as_str())
             {
                 continue;
             }
             if self
-                .build_option_info
+                .build_option_info()
                 .arg_var_to_option_name
                 .contains_key(var.as_str())
             {
@@ -754,13 +754,20 @@ impl Analyzer {
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct FunctionSkelton {
-    args: Vec<(bool, String, DataType)>,
-    maps: Vec<(bool, String)>,
-    declared: Vec<(bool, String, DataType)>,
-    return_to_bind: Vec<(bool, String, DataType)>,
-    return_to_overwrite: Option<(String, DataType)>,
-    pass_through_args: Vec<(bool, String, DataType)>,
-    pass_through_maps: Vec<(bool, String)>,
+    /// vector of (mutability, argument name, type)
+    pub args: Vec<(bool, String, DataType)>,
+    /// vector of (mutability, dictionary name)
+    pub maps: Vec<(bool, String)>,
+    /// vector of (mutability, variable name, type)
+    pub declared: Vec<(bool, String, DataType)>,
+    /// vector of (mutability, variable name, type)
+    pub return_to_bind: Vec<(bool, String, DataType)>,
+    /// vector of (variable name, type)
+    pub return_to_overwrite: Option<(String, DataType)>,
+    /// vector of (mutability, variable name, type)
+    pub pass_through_args: Vec<(bool, String, DataType)>,
+    /// vector of (mutability, dictionary name)
+    pub pass_through_maps: Vec<(bool, String)>,
 }
 
 impl Analyzer {

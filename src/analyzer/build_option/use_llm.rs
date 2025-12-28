@@ -2,7 +2,7 @@
 use serde::{ser::SerializeStruct, Deserialize, Serialize};
 use std::collections::HashMap;
 
-use crate::utils::llm_analysis::{LLMAnalysis, LLMAnalysisOutput};
+use crate::utils::llm_analysis::{LLMAnalysis, LLMOutput};
 
 use super::BuildOption;
 
@@ -35,7 +35,7 @@ pub(super) struct BuildOptionLLMAnalysisResult {
     pub option_name: String,
 }
 
-impl LLMAnalysisOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
+impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
     /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
     fn validate(&self, values: &Vec<String>) -> Result<(), Vec<String>> {

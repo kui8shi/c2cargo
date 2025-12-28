@@ -198,12 +198,8 @@ impl<'a> TypeInferrer<'a> {
 
         let hints = self.type_hints[name].clone();
 
-        if hints.contains(&CanBeBoolLike) {
-            if let Some(set) = self.assigned.get(name) {
-                inferred = Either(Box::new(Boolean), Vec::from_iter(set.iter().cloned()))
-            } else {
-                inferred = Boolean
-            }
+        if hints.contains(&CanContainWhitespace) {
+            inferred = List(Box::new(Literal));
         }
         if hints.contains(&CanBeNum) {
             if let Some(set) = self.assigned.get(name) {
@@ -212,8 +208,12 @@ impl<'a> TypeInferrer<'a> {
                 inferred = Integer;
             }
         }
-        if hints.contains(&CanContainWhitespace) {
-            inferred = List(Box::new(Literal));
+        if hints.contains(&CanBeBoolLike) {
+            if let Some(set) = self.assigned.get(name) {
+                inferred = Either(Box::new(Boolean), Vec::from_iter(set.iter().cloned()))
+            } else if !name.to_lowercase().contains("version") {
+                inferred = Boolean
+            }
         }
         if hints.contains(&AppendedSelf) {
             inferred = List(Box::new(Literal));
@@ -253,15 +253,24 @@ impl<'a> TypeInferrer<'a> {
     }
 
     fn check_literal(&mut self, var: &str, lit: &str) {
+        let mut found_hint = false;
         if is_boolean(lit) {
             self.add_type_hint(var, CanBeBoolLike);
-        } else if lit.is_empty() {
+            found_hint = true;
+        }
+        if lit.is_empty() {
             self.add_type_hint(var, CanBeEmpty);
-        } else if is_numeric(lit) {
+            found_hint = true;
+        }
+        if is_numeric(lit) {
             self.add_type_hint(var, CanBeNum);
-        } else if lit.chars().any(|c| c.is_whitespace()) {
+            found_hint = true;
+        }
+        if lit.chars().any(|c| c.is_whitespace()) {
             self.add_type_hint(var, CanContainWhitespace);
-        } else {
+            found_hint = true;
+        }
+        if !found_hint {
             self.assigned
                 .entry(var.to_owned())
                 .or_default()

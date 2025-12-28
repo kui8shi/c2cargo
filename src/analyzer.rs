@@ -595,7 +595,7 @@ pub struct Analyzer {
     /// information about platform support of Rust.
     platform_support: PlatformSupport,
     /// Analysis results of build options.
-    build_option_info: BuildOptionInfo,
+    build_option_info: Option<BuildOptionInfo>,
     /// Cache used inside Value Set Analysis. Mainly used for recording resolved values of variables
     vsa_cache: RefCell<VSACache>,
     /// Whether the nodes are flattened or not
@@ -662,18 +662,18 @@ impl Analyzer {
                 .expect("Partial Expansion of configure.ac has failed.")
         } else {
             std::fs::read_to_string(path).expect("Reading a file has failed.")
-        }
-        // FIXME: We really don't want this variable. But the matching logic is incorrect
-        // (e.g. $USER_VARIABLE -> SER_VARIABLE)
-        .replace("$U", "");
+        };
         std::fs::read_to_string(path).unwrap();
         // Move to the project directory
         let project_dir = path.parent().unwrap().to_owned();
         std::env::set_current_dir(&project_dir).expect("Unable to move to the project directory.");
-        let fixed = [(
-            "srcdir".to_owned(),
-            ".".into(), // project_dir.to_str().unwrap().to_owned(),
-        )];
+        let fixed = [
+            (
+                "srcdir".into(),
+                ".".into(), // project_dir.to_str().unwrap().to_owned(),
+            ),
+            ("U".into(), "".into()),
+        ];
         let lexer = Lexer::new(contents.chars());
         println!("==================== Parse BEGIN =======================");
         let (nodes, top_ids) = NodeParser::<_, NodeInfo>::new(lexer).parse_all();
@@ -731,6 +731,10 @@ impl Analyzer {
         s.analyze_automake_files();
         s.aggregate_cpp_defs();
         s.aggregate_subst_vars();
+
+        println!("==================== BUILD OPTION =======================");
+        s.run_build_option_analysis();
+
         s.froze_macros();
         s.consume_automake_macros();
 
@@ -739,8 +743,6 @@ impl Analyzer {
         s.create_conditional_compilation_map();
 
         s.remove_unused_variables();
-
-        s.run_build_option_analysis();
 
         // Flatten nodes
         s.flatten();

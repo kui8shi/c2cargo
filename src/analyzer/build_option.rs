@@ -67,10 +67,14 @@ impl Analyzer {
         self.macro_calls.as_ref().unwrap().get(name)
     }
 
+    pub(crate) fn build_option_info(&self) -> &BuildOptionInfo {
+        self.build_option_info.as_ref().unwrap()
+    }
+
     /// Analyze basic properties of build options
     /// Calling this will remove nodes related to build option declaration/overwriting.
     pub(crate) fn run_build_option_analysis(&mut self) {
-        self.build_option_info = self.extract_build_options();
+        self.build_option_info.replace(self.extract_build_options());
 
         // we add information to guards that touch build options.
         self.find_build_option_guards();
@@ -98,7 +102,7 @@ impl Analyzer {
         let mut user = use_llm::LLMUser::new();
         let results = user
             .run_llm_analysis(
-                self.build_option_info
+                self.build_option_info()
                     .build_options
                     .values()
                     .map(|b| (b, &b.value_candidates)),
@@ -106,6 +110,8 @@ impl Analyzer {
             .await;
 
         self.build_option_info
+            .as_mut()
+            .unwrap()
             .cargo_features
             .replace(Default::default());
         for res in results {
@@ -122,6 +128,8 @@ impl Analyzer {
             let features = self.construct_cargo_features(&res);
             println!("Cargo features for {}: {:?}", res.option_name, features);
             self.build_option_info
+                .as_mut()
+                .unwrap()
                 .cargo_features
                 .as_mut()
                 .unwrap()
@@ -171,13 +179,17 @@ impl Analyzer {
     }
 
     fn remove_build_option_declarations(&mut self) {
-        for (option_name, build_option) in self.build_option_info.build_options.clone() {
+        for (option_name, build_option) in self.build_option_info().build_options.clone() {
             if self.pool.nodes.contains(build_option.decl_id) {
                 self.remove_node(build_option.decl_id);
             }
             if build_option.context.is_empty() {
                 // remove build options themselves that have no side effects.
-                self.build_option_info.build_options.remove(&option_name);
+                self.build_option_info
+                    .as_mut()
+                    .unwrap()
+                    .build_options
+                    .remove(&option_name);
             }
         }
     }
@@ -185,6 +197,8 @@ impl Analyzer {
     fn find_build_option_guards(&mut self) {
         let arg_vars = self
             .build_option_info
+            .as_ref()
+            .unwrap()
             .arg_var_to_option_name
             .keys()
             .map(|s| s.as_str())
@@ -202,6 +216,8 @@ impl Analyzer {
     fn collect_build_option_contexts(&mut self) {
         let mut build_options = self
             .build_option_info
+            .as_mut()
+            .unwrap()
             .build_options
             .drain()
             .collect::<HashMap<_, _>>();
@@ -230,12 +246,14 @@ impl Analyzer {
             }
         }
 
-        self.build_option_info.build_options = build_options;
+        self.build_option_info.as_mut().unwrap().build_options = build_options;
     }
 
     fn collect_build_option_value_candidates(&mut self) {
         let mut build_options = self
             .build_option_info
+            .as_mut()
+            .unwrap()
             .build_options
             .drain()
             .collect::<HashMap<_, _>>();
@@ -256,7 +274,7 @@ impl Analyzer {
                 .value_candidates
                 .extend(normalize(values.into_iter().collect()));
         }
-        self.build_option_info.build_options = build_options;
+        self.build_option_info.as_mut().unwrap().build_options = build_options;
     }
 
     /// Remove nodes where a build option variable is set to "no".
@@ -264,6 +282,7 @@ impl Analyzer {
         use crate::analyzer::{as_literal, as_shell, MayM4};
         use autotools_parser::ast::node::ShellCommand;
 
+        let info = self.build_option_info.as_ref().unwrap();
         let mut nodes_to_remove = Vec::new();
 
         // Find all assignment nodes where a target variable is set to "no"
@@ -271,15 +290,11 @@ impl Analyzer {
             .pool
             .nodes
             .iter()
-            .filter(|(node_id, _)| !self.build_option_info.decl_ids.contains(node_id))
+            .filter(|(node_id, _)| !info.decl_ids.contains(node_id))
         {
             if let MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) = &node.cmd.0 {
                 // Check if this assignment is for our target variable
-                if self
-                    .build_option_info
-                    .arg_var_to_option_name
-                    .contains_key(lhs.as_str())
-                {
+                if info.arg_var_to_option_name.contains_key(lhs.as_str()) {
                     // Check if the right-hand side is the literal "no"
                     if let Some(shell_word) = as_shell(rhs) {
                         if let Some(literal) = as_literal(shell_word) {
@@ -303,21 +318,21 @@ impl Analyzer {
         use crate::analyzer::{as_literal, as_shell, MayM4};
         use autotools_parser::ast::node::ShellCommand;
 
+        let info = self.build_option_info.as_ref().unwrap();
         let mut nodes_to_remove = Vec::new();
+        let mut dependencies = HashMap::new();
 
         // Find all assignment nodes where build option variable is set to "yes"
         for (node_id, node) in self
             .pool
             .nodes
             .iter()
-            .filter(|(node_id, _)| !self.build_option_info.decl_ids.contains(node_id))
+            .filter(|(node_id, _)| !info.decl_ids.contains(node_id))
         {
             if let MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) = &node.cmd.0 {
                 let arg_var = lhs.as_str();
                 // Check if this assignment is for our target variable
-                if let Some(option_name) =
-                    self.build_option_info.arg_var_to_option_name.get(arg_var)
-                {
+                if let Some(option_name) = info.arg_var_to_option_name.get(arg_var) {
                     // Check if the right-hand side is the literal "yes"
                     if let Some(shell_word) = as_shell(rhs) {
                         if let Some(literal) = as_literal(shell_word) {
@@ -340,16 +355,13 @@ impl Analyzer {
                                             .next()
                                     })
                                 {
-                                    if let Some(dependent_option_name) = self
-                                        .build_option_info
-                                        .arg_var_to_option_name
-                                        .get(&another_arg_var)
+                                    if let Some(dependent_option_name) =
+                                        info.arg_var_to_option_name.get(&another_arg_var)
                                     {
                                         // record dependency b/w build options
-                                        self.build_option_info
-                                            .dependencies
+                                        dependencies
                                             .entry(dependent_option_name.to_owned())
-                                            .or_default()
+                                            .or_insert_with(HashSet::new)
                                             .insert(option_name.to_owned());
                                     }
                                 }
@@ -364,6 +376,8 @@ impl Analyzer {
         for node_id in nodes_to_remove {
             self.remove_node(node_id);
         }
+
+        self.build_option_info.as_mut().unwrap().dependencies = dependencies;
     }
 
     /// Expand or ignore build option value in assignments
@@ -373,20 +387,17 @@ impl Analyzer {
 
         let mut nodes_to_remove = Vec::new();
 
-        let arg_vars = self
-            .build_option_info
-            .arg_var_to_option_name
-            .keys()
-            .collect::<Vec<_>>();
+        let info = self.build_option_info.as_ref().unwrap();
+        let arg_vars = info.arg_var_to_option_name.keys().collect::<Vec<_>>();
 
         // Find assignment nodes where build option variable's value is directly used
         for (node_id, node) in self
             .pool
             .nodes
             .iter()
-            .filter(|(node_id, _)| !self.build_option_info.decl_ids.contains(node_id))
+            .filter(|(node_id, _)| !info.decl_ids.contains(node_id))
         {
-            if let MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) = &node.cmd.0 {
+            if let MayM4::Shell(ShellCommand::Assignment(lhs, _)) = &node.cmd.0 {
                 if let Some(arg_var) = arg_vars.iter().find_map(|arg_var| {
                     node.info
                         .usages
@@ -504,10 +515,11 @@ impl Analyzer {
         for (_, block) in self.blocks.iter_mut() {
             let mut converted = Vec::new();
             for guard in block.guards.iter() {
+                let info = self.build_option_info.as_ref().unwrap();
                 match convert_empty_argument_guards(
                     guard,
-                    &self.build_option_info.arg_var_to_option_name,
-                    &self.build_option_info.cargo_features,
+                    &info.arg_var_to_option_name,
+                    &info.cargo_features,
                 ) {
                     Ok(guard) => converted.push(guard),
                     Err(true) => converted.push(Guard::confirmed(Atom::Tautology)),

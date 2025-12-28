@@ -21,8 +21,8 @@ struct Triplet {
 #[derive(Debug)]
 pub(crate) struct PlatformSupport {
     platform_cfg_vars: HashSet<String>,
-    supported_arch: HashSet<String>,
-    supported_os: HashSet<String>,
+    supported_arch: Vec<String>,
+    supported_os: Vec<String>,
     alternative_arch: HashMap<String, String>,
     alternative_os: HashMap<String, (String, Option<String>, Option<String>)>,
 }
@@ -43,6 +43,16 @@ impl PlatformSupport {
             supported_arch.insert(triplet.arch);
             supported_os.insert(triplet.os);
         }
+        let supported_arch = {
+            let mut v = supported_arch.into_iter().collect::<Vec<_>>();
+            v.sort_by_key(|s| s.len());
+            v
+        };
+        let supported_os = {
+            let mut v = supported_os.into_iter().collect::<Vec<_>>();
+            v.sort_by_key(|s| s.len());
+            v
+        };
         let alternative_arch = HashMap::from([("i386".into(), "x86".into())]);
         let alternative_os =
             HashMap::from([("mingw".into(), ("windows".into(), Some("gnu".into()), None))]);

@@ -1,23 +1,23 @@
 //! LLM analysis module for argument inalysis
-use std::{collections::HashMap, io::Write};
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::utils::llm_analysis::{LLMAnalysis, LLMAnalysisOutput};
+use crate::utils::llm_analysis::{LLMAnalysis, LLMOutput};
 
 use itertools::Itertools;
 
 // ----- Data types for input/output -----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct TranslationInput {
+pub(super) struct LLMTranslationInput {
     pub id: usize,
     pub script: String,
     pub skeleton: String,
     predefined: String,
 }
 
-impl TranslationInput {
+impl LLMTranslationInput {
     pub fn new(id: usize, script: String, skeleton: String, required_funcs: &[&str]) -> Self {
         Self {
             id,
@@ -29,7 +29,7 @@ impl TranslationInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct TranslationOutput {
+pub(super) struct LLMTranslationOutput {
     pub id: usize,
     pub rust_func_body: String,
     pub rust_func_name: String,
@@ -84,7 +84,7 @@ pub(super) struct TranslationEvidence {
     pub footer: String,
 }
 
-impl LLMAnalysisOutput<TranslationEvidence> for TranslationOutput {
+impl LLMOutput<TranslationEvidence> for LLMTranslationOutput {
     /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
     fn validate(&self, evidence: &TranslationEvidence) -> Result<(), Vec<String>> {
@@ -217,8 +217,8 @@ pub(super) struct LLMUser {}
 
 impl LLMAnalysis for LLMUser {
     type Evidence = TranslationEvidence;
-    type Input = TranslationInput;
-    type Output = TranslationOutput;
+    type Input = LLMTranslationInput;
+    type Output = LLMTranslationOutput;
 
     fn new() -> Self {
         Self {}

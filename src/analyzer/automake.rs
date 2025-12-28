@@ -80,15 +80,15 @@ pub(super) struct AutomakeFile {
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(super) struct WithGuard<T> {
-    value: T,
-    am_cond: Vec<AmGuard>,
+    pub value: T,
+    pub am_cond: Vec<AmGuard>,
 }
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct AmGuard {
-    negated: bool,
-    var: String,
+pub(super) struct AmGuard {
+    pub negated: bool,
+    pub var: String,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -696,7 +696,7 @@ impl Analyzer {
                         // .filter(|v| v.am_cond.is_empty()) // FIXME
                         .filter(|v| v.value.extension().is_some_and(|ext| ext == "c"))
                         .filter(|v| !am_file.built_sources.contains(&v.value))
-                        .map(|v| v.value.clone()),
+                        .map(|v| v.clone()),
                 );
             }
             self.project_info.built_files.extend(
@@ -737,7 +737,7 @@ impl Analyzer {
                 .c_files
                 .iter()
                 .flat_map(|c_file| {
-                    get_included_headers(c_file, &self.project_info.project_dir).into_iter()
+                    get_included_headers(&c_file.value, &self.project_info.project_dir).into_iter()
                 })
                 .filter(|h| !will_be_generated.contains(&h))
                 .collect::<HashSet<_>>(),

@@ -3,11 +3,12 @@ use std::{
     collections::HashMap,
 };
 
+use super::InlinedTranslation;
 use crate::analyzer::{
     as_literal, as_shell,
     build_option::FeatureState,
     chunk::ChunkId,
-    conditional_compilation::CPPMigrationType,
+    conditional_compilation::CCMigrationType,
     dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue},
     guard::{Atom, VarCond, VoL},
     location::Location,
@@ -40,6 +41,8 @@ pub(crate) struct TranslatingPrinter<'a> {
     branch_cursor: Cell<Option<BlockId>>,
     /// The order in expression to reproduce precise Location.
     order: Cell<usize>,
+    /// Whether we assume that we can and will translate all nodes to rust.
+    full_rust_mode: bool,
     /// Nodes that should be translated as dictionary accesses.
     dict_accesses: HashMap<Location, (String, DictionaryAccess, DataType)>,
     /// Fragments that are translated while printing.
@@ -50,12 +53,12 @@ pub(crate) struct TranslatingPrinter<'a> {
     formatted_vars: RefCell<Vec<String>>,
     /// Appeared chunks when embedding
     embedded_chunks: RefCell<HashMap<ChunkId, String>>,
+    /// Simple translations available for inlining
+    inlined_translations: &'a HashMap<ChunkId, InlinedTranslation>,
     /// Whether we have found a usage of redirection.
     found_redirection: Cell<bool>,
     /// Whether we have found a usage of sed command.
     found_sed: Cell<bool>,
-    /// Whether we have found a checking of libraries.
-    found_ac_define: Cell<bool>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -67,8 +70,12 @@ impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
 }
 
 impl<'a> TranslatingPrinter<'a> {
-    /// Construct a new pool of autoconf commands
-    pub fn new(analyzer: &'a Analyzer) -> Self {
+    /// Construct a new printer with inlined translations for inlining
+    pub fn new(
+        analyzer: &'a Analyzer,
+        inlined_translations: &'a HashMap<ChunkId, InlinedTranslation>,
+        full_rust_mode: bool,
+    ) -> Self {
         let mut dict_accesses = HashMap::new();
         for dict in analyzer.dicts.as_ref().unwrap() {
             for (loc, access) in dict.accesses.iter() {
@@ -87,14 +94,15 @@ impl<'a> TranslatingPrinter<'a> {
             node_cursor: Cell::new(None),
             branch_cursor: Cell::new(None),
             order: Cell::new(0),
+            full_rust_mode,
             dict_accesses,
             translated_fragments: RefCell::new(Vec::new()),
             in_format_string: Cell::new(false),
             formatted_vars: RefCell::new(Vec::new()),
             embedded_chunks: RefCell::new(HashMap::new()),
+            inlined_translations,
             found_redirection: Cell::new(false),
             found_sed: Cell::new(false),
-            found_ac_define: Cell::new(false),
         }
     }
 
@@ -115,6 +123,11 @@ impl<'a> TranslatingPrinter<'a> {
     }
 
     fn enclose_by_rust_tags(&self, fragment: String, record: bool) -> String {
+        if self.full_rust_mode {
+            // early return
+            return fragment;
+        }
+
         if record {
             self.record_translated_fragment(fragment.clone());
         }
@@ -154,16 +167,34 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
                 if self.embedded_chunks.borrow().contains_key(&chunk_id) {
                     return "".into();
                 } else {
-                    let func_name = super::rust_func_placeholder_name(chunk_id);
-                    self.embedded_chunks
-                        .borrow_mut()
-                        .insert(chunk_id, func_name.clone());
-                    // the node beyond boundary should not be displayed.
                     let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
-                    let call_site = self
-                        .analyzer
-                        .print_chunk_skeleton_call_site(chunk_id, &func_name);
-                    return format!("{tab}{}", self.enclose_by_rust_tags(call_site, true));
+
+                    // Check if we have a inlined translation for this chunk
+                    if let Some(inlined_translation) = self.inlined_translations.get(&chunk_id) {
+                        // Inline the inlined translation directly
+                        self.embedded_chunks
+                            .borrow_mut()
+                            .insert(chunk_id, "inlined".to_string());
+
+                        let inlined_code = inlined_translation
+                            .inline_rust_code
+                            .iter()
+                            .map(|line| format!("{tab}{}", line))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        return format!("{}", self.enclose_by_rust_tags(inlined_code, true));
+                    } else {
+                        // Fall back to function call for LLM-translated chunks
+                        let func_name = super::rust_func_placeholder_name(chunk_id);
+                        self.embedded_chunks
+                            .borrow_mut()
+                            .insert(chunk_id, func_name.clone());
+
+                        let call_site = self
+                            .analyzer
+                            .print_chunk_skeleton_call_site(chunk_id, &func_name);
+                        return format!("{tab}{}", self.enclose_by_rust_tags(call_site, true));
+                    }
                 }
             }
             let saved_node_cursor = self.node_cursor.replace(Some(node_id));
@@ -319,9 +350,8 @@ impl<'a> TranslatingPrinter<'a> {
         format!("{}=\"{}\"", lhs, rhs)
     }
 
-    fn display_cfg_atom(&self, atom: &Atom, negated: bool) -> String {
+    fn display_atom(&self, atom: &Atom, negated: bool) -> String {
         use Atom::*;
-        debug_assert!(should_atom_replaced(atom));
         let may_negate = |str: String, negated: bool| {
             if negated {
                 format!("not({})", str)
@@ -335,16 +365,16 @@ impl<'a> TranslatingPrinter<'a> {
             Os(os) => may_negate(format!("target_os = \"{}\"", os), negated),
             Env(env) => may_negate(format!("target_env = \"{}\"", env), negated),
             Abi(abi) => may_negate(format!("target_abi = \"{}\"", abi), negated),
-            Arg(name, var_cond) => {
+            Arg(name, var_cond) | Var(name, var_cond) => {
                 let option_name = self
                     .analyzer
-                    .build_option_info
+                    .build_option_info()
                     .arg_var_to_option_name
                     .get(name)
-                    .unwrap();
+                    .unwrap_or(name);
                 let find_feature = |value: &str| -> Option<(&str, &FeatureState)> {
                     self.analyzer
-                        .build_option_info
+                        .build_option_info()
                         .cargo_features
                         .as_ref()
                         .and_then(|cargo_features| {
@@ -366,7 +396,12 @@ impl<'a> TranslatingPrinter<'a> {
                             may_negate(feature_name.into(), negated)
                         } else {
                             // fallback
-                            may_negate(option_name.into(), false ^ negated)
+                            let key = self
+                                .analyzer
+                                .query_conditional_compilation_migration_policy(&option_name)
+                                .and_then(|policy| policy.key.as_ref())
+                                .unwrap_or(option_name);
+                            may_negate(key.into(), false ^ negated)
                         }
                     }
                     VarCond::False => {
@@ -374,7 +409,13 @@ impl<'a> TranslatingPrinter<'a> {
                             let negated = feature_state.is_negative() ^ negated;
                             may_negate(feature_name.into(), negated)
                         } else {
-                            may_negate(option_name.into(), true ^ negated)
+                            // fallback
+                            let key = self
+                                .analyzer
+                                .query_conditional_compilation_migration_policy(&option_name)
+                                .and_then(|policy| policy.key.as_ref())
+                                .unwrap_or(option_name);
+                            may_negate(key.into(), true ^ negated)
                         }
                     }
                     VarCond::Eq(VoL::Lit(lit)) => {
@@ -382,7 +423,13 @@ impl<'a> TranslatingPrinter<'a> {
                             let negated = feature_state.is_negative() ^ negated;
                             may_negate(feature_name.into(), negated)
                         } else {
-                            may_negate(format!("{}_{}", option_name, lit), false ^ negated)
+                            // fallback
+                            let key = self
+                                .analyzer
+                                .query_conditional_compilation_migration_policy(&option_name)
+                                .and_then(|policy| policy.key.as_ref())
+                                .unwrap_or(option_name);
+                            may_negate(format!("{}_{}", key, lit), false ^ negated)
                         }
                     }
                     _ => {
@@ -390,31 +437,48 @@ impl<'a> TranslatingPrinter<'a> {
                     }
                 }
             }
+            Cmd(cmd) => {
+                todo!("Cmd {}: {:?}", cmd, self.display_node(*cmd, 0));
+            }
             _ => {
-                unreachable!();
+                todo!("{:?}", atom);
             }
         }
     }
 
-    fn display_cfg_guard(&self, guard: &Guard) -> String {
+    pub(super) fn display_guard(&self, guard: &Guard) -> String {
         match guard {
             Guard::N(negated, atom) => {
-                if should_atom_replaced(atom) {
-                    let cfg_atom_str = self.display_cfg_atom(atom, *negated);
+                if should_atom_replaced(atom) || self.full_rust_mode {
+                    let cfg_atom_str = self.display_atom(atom, *negated);
                     let cfg_str = format!("cfg!({})", cfg_atom_str);
                     self.enclose_by_rust_tags(cfg_str, true)
                 } else {
                     self.display_guard_as_test_command(guard)
                 }
             }
-            Guard::Or(guards) => guards
-                .iter()
-                .map(|guard| self.display_cfg_guard(guard))
-                .join(" || "),
-            Guard::And(guards) => guards
-                .iter()
-                .map(|guard| self.display_cfg_guard(guard))
-                .join(" && "),
+            Guard::Or(guards) => {
+                let guards_str = guards
+                    .iter()
+                    .map(|guard| self.display_guard(guard))
+                    .join(" || ");
+                if self.full_rust_mode {
+                    format!("({})", guards_str)
+                } else {
+                    guards_str
+                }
+            }
+            Guard::And(guards) => {
+                let guards_str = guards
+                    .iter()
+                    .map(|guard| self.display_guard(guard))
+                    .join(" && ");
+                if self.full_rust_mode {
+                    format!("({})", guards_str)
+                } else {
+                    guards_str
+                }
+            }
         }
     }
 
@@ -472,6 +536,91 @@ impl<'a> TranslatingPrinter<'a> {
                 c => c.to_string(),
             })
             .collect()
+    }
+
+    pub(super) fn display_ac_define(&self, key: &str, value: &str) -> String {
+        let eq_value = match value {
+            "0" | "1" | "" => {
+                // should be a boolean
+                "".into()
+            }
+            _ => format!("={value}"),
+        };
+        let cargo_instruction = if let Some(policy) = self
+            .analyzer
+            .query_conditional_compilation_migration_policy(key)
+        {
+            match &policy.mig_type {
+                CCMigrationType::Cfg => {
+                    let key = policy.key.as_ref().unwrap();
+                    format!("\"cargo::rustc-cfg={}{}\"", key, eq_value)
+                }
+                CCMigrationType::Env => {
+                    let key = policy.key.as_ref().unwrap();
+                    format!("\"cargo::rustc-env={}{}\"", key, eq_value)
+                }
+                _ => return "".into(),
+            }
+        } else {
+            format!("\"cargo::rustc-cfg={}{}\"", key, eq_value)
+        };
+        self.record_translated_fragment(cargo_instruction.clone());
+        format!("println!({});", cargo_instruction)
+    }
+
+    fn display_ac_define_unquoted(&self, key: &AcWord, value: Option<&AcWord>) -> String {
+        let (key_fstr, vars_in_key) = self.take_format_string_and_vars(key);
+        let (value_fstr, vars_in_value) = match value {
+            Some(word) => self.take_format_string_and_vars(word),
+            None => (Default::default(), Default::default()),
+        };
+        let eq_value_fstr = match value_fstr.as_str() {
+            "0" | "1" | "" => {
+                // should be a boolean
+                assert!(vars_in_value.is_empty());
+                "".into()
+            }
+            _ => format!("={value_fstr}"),
+        };
+        if vars_in_key.len() > 0 {
+            if vars_in_value.len() > 0 {
+                todo!();
+            }
+            let cargo_instruction = format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr);
+            self.record_translated_fragment(cargo_instruction.clone());
+            format!(
+                "println!({}, {});",
+                cargo_instruction,
+                vars_in_key.iter().map(|var| format!("&{}", var)).join(", ")
+            )
+        } else {
+            let cargo_instruction = if let Some(cpp_migration_policy) = self
+                .analyzer
+                .query_conditional_compilation_migration_policy(key_fstr.as_str())
+            {
+                match &cpp_migration_policy.mig_type {
+                    CCMigrationType::Cfg => {
+                        format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr)
+                    }
+                    CCMigrationType::Env => {
+                        format!("\"cargo::rustc-env={}{}\"", key_fstr, eq_value_fstr)
+                    }
+                    _ => return "".into(),
+                }
+            } else {
+                format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr)
+            };
+            self.record_translated_fragment(cargo_instruction.clone());
+            if vars_in_value.is_empty() {
+                format!("println!({});", cargo_instruction,)
+            } else {
+                format!(
+                    "println!({}, {});",
+                    cargo_instruction,
+                    vars_in_value.iter().join(", ")
+                )
+            }
+        }
     }
 }
 
@@ -557,7 +706,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 let (arm, guard) = iter.next().unwrap();
                 format!(
                     "{tab}if {}; then\n{}",
-                    self.display_cfg_guard(guard),
+                    self.display_guard(guard),
                     self.display_body(&arm.body, indent_level + 1)
                 )
             };
@@ -572,7 +721,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 } else {
                     else_if.push_str(&format!(
                         "{tab}else if {}; then\n{}",
-                        self.display_cfg_guard(guard),
+                        self.display_guard(guard),
                         self.display_body(&arm.body, indent_level + 1)
                     ));
                 }
@@ -588,7 +737,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 .zip(guards.iter())
                 .map(|(arm, guard)| {
                     let pattern = if should_guard_replaced(guard) {
-                        self.display_cfg_guard(guard)
+                        self.display_guard(guard)
                     } else {
                         arm.patterns
                             .iter()
@@ -617,7 +766,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
             let block_id = &self.analyzer.get_node(node_id).unwrap().info.branches[branch_index];
             match self.analyzer.get_block(*block_id).guards.last() {
                 Some(guard) if should_guard_replaced(guard) => {
-                    return self.display_cfg_guard(guard);
+                    return self.display_guard(guard);
                 }
                 Some(Guard::N(negated, Atom::Tautology)) => {
                     if *negated {
@@ -817,103 +966,29 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 );
             }
             "AC_DEFINE" => {
-                let key = match m4_macro.args.first().unwrap() {
+                let key = match m4_macro.args.get(0).unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
                     M4Argument::Literal(lit) => lit.to_owned(),
                     _ => unreachable!(),
                 };
-                let eq_value = {
-                    let value = m4_macro.get_arg_as_literal(1).unwrap_or_default();
-                    match value.as_str() {
-                        "0" | "1" | "" => {
-                            // should be a boolean
-                            "".into()
-                        }
-                        _ => format!("={value}"),
-                    }
-                };
-                let cargo_instruction = if let Some(cpp_migration_policy) =
-                    self.analyzer.query_cpp_migration_policy(key.as_str())
-                {
-                    match &cpp_migration_policy.mig_type {
-                        CPPMigrationType::Cfg => {
-                            let key = cpp_migration_policy.key.as_ref().unwrap();
-                            format!("\"cargo::rustc-cfg={}{}\"", key, eq_value)
-                        }
-                        CPPMigrationType::Env => {
-                            let key = cpp_migration_policy.key.as_ref().unwrap();
-                            format!("\"cargo::rustc-env={}{}\"", key, eq_value)
-                        }
-                        _ => return "".into(),
-                    }
-                } else {
-                    format!("\"cargo::rustc-cfg={}{}\"", key, eq_value)
-                };
-                self.record_translated_fragment(cargo_instruction.clone());
-                let print_line = format!("println!({});", cargo_instruction);
-                return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
+                let value = m4_macro.get_arg_as_literal(1).unwrap_or_default();
+                let ret = self.display_ac_define(&key, &value);
+                return format!("{tab}{}", self.enclose_by_rust_tags(ret, false));
             }
             "AC_DEFINE_UNQUOTED" => {
-                let (key_fstr, vars_in_key) = match m4_macro.args.first().unwrap() {
-                    M4Argument::Word(word) => self.take_format_string_and_vars(word),
-                    M4Argument::Literal(lit) => (lit.to_owned(), Vec::new()),
+                let key = match m4_macro.args.get(0).unwrap() {
+                    M4Argument::Word(word) => word,
+                    M4Argument::Literal(lit) => &(lit.clone().into()),
                     _ => unreachable!(),
                 };
-                let (value_fstr, vars_in_value) = match m4_macro.args.get(1) {
-                    Some(M4Argument::Word(word)) => self.take_format_string_and_vars(word),
-                    Some(M4Argument::Literal(lit)) => (lit.to_owned(), Vec::new()),
-                    None => (Default::default(), Default::default()),
+                let value = match m4_macro.args.get(1) {
+                    Some(M4Argument::Word(word)) => Some(word),
+                    Some(M4Argument::Literal(lit)) => Some(&(lit.clone().into())),
+                    None => None,
                     _ => unreachable!(),
                 };
-                let eq_value_fstr = match value_fstr.as_str() {
-                    "0" | "1" | "" => {
-                        // should be a boolean
-                        assert!(vars_in_value.is_empty());
-                        "".into()
-                    }
-                    _ => format!("={value_fstr}"),
-                };
-                if !vars_in_key.is_empty() {
-                    if !vars_in_value.is_empty() {
-                        todo!();
-                    }
-                    let cargo_instruction =
-                        format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr);
-                    self.record_translated_fragment(cargo_instruction.clone());
-                    let print_line = format!(
-                        "println!({}, {});",
-                        cargo_instruction,
-                        vars_in_key.iter().map(|var| format!("&{}", var)).join(", ")
-                    );
-                    return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
-                } else {
-                    let cargo_instruction = if let Some(cpp_migration_policy) =
-                        self.analyzer.query_cpp_migration_policy(key_fstr.as_str())
-                    {
-                        match &cpp_migration_policy.mig_type {
-                            CPPMigrationType::Cfg => {
-                                format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr)
-                            }
-                            CPPMigrationType::Env => {
-                                format!("\"cargo::rustc-env={}{}\"", key_fstr, eq_value_fstr)
-                            }
-                            _ => return "".into(),
-                        }
-                    } else {
-                        format!("\"cargo::rustc-cfg={}{}\"", key_fstr, eq_value_fstr)
-                    };
-                    self.record_translated_fragment(cargo_instruction.clone());
-                    let print_line = if vars_in_value.is_empty() {
-                        format!("println!({});", cargo_instruction,)
-                    } else {
-                        format!(
-                            "println!({}, {});",
-                            cargo_instruction,
-                            vars_in_value.iter().join(", ")
-                        )
-                    };
-                    return format!("{tab}{}", self.enclose_by_rust_tags(print_line, false));
-                }
+                let ret = self.display_ac_define_unquoted(key, value);
+                return format!("{tab}{}", self.enclose_by_rust_tags(ret, false));
             }
             "AC_CHECK_LIB" => {
                 // let first_arg_as_word = m4_macro.get_arg_as_word(0).unwrap();
