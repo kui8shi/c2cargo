@@ -119,6 +119,7 @@ impl Analyzer {
         self.consume_prereq_macros();
         self.consume_arg_macros();
         self.consume_cpp_macros();
+        self.consume_ac_init_macro();
     }
 }
 
@@ -391,6 +392,47 @@ impl Analyzer {
         }
 
         self.cpp_defs.replace(cpp_defs);
+    }
+
+    fn consume_ac_init_macro(&mut self) {
+        let macro_calls = self.macro_calls.as_ref().unwrap();
+
+        if let Some(v) = macro_calls.get("AC_INIT") {
+            for (_, macro_call) in v {
+                let mut metadata = super::ProjectMetadata::default();
+
+                // AC_INIT([package-name], [version], [bug-report], [tarname], [url])
+                if let Some(name) = macro_call.get_arg_as_literal(0) {
+                    let rust_name = name
+                        .chars()
+                        .map(|c| {
+                            if c.is_alphanumeric() || c == '-' || c == '_' {
+                                c
+                            } else {
+                                '-'
+                            }
+                        })
+                        .collect::<String>()
+                        .to_lowercase();
+                    metadata.package_name = Some(rust_name);
+                }
+                if let Some(version) = macro_call.get_arg_as_literal(1) {
+                    metadata.version = Some(version);
+                }
+                if let Some(bug_report) = macro_call.get_arg_as_literal(2) {
+                    metadata.bug_report = Some(bug_report);
+                }
+                if let Some(tarname) = macro_call.get_arg_as_literal(3) {
+                    metadata.tarname = Some(tarname);
+                }
+                if let Some(url) = macro_call.get_arg_as_literal(4) {
+                    metadata.url = Some(url);
+                }
+
+                self.project_metadata.replace(metadata);
+                // Note: Don't remove AC_INIT nodes as they're needed for build.rs generation
+            }
+        }
     }
 
     pub(super) fn analyze_link_macros(&mut self) {

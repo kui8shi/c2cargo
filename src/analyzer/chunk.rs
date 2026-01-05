@@ -64,7 +64,7 @@ pub(crate) struct ChunkIO {
     pub exported: HashMap<String, Vec<Location>>,
     pub bounded: HashSet<String>,
     pub dictionaries: HashMap<String, HashMap<Location, DictionaryAccess>>,
-    pub features: HashMap<String, Vec<Location>>,
+    pub arg_vars: HashMap<String, Vec<Location>>,
 }
 
 impl Analyzer {
@@ -402,7 +402,7 @@ impl Analyzer {
             })
             .collect();
 
-        let features = chunk_uses
+        let arg_vars = chunk_uses
             .into_iter()
             .filter(|(var, _)| {
                 self.build_option_info()
@@ -416,7 +416,7 @@ impl Analyzer {
             exported,
             bounded,
             dictionaries,
-            features,
+            arg_vars,
         };
     }
 

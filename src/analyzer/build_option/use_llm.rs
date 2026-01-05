@@ -68,7 +68,7 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
         }
 
         // 2a) representatives must not contain some literals
-        let banned_reps = ["auto", "detect", "autodetect", "auto-detect"];
+        let banned_reps = ["auto", "detect", "check", "on", "off"];
         let found_banned: Vec<&str> = banned_reps
             .iter()
             .copied()
@@ -81,15 +81,15 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
             ));
         }
 
-        // 2b) representatives must not contain yes, no, and other literals.
-        if reps_set.contains("yes") && reps_set.contains("no") && reps_set.len() > 2 {
-            errors.push(format!(
-                    r#"If "yes" and "no" are in representatives, they must not hold any other values: {:?}"#,
-                    reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
-                ))
-        }
+        // // 2b) representatives must not contain yes, no, and other literals.
+        // if reps_set.contains("yes") && reps_set.contains("no") && reps_set.len() > 2 {
+        //     errors.push(format!(
+        //             r#"If "yes" and "no" are in representatives, they must not hold any other values: {:?}"#,
+        //             reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
+        //         ))
+        // }
 
-        // 2c) binary representatives must contain yes and no.
+        // 2b) binary representatives must contain yes and no.
         if reps_set.len() <= 2 && !(reps_set.contains("yes") && reps_set.contains("no")) {
             errors.push(format!(
                     r#"Binary representatives must contain yes and no. They must not hold any other values: {:?}"#,
@@ -263,7 +263,7 @@ Extraction procedure:
 2. For each candidate literal, determine external effects and partition candidates into states (identical effects = same state).
 3. For each state, pick exactly one representative from Candidates and add it to "representatives", and add rest non-representative candidates to the Keys of "aliases".
   - "representatives" + "aliases keys" = "candidates".
-  - You must not choose "auto"/"detect"/similar as representatives since they are highly likely to have the same state as either of the boolean values in the end.
+  - You must not choose "auto"/"detect"/"check" as representatives since they are highly likely to have the same state as either of the boolean values in the end.
 4. Construct "aliases" from the partition:
   a. Keys are all non-representative members of each state.
      - Formally, "alias keys" = "values" − "representatives".

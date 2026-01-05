@@ -1,4 +1,9 @@
+use bincode::{Decode, Encode};
 use std::collections::{HashMap, HashSet};
+use std::{
+    hash::{DefaultHasher, Hash, Hasher},
+    path::PathBuf,
+};
 
 use super::{
     guard::{Atom, Guard, VarCond, VoL},
@@ -30,12 +35,12 @@ pub(crate) struct BuildOptionInfo {
     pub build_options: HashMap<String, BuildOption>,
     pub decl_ids: Vec<NodeId>,
     pub arg_var_to_option_name: HashMap<String, String>,
-    pub dependencies: HashMap<String, HashSet<String>>,
+    pub feature_dependencies: HashMap<String, HashSet<String>>,
     pub cargo_features: Option<HashMap<String, Vec<CargoFeature>>>,
 }
 
 /// doc
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Encode, Decode)]
 pub(crate) struct CargoFeature {
     pub name: String,
     pub original_build_option: String,
@@ -44,7 +49,7 @@ pub(crate) struct CargoFeature {
 }
 
 /// doc
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Encode, Decode)]
 pub(crate) struct FeatureState(bool);
 
 impl FeatureState {
@@ -98,6 +103,20 @@ impl Analyzer {
 
     /// Analyze various properties of build options using LLMs
     pub(crate) async fn run_extra_build_option_analysis(&mut self) {
+        // Check cache first if enabled
+        if self.options.use_build_option_cache {
+            if let Some(cached_features) = self.load_build_option_cache() {
+                println!("Using cached build option analysis results");
+                self.build_option_info
+                    .as_mut()
+                    .unwrap()
+                    .cargo_features
+                    .replace(cached_features);
+                self.apply_non_empty_property_of_cargo_features();
+                return;
+            }
+        }
+
         // conduct llm analysis
         let mut user = use_llm::LLMUser::new();
         let results = user
@@ -136,6 +155,12 @@ impl Analyzer {
                 .insert(res.option_name.clone(), features);
         }
         self.apply_non_empty_property_of_cargo_features();
+
+        // Save to cache if enabled
+        if self.options.use_build_option_cache {
+            let cargo_features = self.build_option_info().cargo_features.as_ref().unwrap();
+            self.save_build_option_cache(cargo_features);
+        }
     }
 
     /// doc
@@ -377,7 +402,10 @@ impl Analyzer {
             self.remove_node(node_id);
         }
 
-        self.build_option_info.as_mut().unwrap().dependencies = dependencies;
+        self.build_option_info
+            .as_mut()
+            .unwrap()
+            .feature_dependencies = dependencies;
     }
 
     /// Expand or ignore build option value in assignments
@@ -478,30 +506,36 @@ impl Analyzer {
                     // TODO: however we may have to treat this case more carefully.
                     continue;
                 }
-                let feature_name = if &result.option_name == representative {
+                let feature_name = if representative == &result.option_name {
+                    result.option_name.clone()
+                } else if representative == "yes" {
                     result.option_name.clone()
                 } else {
                     format!("{}_{}", result.option_name, representative.to_snake_case())
                 };
+                let mut value_map = HashMap::from_iter(
+                    [(representative.clone(), FeatureState::positive())]
+                        .into_iter()
+                        .chain(
+                            result
+                                .aliases
+                                .iter()
+                                .flat_map(|aliases| {
+                                    aliases.iter().map(|(from, to)| {
+                                        (to == representative)
+                                            .then_some((from.clone(), FeatureState::positive()))
+                                    })
+                                })
+                                .flatten(),
+                        ),
+                );
+                if value_map.contains_key("yes") {
+                    value_map.insert("no".into(), FeatureState::negative());
+                }
                 features.push(CargoFeature {
                     name: feature_name.clone(),
                     original_build_option: result.option_name.clone(),
-                    value_map: HashMap::from_iter(
-                        [(representative.clone(), FeatureState::positive())]
-                            .into_iter()
-                            .chain(
-                                result
-                                    .aliases
-                                    .iter()
-                                    .flat_map(|aliases| {
-                                        aliases.iter().map(|(from, to)| {
-                                            (to == representative)
-                                                .then_some((from.clone(), FeatureState::positive()))
-                                        })
-                                    })
-                                    .flatten(),
-                            ),
-                    ),
+                    value_map,
                     enabled_by_default: None,
                 });
             }
@@ -697,4 +731,54 @@ fn are_guards_contradictory(guards: &[Guard]) -> bool {
         }
     }
     false
+}
+
+impl Analyzer {
+    /// Load cached build option analysis results
+    fn load_build_option_cache(&self) -> Option<HashMap<String, Vec<CargoFeature>>> {
+        let cache_path = self.get_build_option_cache_path();
+        if let Ok(content) = std::fs::read(&cache_path) {
+            let config = bincode::config::standard();
+            if let Ok((cached_features, _)) = bincode::decode_from_slice::<
+                HashMap<String, Vec<CargoFeature>>,
+                _,
+            >(&content, config)
+            {
+                println!("Loaded build option cache from: {:?}", cache_path);
+                return Some(cached_features);
+            }
+        }
+        None
+    }
+
+    /// Save build option analysis results to cache
+    fn save_build_option_cache(&self, cargo_features: &HashMap<String, Vec<CargoFeature>>) {
+        let cache_path = self.get_build_option_cache_path();
+        let config = bincode::config::standard();
+        if let Ok(content) = bincode::encode_to_vec(cargo_features, config) {
+            if let Ok(()) = std::fs::write(&cache_path, content) {
+                println!("Saved build option cache to: {:?}", cache_path);
+            }
+        }
+    }
+
+    /// Get the cache file path for build options, similar to VSA cache
+    fn get_build_option_cache_path(&self) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+        self.path.to_str().unwrap().hash(&mut hasher);
+        // Hash the build option names and value candidates to ensure cache validity
+        if let Some(build_options) = &self.build_option_info {
+            for (name, option) in build_options
+                .build_options
+                .iter()
+                .sorted_by_key(|(k, _)| k.as_str())
+            {
+                name.hash(&mut hasher);
+                option.value_candidates.hash(&mut hasher);
+                option.declaration.hash(&mut hasher);
+            }
+        }
+        let h = hasher.finish();
+        PathBuf::from(format!("/tmp/build_option_cache.{:x}.bin", h))
+    }
 }

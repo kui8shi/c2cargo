@@ -1,6 +1,7 @@
 //! LLM analysis module for argument inalysis
 use std::collections::HashMap;
 
+use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 use crate::utils::llm_analysis::{LLMAnalysis, LLMOutput};
@@ -10,14 +11,14 @@ use itertools::Itertools;
 // ----- Data types for input/output -----
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct LLMTranslationInput {
+pub(super) struct LLMBasedTranslationInput {
     pub id: usize,
     pub script: String,
     pub skeleton: String,
     predefined: String,
 }
 
-impl LLMTranslationInput {
+impl LLMBasedTranslationInput {
     pub fn new(id: usize, script: String, skeleton: String, required_funcs: &[&str]) -> Self {
         Self {
             id,
@@ -28,14 +29,14 @@ impl LLMTranslationInput {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct LLMTranslationOutput {
+#[derive(Debug, Clone, Serialize, Deserialize, Decode, Encode)]
+pub(super) struct LLMBasedTranslationOutput {
     pub id: usize,
     pub rust_func_body: String,
     pub rust_func_name: String,
 }
 
-fn get_predefinition(required_funcs: &[&str]) -> String {
+pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
     let predefinitions = HashMap::from([
         (
             "default_modules",
@@ -78,17 +79,22 @@ fn get_predefinition(required_funcs: &[&str]) -> String {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(super) struct TranslationEvidence {
+pub(super) struct LLMBasedTranslationEvidence {
+    pub id: usize,
     pub rust_snippets: Vec<String>,
+    pub predefinition: String,
     pub header: String,
     pub footer: String,
 }
 
-impl LLMOutput<TranslationEvidence> for LLMTranslationOutput {
+impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
     /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
-    fn validate(&self, evidence: &TranslationEvidence) -> Result<(), Vec<String>> {
+    fn validate(&self, evidence: &LLMBasedTranslationEvidence) -> Result<(), Vec<String>> {
         let mut err = Vec::new();
+        if self.id != evidence.id {
+            err.push(format!("Correct Id: '{}'", evidence.id));
+        }
         for rust_snippet in evidence.rust_snippets.iter() {
             if !self.rust_func_body.contains(rust_snippet) {
                 err.push(format!(
@@ -106,7 +112,7 @@ impl LLMOutput<TranslationEvidence> for LLMTranslationOutput {
         {
             let rust_func = format!(
                 "{}\nfn main() {{}}\nfn {}{}{}{}",
-                get_predefinition(&["regex", "write_file"]),
+                evidence.predefinition,
                 self.rust_func_name,
                 evidence.header,
                 self.rust_func_body,
@@ -216,9 +222,9 @@ fn detect_no_op_patterns(src: &str, values: &Vec<String>) -> Result<(), Vec<Stri
 pub(super) struct LLMUser {}
 
 impl LLMAnalysis for LLMUser {
-    type Evidence = TranslationEvidence;
-    type Input = LLMTranslationInput;
-    type Output = LLMTranslationOutput;
+    type Evidence = LLMBasedTranslationEvidence;
+    type Input = LLMBasedTranslationInput;
+    type Output = LLMBasedTranslationOutput;
 
     fn new() -> Self {
         Self {}

@@ -25,6 +25,7 @@ use chunk::{Chunk, ChunkId, FunctionSkelton, Scope};
 use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
+use record::{AnalysisParameters, RecordCollector};
 use platform_support::PlatformSupport;
 use project_info::ProjectInfo;
 use type_inference::{DataType, TypeHint};
@@ -42,6 +43,8 @@ use crate::{
     },
     display::AutoconfPool,
 };
+
+pub(crate) mod record;
 
 mod automake;
 mod build_option;
@@ -554,15 +557,26 @@ impl NodeInfo {
     }
 }
 
+/// Configuration options for the analyzer
 #[derive(Debug)]
-struct AnalyzerOptions {
-    flatten_threshold: usize,
+pub struct AnalyzerOptions {
+    /// Threshold for flattening large command structures.
+    /// Commands with more than this many nodes will be flattened.
+    pub flatten_threshold: usize,
+    /// Whether to use cached build option analysis results.
+    /// When enabled, LLM analysis results are cached to disk and reused.
+    pub use_build_option_cache: bool,
+    /// Whether to use cached translation results.
+    /// When enabled, LLM translation results are cached per chunk and reused.
+    pub use_translation_cache: bool,
 }
 
 impl Default for AnalyzerOptions {
     fn default() -> Self {
         Self {
             flatten_threshold: 200,
+            use_build_option_cache: true,
+            use_translation_cache: true,
         }
     }
 }
@@ -639,6 +653,20 @@ pub struct Analyzer {
     dicts: Option<Vec<DictionaryInstance>>,
     /// Analysis result of Automake files.
     automake: Option<AutomakeAnalyzer>,
+    /// Evaluation data collector
+    record_collector: Option<RecordCollector>,
+    /// Project metadata from AC_INIT
+    project_metadata: Option<ProjectMetadata>,
+}
+
+/// Project metadata extracted from AC_INIT macro
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProjectMetadata {
+    pub package_name: Option<String>,
+    pub version: Option<String>,
+    pub bug_report: Option<String>,
+    pub tarname: Option<String>,
+    pub url: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -652,7 +680,7 @@ impl Analyzer {
     }
 
     /// Analyze commands and build the dependency graph
-    pub fn new(path: &Path, flatten_threshold: Option<usize>) -> Self {
+    pub fn new(path: &Path, options: Option<AnalyzerOptions>) -> Self {
         let contents = if path.file_name().is_some_and(|os_str| {
             os_str
                 .to_str()
@@ -694,9 +722,7 @@ impl Analyzer {
             pool,
             top_ids,
             fixed: HashMap::from(fixed),
-            options: AnalyzerOptions {
-                flatten_threshold: flatten_threshold.unwrap_or(200),
-            },
+            options: options.unwrap_or_default(),
             project_info: ProjectInfo {
                 project_dir,
                 ..Default::default()
@@ -737,6 +763,8 @@ impl Analyzer {
 
         s.froze_macros();
         s.consume_automake_macros();
+
+        s.collect_files_generated_by_script();
 
         s.load_project_files();
         println!("==================== CCP =======================");
@@ -1145,6 +1173,124 @@ impl Analyzer {
         })
     }
 
+    /// Get project metadata from AC_INIT
+    pub fn get_project_metadata(&self) -> Option<&ProjectMetadata> {
+        self.project_metadata.as_ref()
+    }
+
+    /// Generate Cargo.toml content from AC_INIT metadata
+    pub fn generate_cargo_toml(&self) -> String {
+        let metadata = self.get_project_metadata();
+        let mut toml_content = String::new();
+
+        toml_content.push_str("[package]\n");
+
+        if let Some(meta) = metadata {
+            // Package name
+            let name = meta.package_name.as_deref().unwrap_or("unnamed-project");
+            toml_content.push_str(&format!("name = \"{}\"\n", name));
+
+            // Version
+            let version = meta.version.as_deref().unwrap_or("0.1.0");
+            toml_content.push_str(&format!("version = \"{}\"\n", version));
+
+            // Edition
+            toml_content.push_str("edition = \"2021\"\n");
+
+            // Optional fields
+            if let Some(url) = &meta.url {
+                toml_content.push_str(&format!("homepage = \"{}\"\n", url));
+                toml_content.push_str(&format!("repository = \"{}\"\n", url));
+            }
+
+            if let Some(bug_report) = &meta.bug_report {
+                if bug_report.contains('@') {
+                    toml_content.push_str(&format!("# Bug reports: {}\n", bug_report));
+                } else if bug_report.starts_with("http") {
+                    toml_content.push_str(&format!("# Bug tracker: {}\n", bug_report));
+                }
+            }
+        } else {
+            // Default values when no AC_INIT found
+            toml_content.push_str("name = \"unnamed-project\"\n");
+            toml_content.push_str("version = \"0.1.0\"\n");
+            toml_content.push_str("edition = \"2021\"\n");
+        }
+
+        toml_content.push_str("\n");
+
+        // Add analyzed build options as Cargo features
+        if let Some(build_option_info) = &self.build_option_info {
+            if let Some(cargo_features) = &build_option_info.cargo_features {
+                if !cargo_features.is_empty() {
+                    toml_content.push_str("[features]\n");
+
+                    // Collect default features
+                    let mut default_features = Vec::new();
+                    let mut all_features = Vec::new();
+
+                    for features in cargo_features.values() {
+                        for feature in features {
+                            all_features.push(&feature.name);
+                            if feature.enabled_by_default.unwrap_or(false) {
+                                default_features.push(&feature.name);
+                            }
+                        }
+                    }
+
+                    // Write default features
+                    if default_features.is_empty() {
+                        toml_content.push_str("default = []\n");
+                    } else {
+                        toml_content.push_str(&format!(
+                            "default = [{}]\n",
+                            default_features
+                                .iter()
+                                .map(|f| format!("\"{}\"", f))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        ));
+                    }
+
+                    // Write individual features
+                    for (option_name, features) in cargo_features {
+                        for feature in features {
+                            let feature_dependencies = build_option_info
+                                .feature_dependencies
+                                .get(option_name.as_str())
+                                .iter()
+                                .map(|deps| {
+                                    deps.iter()
+                                        .map(|dep_opt_name| {
+                                            cargo_features
+                                                .get(dep_opt_name)
+                                                .unwrap()
+                                                .iter()
+                                                .map(|feature| feature.name.as_str())
+                                        })
+                                        .flatten()
+                                })
+                                .flatten()
+                                .map(|f| format!("\"{}\"", f))
+                                .join(", ");
+                            toml_content.push_str(&format!(
+                                "{} = [{}]\n",
+                                feature.name, feature_dependencies
+                            ));
+                        }
+                    }
+
+                    toml_content.push_str("\n");
+                }
+            }
+        }
+
+        toml_content.push_str("[build-dependencies]\n");
+        toml_content.push_str("regex = \"*\"\n");
+
+        toml_content
+    }
+
     /// Recover the content of commands from the AST structure
     pub fn display_node(&self, node_id: NodeId) -> String {
         self.pool.display_node(node_id, 0)
@@ -1279,5 +1425,66 @@ impl Analyzer {
             .into_iter()
             .map(|id| self.display_node(id))
             .join("\n")
+    }
+
+    /// Initialize record data collector with appropriate parameters
+    pub(crate) fn init_record_collector(&mut self, parameters: AnalysisParameters) {
+        let collector = RecordCollector::new(
+            self.project_info.project_dir.clone(),
+            self.path.clone(),
+            parameters,
+        );
+        self.record_collector.replace(collector);
+    }
+
+    /// Get a reference to the record collector
+    pub(crate) fn record_collector(&self) -> &RecordCollector {
+        self.record_collector.as_ref().unwrap()
+    }
+
+    /// Get a mutable reference to the record collector
+    pub(crate) fn record_collector_mut(&mut self) -> &mut RecordCollector {
+        self.record_collector.as_mut().unwrap()
+    }
+
+    /// Get project info for record
+    pub(crate) fn get_project_info_for_record(
+        &self,
+    ) -> (
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+        Vec<PathBuf>,
+        Vec<(PathBuf, PathBuf)>,
+        Vec<(PathBuf, PathBuf)>,
+        Vec<PathBuf>,
+        usize,
+        usize,
+    ) {
+        (
+            self.project_info
+                .c_files
+                .iter()
+                .map(|w| w.value.clone())
+                .collect(),
+            self.project_info.h_files.clone(),
+            self.project_info
+                .built_files
+                .clone()
+                .into_iter()
+                .sorted()
+                .collect(),
+            self.project_info
+                .generated_files
+                .clone()
+                .into_iter()
+                .sorted()
+                .collect(),
+            self.project_info.config_files.clone(),
+            self.project_info.subst_files.clone(),
+            self.project_info.am_files.clone(),
+            self.pool.nodes.len(),
+            self.chunks.len(),
+        )
     }
 }

@@ -1,11 +1,15 @@
 use itertools::Itertools;
-use std::collections::HashMap;
-use use_llm::{LLMTranslationInput, TranslationEvidence};
+use std::{
+    collections::HashMap,
+    hash::{DefaultHasher, Hash, Hasher},
+    path::{Path, PathBuf},
+};
+use use_llm::{LLMBasedTranslationEvidence, LLMBasedTranslationInput};
 
 use crate::{
     analyzer::{
         chunk::ChunkId,
-        translator::{printer::TranslatingPrinter, use_llm::LLMTranslationOutput},
+        translator::{printer::TranslatingPrinter, use_llm::LLMBasedTranslationOutput},
         type_inference::DataType,
         MayM4, ShellCommand,
     },
@@ -19,15 +23,25 @@ mod printer;
 mod use_llm;
 
 #[derive(Debug, Clone)]
-struct InlinedTranslation {
+struct InlinedTranslationOutput {
     pub id: ChunkId,
     pub inline_rust_code: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
-enum TranslationResult {
-    Inlined(InlinedTranslation),
-    LLM(LLMTranslationOutput),
+enum ChunkTranslationOutput {
+    Inlined(InlinedTranslationOutput),
+    LLM(LLMBasedTranslationOutput),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TranslationResult {
+    env_init: String,
+    default_init: String,
+    main_function_body: String,
+    am_cond_to_cfg: String,
+    recording: String,
+    chunk_funcs: Vec<String>,
 }
 
 impl Analyzer {
@@ -37,11 +51,6 @@ impl Analyzer {
             Some(chunk) => chunk,
             None => return false,
         };
-
-        // Node count: 1-2 nodes only
-        if chunk.nodes.len() > 2 {
-            return false;
-        }
 
         // No embedded chunks
         if !chunk.children.is_empty() {
@@ -75,7 +84,7 @@ impl Analyzer {
     }
 
     /// Translate a inlined chunk - fail fast on any complexity
-    fn translate_inlined_chunk(&self, chunk_id: ChunkId) -> Option<InlinedTranslation> {
+    fn translate_inlined_chunk(&self, chunk_id: ChunkId) -> Option<InlinedTranslationOutput> {
         let chunk = self.chunks.get(chunk_id)?;
         let skeleton = self
             .chunk_skeletons
@@ -113,7 +122,7 @@ impl Analyzer {
             return None;
         }
 
-        Some(InlinedTranslation {
+        Some(InlinedTranslationOutput {
             id: chunk_id,
             inline_rust_code: rust_lines,
         })
@@ -240,110 +249,148 @@ impl Analyzer {
         }
     }
 
-    /// Translate the scripts
-    pub async fn translate(&mut self) {
-        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
-        let env_init = 
-                self.env_vars
-                    .as_ref()
-                    .unwrap()
+    fn debug_print_chunks(&mut self) {
+        println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
+        for (i, chunk) in self.chunks.iter() {
+            let last_id = *chunk.nodes.last().unwrap();
+            println!(
+                "Chunk {}: parent: {:?}, nodes {:?} , exit {:?}",
+                i,
+                chunk.parent,
+                chunk
+                    .nodes
                     .iter()
-                    .sorted()
-                    .map(|name| {
-                        let data_type = self.get_inferred_type(name);
-                        let expression = match &data_type {
-                            DataType::Boolean => format!("option_env!(\"{}\").is_some()", &name),
-                            DataType::Integer => {
-                                format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
-                            }
-                            DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => format!(
-                                "option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()",
-                                &name
-                            ),
-                            DataType::Literal | DataType::Either(_, _) => format!(
-                                "option_env!(\"{}\").unwrap_or_default().to_owned()",
-                                &name
-                            ),
-                            DataType::Path => format!("option_env!(\"{}\").unwrap_or(\"\").into()", &name),
-                            _ => todo!(),
-                        };
-                        let write_exists =
-                            self.get_scopes(name.as_str())
-                                .unwrap()
-                                .first()
-                                .is_some_and(|scope| {
-                                    !scope.writers.is_empty() || !scope.overwriters.is_empty()
-                                });
-                        let mutability = if write_exists { "mut " } else { "    " };
-                        format!(
-                            "{tab}let {}{}: {} = {};",
-                            mutability,
-                            name,
-                            data_type.print(),
-                            expression
-                        )
-                    })
-            .join("\n");
-        let default_init = 
-                self.var_usages
-                    .as_ref()
-                    .unwrap()
-                    .keys()
-                    .filter(|var_name| !self.env_vars.as_ref().unwrap().contains(var_name.as_str()))
-                    .filter(|var_name| {
-                        self.get_scopes(var_name.as_str()).is_some_and(|scopes| {
-                            scopes
-                                .first()
-                                .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
-                        })
-                    })
-                    .sorted()
-                    .map(|name| {
-                        let data_type = self.get_inferred_type(name);
-                        let mutability =
-                            if self.get_scopes(name.as_str()).unwrap().first().is_some_and(
-                                |scope| !scope.writers.is_empty() || !scope.overwriters.is_empty(),
-                            ) {
-                                "mut "
-                            } else {
-                                "    "
-                            };
-                        format!(
-                            "{tab}let {}{}: {} = Default::default();",
-                            mutability,
-                            name,
-                            data_type.print()
-                        )
-                    })
-            .join("\n");
-        let subst_end = self
-            .subst_vars
+                    .map(|id| (
+                        *id,
+                        self.collect_descendant_nodes_per_node(*id, true, false)
+                    ))
+                    .map(|(id, nodes)| (
+                        id,
+                        nodes
+                            .into_iter()
+                            .map(|i| self.get_node(i).unwrap().info.exec_id)
+                            .sorted()
+                            .collect::<Vec<_>>()
+                    ))
+                    .collect::<Vec<_>>(),
+                self.get_node(last_id).unwrap().info.exit,
+            );
+            println!("signature: {}", self.print_chunk_skeleton_signature(i));
+            println!("header: {:?}", self.print_chunk_skeleton_body_header(i));
+            println!("footer: {}", self.print_chunk_skeleton_body_footer(i));
+            println!(
+                "callsite: {}",
+                self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
+            );
+            let dummy = HashMap::new();
+            let printer = TranslatingPrinter::new(&self, &dummy, false);
+            for &id in chunk.nodes.iter() {
+                println!("{}", &printer.print_node(id));
+            }
+        }
+    }
+
+    /// Translate the scripts
+    pub async fn translate(&mut self) -> TranslationResult {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        let env_init = self
+            .env_vars
             .as_ref()
             .unwrap()
             .iter()
-            .map(|var| format!("{}: {}", var, self.get_inferred_type(var).print()))
-            .collect::<Vec<_>>();
-        dbg!(&subst_end);
-        let translated = self.translate_chunks().await;
-        let main_function_body = 
-                self.chunks
-                    .iter()
-                    .filter(|(_, chunk)| chunk.parent.is_none())
-                    .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
-                    .map(|(chunk_id, _)| match translated.get(&chunk_id).unwrap() {
-                        TranslationResult::Inlined(res) => {
-                            format!("{tab}{}", res.inline_rust_code.join(&format!("\n{tab}")))
-                        }
-                        TranslationResult::LLM(_) => {
-                            let call_site = self.print_chunk_skeleton_call_site(
-                                chunk_id,
-                                &rust_func_placeholder_name(chunk_id),
-                            );
-                            format!("{tab}{call_site}")
-                        }
-                    })
+            .sorted()
+            .map(|name| {
+                let data_type = self.get_inferred_type(name);
+                let expression = match &data_type {
+                    DataType::Boolean => format!("option_env!(\"{}\").is_some()", &name),
+                    DataType::Integer => {
+                        format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
+                    }
+                    DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => format!(
+                        "option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()",
+                        &name
+                    ),
+                    DataType::Literal | DataType::Either(_, _) => format!(
+                        "option_env!(\"{}\").unwrap_or_default().to_owned()",
+                        &name
+                    ),
+                    DataType::Path => format!("option_env!(\"{}\").unwrap_or(\"\").into()", &name),
+                    _ => todo!(),
+                };
+                let write_exists =
+                    self.get_scopes(name.as_str())
+                        .unwrap()
+                        .first()
+                        .is_some_and(|scope| {
+                            !scope.writers.is_empty() || !scope.overwriters.is_empty()
+                        });
+                let mutability = if write_exists { "mut " } else { "    " };
+                format!(
+                    "{tab}let {}{}: {} = {};",
+                    mutability,
+                    name,
+                    data_type.print(),
+                    expression
+                )
+            })
             .join("\n");
-        let footer = {
+
+        dbg!(&self.get_scopes("WITH_XPATH"));
+
+        let default_init = self
+            .var_scopes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .filter(|(var_name, _)| !self.env_vars.as_ref().unwrap().contains(var_name.as_str()))
+            .filter(|(_, scopes)| {
+                scopes
+                    .first()
+                    .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
+            })
+            .map(|(var_name, _)| var_name)
+            .sorted()
+            .map(|name| {
+                dbg!(&name);
+                let data_type = self.get_inferred_type(name);
+                let mutability = if self
+                    .get_scopes(name.as_str())
+                    .unwrap()
+                    .first()
+                    .is_some_and(|scope| !scope.writers.is_empty() || !scope.overwriters.is_empty())
+                {
+                    "mut "
+                } else {
+                    "    "
+                };
+                format!(
+                    "{tab}let {}{}: {} = Default::default();",
+                    mutability,
+                    name,
+                    data_type.print()
+                )
+            })
+            .join("\n");
+        let translated = self.translate_chunks().await;
+        let main_function_body = self
+            .chunks
+            .iter()
+            .filter(|(_, chunk)| chunk.parent.is_none())
+            .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
+            .map(|(chunk_id, _)| match translated.get(&chunk_id).unwrap() {
+                ChunkTranslationOutput::Inlined(res) => {
+                    format!("{tab}{}", res.inline_rust_code.join(&format!("\n{tab}")))
+                }
+                ChunkTranslationOutput::LLM(_) => {
+                    let call_site = self.print_chunk_skeleton_call_site(
+                        chunk_id,
+                        &rust_func_placeholder_name(chunk_id),
+                    );
+                    format!("{tab}{call_site}")
+                }
+            })
+            .join("\n");
+        let am_cond_to_cfg = {
             let dummy = Default::default();
             let printer = TranslatingPrinter::new(self, &dummy, true);
 
@@ -374,33 +421,53 @@ impl Analyzer {
                     let cargo_instruction = format!("\"cargo::rustc-cfg={}\"", cond.cfg_key);
                     let print_line = format!("println!({});", cargo_instruction);
                     format!(
-                        "{tab}if {}{{\n{tab}{tab}{}\n{tab}}}",
+                        "{tab}if {} {{\n{tab}{tab}{}\n{tab}}}",
                         printer.display_guard(&guard),
                         print_line
                     )
                 })
                 .join("\n")
         };
-        println!(
-            "fn main() {{
-{tab}// import environmental variables
-{}
-{tab}// default variables initialization
-{}
-{tab}// translated fragments
-{}
-{tab}// export cfg
-{}
-}}",
-            &env_init, &default_init, &main_function_body, &footer
-        );
-        let func_defs = self
+
+        // Generate evaluation output section
+        let recording = {
+            let mut output = Vec::new();
+
+            // Output subst variables
+            output.push(format!("{tab}// recording subst vars"));
+            if let Some(subst_vars) = &self.subst_vars {
+                for var_name in subst_vars.iter().sorted() {
+                    let data_type = self.get_inferred_type(var_name);
+                    let var_output = match data_type {
+                        DataType::List(ty) if *ty == DataType::Literal => {
+                            format!("{}.join(\" \")", var_name)
+                        }
+                        DataType::Boolean => format!("{}.to_string()", var_name),
+                        DataType::Integer => format!("{}.to_string()", var_name),
+                        DataType::Path => format!("{}.to_str().unwrap()", var_name),
+                        DataType::Optional(ty) if *ty == DataType::Literal => format!(
+                            "{}.as_ref().map(|v| v.as_str()).unwrap_or_default()",
+                            var_name
+                        ),
+                        DataType::Literal | DataType::Either(_, _) => var_name.to_string(),
+                        _ => todo!(),
+                    };
+                    output.push(format!(
+                        "{tab}record(\"subst\", \"{}\", &{});",
+                        var_name, var_output
+                    ));
+                }
+            }
+
+            output.join("\n")
+        };
+        let chunk_funcs = self
             .chunks
             .iter()
             .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
             .filter_map(|(chunk_id, _)| match translated.get(&chunk_id).unwrap() {
-                TranslationResult::Inlined(res) => None,
-                TranslationResult::LLM(res) => Some(res),
+                ChunkTranslationOutput::Inlined(res) => None,
+                ChunkTranslationOutput::LLM(res) => Some(res),
             })
             .map(|res| {
                 self.construct_rust_func_definition(
@@ -409,21 +476,26 @@ impl Analyzer {
                     &res.rust_func_body,
                 )
             })
-            .join("\n\n");
-        println!("{}", func_defs);
+            .collect();
+        TranslationResult {
+            env_init,
+            default_init,
+            main_function_body,
+            am_cond_to_cfg,
+            recording,
+            chunk_funcs,
+        }
     }
 
     /// Translate chunks using inlined translation or LLMs
-    async fn translate_chunks(&self) -> HashMap<ChunkId, TranslationResult> {
+    async fn translate_chunks(&self) -> HashMap<ChunkId, ChunkTranslationOutput> {
         let mut results = HashMap::new();
-        let mut llm_results: HashMap<ChunkId, LLMTranslationOutput> = HashMap::new();
         let mut user = use_llm::LLMUser::new();
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
 
-        return results;
         // Collect rule-based translations for inlining during LLM processing
-        let inlined_translations: HashMap<ChunkId, InlinedTranslation> = self
+        let inlined_translations: HashMap<ChunkId, InlinedTranslationOutput> = self
             .chunks
             .iter()
             .filter_map(|(chunk_id, _)| {
@@ -436,78 +508,105 @@ impl Analyzer {
             })
             .collect();
 
-        // Process all chunks: inlined ones go directly to results, complex ones go to LLM
-        for (chunk_id, _) in self.chunks.iter() {
-            if let Some(inlined_translation) = inlined_translations.get(&chunk_id) {
-                results.insert(
-                    chunk_id,
-                    TranslationResult::Inlined(inlined_translation.clone()),
-                );
-                continue;
-            }
-
-            // Conduct LLM analysis with inlined translations available for inlining
-            let printer = TranslatingPrinter::new(self, &inlined_translations, false);
-            let script = self
-                .chunks
-                .get(chunk_id)
-                .unwrap()
-                .nodes
+        results.extend(
+            inlined_translations
                 .iter()
-                .map(|nid| printer.print_node(*nid).to_string())
-                .join("\n");
-            let header = format!(
-                "{} {{{}\n  ",
-                self.print_chunk_skeleton_signature(chunk_id),
-                {
-                    let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n  ");
-                    if header.is_empty() {
+                .map(|(chunk_id, inlined_translation)| {
+                    (
+                        *chunk_id,
+                        ChunkTranslationOutput::Inlined(inlined_translation.clone()),
+                    )
+                }),
+        );
+
+        let llm_translations = if let Some(cached) = self.load_translation_cache() {
+            cached
+        } else {
+            // Process all chunks: inlined ones go directly to results, complex ones go to LLM
+            for (chunk_id, _) in self.chunks.iter() {
+                if inlined_translations.contains_key(&chunk_id) {
+                    // inlined chunk
+                    continue;
+                }
+
+                // Conduct LLM analysis with inlined translations available for inlining
+                let printer = TranslatingPrinter::new(self, &inlined_translations, false);
+                let script = self
+                    .chunks
+                    .get(chunk_id)
+                    .unwrap()
+                    .nodes
+                    .iter()
+                    .map(|nid| printer.print_node(*nid).to_string())
+                    .join("\n");
+
+                if script.trim().is_empty() {
+                    // empty chunk
+                    continue;
+                }
+
+                let header = format!(
+                    "{} {{{}\n  ",
+                    self.print_chunk_skeleton_signature(chunk_id),
+                    {
+                        let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n  ");
+                        if header.is_empty() {
+                            "".into()
+                        } else {
+                            format!("\n  {}", header)
+                        }
+                    }
+                );
+                let footer = format!("{}\n}}", {
+                    let footer = self.print_chunk_skeleton_body_footer(chunk_id);
+                    if footer.is_empty() {
                         "".into()
                     } else {
-                        format!("\n  {}", header)
+                        format!("\n  {}", footer)
+                    }
+                });
+                let skeleton = format!("{}{{body}}{}", header, footer);
+                let required_funcs = printer.get_rust_funcs_required_for_chunk();
+                depending_funcs.insert(chunk_id, printer.get_embedded_chunks());
+                let input = LLMBasedTranslationInput::new(
+                    chunk_id,
+                    script,
+                    skeleton.clone(),
+                    &required_funcs,
+                );
+                let evidence = LLMBasedTranslationEvidence {
+                    id: chunk_id,
+                    rust_snippets: printer.get_translated_fragments(),
+                    predefinition: use_llm::get_predefinition(&required_funcs),
+                    header,
+                    footer,
+                };
+                inputs.push((input, evidence));
+            }
+
+            let mut res = user
+                .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
+                .await
+                .into_iter()
+                .map(|res| (res.id, res))
+                .collect::<HashMap<_, _>>();
+
+            // Handle LLM function name dependencies
+            for chunk_id in res.keys().cloned().collect::<Vec<_>>() {
+                for (id, placeholder) in depending_funcs.get(&chunk_id).unwrap() {
+                    if let Some(new_name) = res.get(id).map(|o| o.rust_func_name.clone()) {
+                        let out = res.get_mut(&chunk_id).unwrap();
+                        out.rust_func_body = out.rust_func_body.replace(placeholder, &new_name);
                     }
                 }
-            );
-            let footer = format!("{}\n}}", {
-                let footer = self.print_chunk_skeleton_body_footer(chunk_id);
-                if footer.is_empty() {
-                    "".into()
-                } else {
-                    format!("\n  {}", footer)
-                }
-            });
-            let skeleton = format!("{}{{body}}{}", header, footer);
-            let required_funcs = printer.get_required_rust_funcs();
-            depending_funcs.insert(chunk_id, printer.get_embedded_chunks());
-            let input =
-                LLMTranslationInput::new(chunk_id, script, skeleton.clone(), &required_funcs);
-            let evidence = TranslationEvidence {
-                rust_snippets: printer.get_translated_fragments(),
-                header,
-                footer,
-            };
-            inputs.push((input, evidence));
-        }
-
-        let llm_analysis_results = user
-            .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
-            .await;
-
-        llm_results.extend(llm_analysis_results.into_iter().map(|res| (res.id, res)));
-
-        // Handle LLM function name dependencies
-        for chunk_id in llm_results.keys().cloned().collect::<Vec<_>>() {
-            for (id, placeholder) in depending_funcs.get(&chunk_id).unwrap() {
-                if let Some(new_name) = llm_results.get(id).map(|o| o.rust_func_name.clone()) {
-                    let out = llm_results.get_mut(&chunk_id).unwrap();
-                    out.rust_func_body = out.rust_func_body.replace(placeholder, &new_name);
-                }
             }
-        }
+            self.save_translation_cache(&res);
+            res
+        };
 
         // Convert LLM results to ChunkTranslationResult and merge with inlined results
-        for (chunk_id, llm_output) in llm_results {
-            results.insert(chunk_id, TranslationResult::LLM(llm_output));
+        for (chunk_id, llm_output) in llm_translations {
+            results.insert(chunk_id, ChunkTranslationOutput::LLM(llm_output));
         }
 
         results
@@ -538,4 +637,150 @@ impl Analyzer {
 
 fn rust_func_placeholder_name(chunk_id: ChunkId) -> String {
     format!("func{}", chunk_id)
+}
+
+impl Analyzer {
+    /// Load cached translation results for all chunks
+    fn load_translation_cache(&self) -> Option<HashMap<ChunkId, LLMBasedTranslationOutput>> {
+        if !self.options.use_translation_cache {
+            return None;
+        }
+
+        let cache_path = self.get_translation_cache_path();
+        if let Ok(content) = std::fs::read(&cache_path) {
+            let config = bincode::config::standard();
+            if let Ok((cached_results, _)) = bincode::decode_from_slice::<
+                HashMap<ChunkId, LLMBasedTranslationOutput>,
+                _,
+            >(&content, config)
+            {
+                println!("Loaded translation cache from: {:?}", cache_path);
+                return Some(cached_results);
+            }
+        }
+        None
+    }
+
+    /// Save translation results to cache for all chunks
+    fn save_translation_cache(&self, results: &HashMap<ChunkId, LLMBasedTranslationOutput>) {
+        if !self.options.use_translation_cache {
+            return;
+        }
+
+        let cache_path = self.get_translation_cache_path();
+        let config = bincode::config::standard();
+        if let Ok(content) = bincode::encode_to_vec(results, config) {
+            if let Ok(()) = std::fs::write(&cache_path, content) {
+                println!("Saved translation cache to: {:?}", cache_path);
+            }
+        }
+    }
+
+    /// Get cache file path for all translation results
+    fn get_translation_cache_path(&self) -> PathBuf {
+        let mut hasher = DefaultHasher::new();
+
+        // Hash the script path
+        self.path.to_str().unwrap().hash(&mut hasher);
+
+        // Hash all chunks content to ensure cache validity
+        for (chunk_id, chunk) in &self.chunks {
+            chunk_id.hash(&mut hasher);
+
+            // Hash the chunk's script content
+            let script_content = chunk
+                .nodes
+                .iter()
+                .map(|nid| self.display_node(*nid))
+                .collect::<Vec<_>>()
+                .join("\n");
+            script_content.hash(&mut hasher);
+
+            // Hash the function skeleton
+            let signature = self.print_chunk_skeleton_signature(chunk_id);
+            let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n");
+            let footer = self.print_chunk_skeleton_body_footer(chunk_id);
+
+            signature.hash(&mut hasher);
+            header.hash(&mut hasher);
+            footer.hash(&mut hasher);
+        }
+
+        let h = hasher.finish();
+        PathBuf::from(format!("/tmp/translation_cache.{:x}.bin", h))
+    }
+}
+
+impl Analyzer {
+    pub(crate) fn print_build_rs(&self, res: &TranslationResult, record_path: &Path) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        let predefinition =
+            self.get_predefinition_with_record(record_path.to_str().unwrap_or("/tmp/record.txt"));
+        let build_rs = format!(
+            "#![allow(non_snake_case)]
+
+// predefinition
+{}
+fn main() {{
+{tab}// import environmental variables
+{}
+{tab}// default variables initialization
+{}
+{tab}// translated fragments
+{}
+{tab}// export cfg
+{}
+{tab}// record
+{}
+}}
+{}",
+            &predefinition,
+            &res.env_init,
+            &res.default_init,
+            &res.main_function_body,
+            &res.am_cond_to_cfg,
+            &res.recording,
+            &res.chunk_funcs.join("\n\n")
+        );
+        build_rs
+    }
+
+    fn get_predefinition_with_record(&self, record_path: &str) -> String {
+        let predefinitions_with_record = [
+            (
+                "define_cfg_with_record",
+                r#"fn define_cfg(key: &str, value: Option<&str>) {
+  println!("cargo:rustc-check-cfg=cfg({})", key);
+  if let Some(value) = value {
+    println!("cargo:rustc-cfg={}={}", key, value);
+    record("cfg", key, value);
+  } else {
+    println!("cargo:rustc-cfg={}", key);
+    record("cfg", key, "");
+  }
+}"#,
+            ),
+            (
+                "define_env_with_record",
+                r#"fn define_env(key: &str, value: &str) {
+  println!("cargo:rustc-env={}={}", key, value);
+  record("env", key, value);
+}"#,
+            ),
+            (
+                "record",
+                &format!(
+                    r#"fn record(category: &str, key: &str, value: &str) {{
+  let line = format!("{{}}:{{}}={{}}\n", category, key, value);
+  let path = PathBuf::from("{}");
+  write_file(&path, &line)
+}}"#,
+                    record_path
+                ),
+            ),
+        ];
+        use_llm::get_predefinition(&["write_file"])
+            + "\n"
+            + &predefinitions_with_record.iter().map(|(_, s)| s).join("\n")
+    }
 }

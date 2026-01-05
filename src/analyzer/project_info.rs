@@ -6,13 +6,15 @@ use std::{
 use regex::{Captures, Regex};
 
 use super::{automake::WithGuard, Analyzer};
+use crate::utils::enumerate::enumerate_combinations;
 
 #[derive(Debug, Default)]
 pub(crate) struct ProjectInfo {
     pub project_dir: PathBuf,
     pub c_files: Vec<WithGuard<PathBuf>>,
     pub h_files: Vec<PathBuf>,
-    pub built_files: Vec<PathBuf>,
+    pub built_files: HashSet<PathBuf>,
+    pub generated_files: HashSet<PathBuf>,
     pub config_files: Vec<(PathBuf, PathBuf)>,
     pub subst_files: Vec<(PathBuf, PathBuf)>,
     pub am_files: Vec<PathBuf>,
@@ -83,6 +85,179 @@ impl Analyzer {
             .values()
             .map(|s| s.as_str())
             .collect()
+    }
+}
+
+impl Analyzer {
+    /// Analyze redirected and removed files to determine actually generated files by running configure script
+    pub(crate) fn collect_files_generated_by_script(&mut self) {
+        let redirected_files = self.collect_redirected_files();
+        let removed_files = self.collect_removed_files();
+
+        // built_files = redirected_files - removed_files
+        let generated_files: HashSet<PathBuf> = redirected_files
+            .difference(&removed_files)
+            .cloned()
+            .collect();
+        self.project_info.generated_files.extend(generated_files);
+    }
+
+    /// Collect files that are redirected to (created/written)
+    fn collect_redirected_files(&self) -> HashSet<PathBuf> {
+        use crate::analyzer::{as_literal, as_shell, MayM4, ShellCommand};
+        use autotools_parser::ast::Redirect;
+
+        let mut redirected_files = HashSet::new();
+
+        // Look for redirection patterns: command > file, command >> file
+        for (node_id, node) in self.pool.nodes.iter() {
+            if let MayM4::Shell(ShellCommand::Redirect(_, redirections)) = &node.cmd.0 {
+                for redirect in redirections {
+                    let target_word = match redirect {
+                        Redirect::Write(_, word) => Some(word),
+                        Redirect::Append(_, word) => Some(word),
+                        Redirect::Clobber(_, word) => Some(word),
+                        _ => None, // Skip other redirect types (Read, DupRead, etc.)
+                    };
+
+                    if let Some(word) = target_word {
+                        if let Some(literal) = as_shell(word).and_then(as_literal) {
+                            if !literal.starts_with("/") {
+                                redirected_files.insert(literal.into());
+                            }
+                        } else {
+                            // Try to resolve variables in the redirection target
+                            let resolved_paths = self.resolve_word_as_path(word, node_id);
+                            redirected_files.extend(resolved_paths);
+                        }
+                    }
+                }
+            }
+        }
+
+        redirected_files
+    }
+
+    /// Collect files that are removed by rm commands
+    fn collect_removed_files(&self) -> HashSet<PathBuf> {
+        use crate::analyzer::{as_literal, as_shell, MayM4, ShellCommand};
+
+        let mut removed_files = HashSet::new();
+
+        // Iterate over all nodes looking for rm commands
+        for (node_id, node) in self.pool.nodes.iter() {
+            if let MayM4::Shell(ShellCommand::Cmd(words)) = &node.cmd.0 {
+                if let Some(literal) = words.first().and_then(as_shell).and_then(as_literal) {
+                    if literal == "rm" {
+                        // Process rm arguments
+                        for arg_word in words.iter().skip(1) {
+                            if let Some(literal) = as_shell(arg_word).and_then(as_literal) {
+                                // Skip flags like -f, -rf, etc.
+                                if !literal.starts_with('-') {
+                                    removed_files
+                                        .insert(self.project_info.project_dir.join(literal));
+                                }
+                            } else {
+                                // Try to resolve variables in the argument
+                                let resolved_paths = self.resolve_word_as_path(arg_word, node_id);
+                                removed_files.extend(resolved_paths);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        removed_files
+    }
+
+    /// Resolve variables in autoconf words to get all possible paths
+    fn resolve_word_as_path(
+        &self,
+        ac_word: &super::AcWord,
+        node_id: super::NodeId,
+    ) -> HashSet<PathBuf> {
+        use autotools_parser::ast::minimal::Word;
+        use autotools_parser::ast::node::WordFragment;
+        use autotools_parser::ast::Parameter;
+
+        let location = Some(self.get_location_of_node_start(node_id));
+        let mut result_paths = HashSet::new();
+
+        // Simple approach: handle common cases and use enumerate_combinations for concat
+        match &ac_word.0 {
+            Word::Empty => {}
+            Word::Single(fragment) => {
+                match fragment {
+                    super::MayM4::Shell(WordFragment::Literal(lit)) => {
+                        if !lit.starts_with('-') && !lit.is_empty() {
+                            result_paths.insert(lit.into());
+                        }
+                    }
+                    super::MayM4::Shell(WordFragment::Param(Parameter::Var(var_name))) => {
+                        let resolved_values = self.resolve_var(var_name, location, false);
+                        for resolved_value in resolved_values {
+                            if !resolved_value.starts_with('-') && !resolved_value.is_empty() {
+                                result_paths.insert(resolved_value.into());
+                            }
+                        }
+                    }
+                    super::MayM4::Shell(WordFragment::DoubleQuoted(fragments)) => {
+                        // For simple double quoted cases, collect resolved fragments and combine
+                        let resolved_fragments: Vec<HashSet<String>> = fragments
+                            .iter()
+                            .map(|fragment| match fragment {
+                                WordFragment::Literal(lit) => {
+                                    let mut result = HashSet::new();
+                                    result.insert(lit.clone());
+                                    result
+                                }
+                                WordFragment::Param(Parameter::Var(var_name)) => {
+                                    self.resolve_var(var_name, location.clone(), false)
+                                }
+                                _ => HashSet::new(),
+                            })
+                            .collect();
+
+                        let combinations = enumerate_combinations(resolved_fragments);
+                        for combo in combinations {
+                            let combined = combo.concat();
+                            if !combined.starts_with('-') && !combined.is_empty() {
+                                result_paths.insert(combined.into());
+                            }
+                        }
+                    }
+                    _ => {} // Skip other complex cases for now
+                }
+            }
+            Word::Concat(fragments) => {
+                // For concat words, try to resolve each fragment and combine
+                let resolved_fragments: Vec<HashSet<String>> = fragments
+                    .iter()
+                    .map(|fragment| match fragment {
+                        super::MayM4::Shell(WordFragment::Literal(lit)) => {
+                            let mut result = HashSet::new();
+                            result.insert(lit.clone());
+                            result
+                        }
+                        super::MayM4::Shell(WordFragment::Param(Parameter::Var(var_name))) => {
+                            self.resolve_var(var_name, location.clone(), false)
+                        }
+                        _ => HashSet::new(),
+                    })
+                    .collect();
+
+                let combinations = enumerate_combinations(resolved_fragments);
+                for combo in combinations {
+                    let combined = combo.concat();
+                    if !combined.starts_with('-') && !combined.is_empty() {
+                        result_paths.insert(combined.into());
+                    }
+                }
+            }
+        }
+
+        result_paths
     }
 }
 
