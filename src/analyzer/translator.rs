@@ -9,6 +9,7 @@ use use_llm::{LLMBasedTranslationEvidence, LLMBasedTranslationInput};
 use crate::{
     analyzer::{
         chunk::ChunkId,
+        pkg_config::get_function_definition_bindgen,
         translator::{printer::TranslatingPrinter, use_llm::LLMBasedTranslationOutput},
         type_inference::DataType,
         MayM4, ShellCommand,
@@ -41,6 +42,7 @@ pub(crate) struct TranslationResult {
     main_function_body: String,
     am_cond_to_cfg: String,
     recording: String,
+    bindgen: String,
     chunk_funcs: Vec<String>,
 }
 
@@ -249,7 +251,8 @@ impl Analyzer {
         }
     }
 
-    fn debug_print_chunks(&mut self) {
+    /// debug print of chunks that would be fed to LLMs
+    pub(crate) fn debug_print_chunks(&mut self) {
         println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
         for (i, chunk) in self.chunks.iter() {
             let last_id = *chunk.nodes.last().unwrap();
@@ -334,8 +337,6 @@ impl Analyzer {
                 )
             })
             .join("\n");
-
-        dbg!(&self.get_scopes("WITH_XPATH"));
 
         let default_init = self
             .var_scopes
@@ -461,6 +462,17 @@ impl Analyzer {
 
             output.join("\n")
         };
+
+        let bindgen = if self
+            .pkg_config_analyzer()
+            .pkg_check_modules_calls
+            .is_empty()
+        {
+            format!("{tab}run_bindgen();")
+        } else {
+            Default::default()
+        };
+
         let chunk_funcs = self
             .chunks
             .iter()
@@ -483,6 +495,7 @@ impl Analyzer {
             main_function_body,
             am_cond_to_cfg,
             recording,
+            bindgen,
             chunk_funcs,
         }
     }
@@ -715,7 +728,7 @@ impl Analyzer {
     pub(crate) fn print_build_rs(&self, res: &TranslationResult, record_path: &Path) -> String {
         let tab = " ".repeat(TranslatingPrinter::get_tab_width());
         let predefinition =
-            self.get_predefinition_with_record(record_path.to_str().unwrap_or("/tmp/record.txt"));
+            self.get_predefinition(record_path.to_str().unwrap_or("/tmp/record.txt"));
         let build_rs = format!(
             "#![allow(non_snake_case)]
 
@@ -730,6 +743,8 @@ fn main() {{
 {}
 {tab}// export cfg
 {}
+{tab}// bindgen
+{}
 {tab}// record
 {}
 }}
@@ -740,47 +755,33 @@ fn main() {{
             &res.main_function_body,
             &res.am_cond_to_cfg,
             &res.recording,
+            &res.bindgen,
             &res.chunk_funcs.join("\n\n")
         );
         build_rs
     }
 
-    fn get_predefinition_with_record(&self, record_path: &str) -> String {
-        let predefinitions_with_record = [
-            (
-                "define_cfg_with_record",
-                r#"fn define_cfg(key: &str, value: Option<&str>) {
-  println!("cargo:rustc-check-cfg=cfg({})", key);
-  if let Some(value) = value {
-    println!("cargo:rustc-cfg={}={}", key, value);
-    record("cfg", key, value);
-  } else {
-    println!("cargo:rustc-cfg={}", key);
-    record("cfg", key, "");
-  }
-}"#,
-            ),
-            (
-                "define_env_with_record",
-                r#"fn define_env(key: &str, value: &str) {
-  println!("cargo:rustc-env={}={}", key, value);
-  record("env", key, value);
-}"#,
-            ),
-            (
-                "record",
-                &format!(
-                    r#"fn record(category: &str, key: &str, value: &str) {{
+    fn get_predefinition(&self, record_path: &str) -> String {
+        use_llm::get_predefinition(&[
+            "module_regex",
+            "module_pkg_config",
+            "write_file",
+            "define_cfg_with_record",
+            "define_env_with_record",
+            "pkg_config",
+        ]) + &get_function_definition_record(record_path)
+            + &get_function_definition_bindgen()
+    }
+}
+
+fn get_function_definition_record(record_path: &str) -> String {
+    format!(
+        r#"
+fn record(category: &str, key: &str, value: &str) {{
   let line = format!("{{}}:{{}}={{}}\n", category, key, value);
   let path = PathBuf::from("{}");
   write_file(&path, &line)
 }}"#,
-                    record_path
-                ),
-            ),
-        ];
-        use_llm::get_predefinition(&["write_file"])
-            + "\n"
-            + &predefinitions_with_record.iter().map(|(_, s)| s).join("\n")
-    }
+        record_path
+    )
 }

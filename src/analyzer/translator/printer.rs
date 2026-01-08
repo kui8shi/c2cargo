@@ -61,6 +61,8 @@ pub(crate) struct TranslatingPrinter<'a> {
     found_sed: Cell<bool>,
     /// Whether we have found a usage of define_cfg/define_env
     found_define: Cell<bool>,
+    /// Whether we have found a usage of pkg_config
+    found_pkg_config: Cell<bool>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -106,6 +108,7 @@ impl<'a> TranslatingPrinter<'a> {
             found_redirection: Cell::new(false),
             found_sed: Cell::new(false),
             found_define: Cell::new(false),
+            found_pkg_config: Cell::new(false),
         }
     }
 
@@ -143,11 +146,15 @@ impl<'a> TranslatingPrinter<'a> {
             ret.push("write_file");
         }
         if self.found_sed.get() {
-            ret.push("regex");
+            ret.push("module_regex");
         }
         if self.found_define.get() {
             ret.push("define_cfg");
             ret.push("define_env");
+        }
+        if self.found_pkg_config.get() {
+            ret.push("module_pkg_config");
+            ret.push("pkg_config");
         }
         ret
     }
@@ -684,6 +691,82 @@ impl<'a> TranslatingPrinter<'a> {
             define_call
         }
     }
+
+    fn display_pkg_check_modules(&self, node_id: NodeId, indent_level: usize) -> String {
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
+
+        let pkg_config = self.analyzer.pkg_config_analyzer();
+        let info = pkg_config.get_pkg_check_modules_info(node_id).unwrap();
+
+        let init_pkg_cflags = self.enclose_by_rust_tags(
+            format!("let mut {} = Vec::new();", info.cflags_var_name),
+            false,
+        );
+        let init_pkg_libs = self.enclose_by_rust_tags(
+            format!("let mut {} = Vec::new();", info.libs_var_name),
+            false,
+        );
+        let mut ret = format!("{tab}{}\n{tab}{}\n", init_pkg_cflags, init_pkg_libs);
+
+        for (name, min_version) in &info.packages {
+            if let Some(sys_info) = pkg_config.get_system_package_info(name) {
+                let min_version_str = match min_version {
+                    None => "None".into(),
+                    Some(VoL::Var(var)) => format!("Some(&{})", var),
+                    Some(VoL::Lit(lit)) => format!("Some(\"{}\")", lit),
+                };
+                let run_pkg_config = self.enclose_by_rust_tags(
+                    format!(
+                        "let Some(lib) = run_pkg_config(\"{}\", {})",
+                        name, min_version_str
+                    ),
+                    true,
+                );
+
+                let add_include_guard = self.enclose_by_rust_tags(
+                    format!(
+                        "{}.push(\"-D{}\".to_string());",
+                        info.cflags_var_name, &sys_info.include_guard_macro_name
+                    ),
+                    true,
+                );
+                let add_pkg_cflags = self.enclose_by_rust_tags(
+                    format!("{}.extend(&lib.cflags);", info.cflags_var_name),
+                    true,
+                );
+                let add_pkg_libs = self.enclose_by_rust_tags(
+                    format!("{}.extend(&lib.cflags);", info.libs_var_name),
+                    true,
+                );
+
+                let action_if_found = self.display_body(&info.action_if_found, indent_level + 1);
+                let action_if_not_found =
+                    self.display_body(&info.action_if_not_found, indent_level + 1);
+
+                ret.push_str(&format!(
+                    "{tab}if {} {{\n{tab_1}{}\n{tab_1}{}\n{tab_1}{}\n{}{tab}}}{}",
+                    run_pkg_config,
+                    add_include_guard,
+                    add_pkg_cflags,
+                    add_pkg_libs,
+                    action_if_found,
+                    if !action_if_not_found.is_empty() {
+                        format!(" else {{\n{action_if_not_found}{tab}}}")
+                    } else {
+                        "".into()
+                    },
+                ));
+            } else {
+                let action_if_not_found =
+                    self.display_body(&info.action_if_not_found, indent_level);
+                if !action_if_not_found.is_empty() {
+                    ret.push_str(&format!("{tab}{}", action_if_not_found));
+                }
+            }
+        }
+        ret
+    }
 }
 
 impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
@@ -1052,37 +1135,8 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 let ret = self.display_ac_define_unquoted(key, value);
                 return format!("{tab}{}", self.enclose_by_rust_tags(ret, false));
             }
-            "AC_CHECK_LIB" => {
-                // let first_arg_as_word = m4_macro.get_arg_as_word(0).unwrap();
-                // let lib_name = as_shell(&first_arg_as_word).and_then(as_literal).unwrap();
-                // let pkg_config_call = format!(r#"check_library("{}")"#, lib_name);
-                // let commands_when_found = match m4_macro.get_arg_as_cmd(2) {
-                //     Some(cmds) => cmds
-                //         .iter()
-                //         .map(|c| self.display_node(*c, indent_level + 1))
-                //         .collect::<Vec<String>>()
-                //         .join("\n"),
-                //     None => "".into(),
-                // };
-                // let commands_when_not_found = match m4_macro.get_arg_as_cmd(3) {
-                //     Some(cmds) => cmds
-                //         .iter()
-                //         .map(|c| self.display_node(*c, indent_level + 1))
-                //         .collect::<Vec<String>>()
-                //         .join("\n"),
-                //     None => "".into(),
-                // };
-                // let gen_tab = |nest: usize| " ".repeat((indent_level + nest) * Self::M4_TAB_WIDTH);
-                // let tab_nest1 = gen_tab(1);
-                // self.found_lib_check.set(true);
-                // return format!(
-                //     "{tab}{}{{\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab_nest1}{} {{\n{tab}{}\n{tab_nest1}}},\n{tab}}}",
-                //     self.enclose_by_rust_tags(pkg_config_call, true),
-                //     self.enclose_by_rust_tags("Some(library) => ".into(), false),
-                //     commands_when_found,
-                //     self.enclose_by_rust_tags("None => ".into(), false),
-                //     commands_when_not_found,
-                // );
+            "PKG_CHECK_MODULES" => {
+                return self.display_pkg_check_modules(node_id, indent_level);
             }
             _ => (),
         }

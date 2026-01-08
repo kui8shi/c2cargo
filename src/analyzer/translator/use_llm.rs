@@ -4,7 +4,10 @@ use std::collections::HashMap;
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
-use crate::utils::llm_analysis::{LLMAnalysis, LLMOutput};
+use crate::{
+    analyzer::pkg_config::get_function_definition_pkg_config,
+    utils::llm_analysis::{LLMAnalysis, LLMOutput},
+};
 
 use itertools::Itertools;
 
@@ -42,7 +45,8 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
             "default_modules",
             "use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};",
         ),
-        ("regex", "use regex;"),
+        ("module_regex", "use regex;"),
+        ("module_pkg_config", "use pkg_config;"),
         (
             "write_file",
             r#"fn write_file(path: &Path, content: &str) {
@@ -71,6 +75,27 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
   println!("cargo:rustc-env={}={}", key, value);
 }"#,
         ),
+        (
+            "define_cfg_with_record",
+            r#"fn define_cfg(key: &str, value: Option<&str>) {
+  println!("cargo:rustc-check-cfg=cfg({})", key);
+  if let Some(value) = value {
+    println!("cargo:rustc-cfg={}={}", key, value);
+    record("cfg", key, value);
+  } else {
+    println!("cargo:rustc-cfg={}", key);
+    record("cfg", key, "");
+  }
+}"#,
+        ),
+        (
+            "define_env_with_record",
+            r#"fn define_env(key: &str, value: &str) {
+  println!("cargo:rustc-env={}={}", key, value);
+  record("env", key, value);
+}"#,
+        ),
+        ("pkg_config", get_function_definition_pkg_config()),
     ]);
     std::iter::once("default_modules")
         .chain(required_funcs.iter().cloned())

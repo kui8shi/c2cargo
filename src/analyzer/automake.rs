@@ -1,6 +1,7 @@
+use std::ffi::OsStr;
 use std::process::Command;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
 };
 
@@ -19,6 +20,7 @@ use regex::{Captures, Regex};
 use slab::Slab;
 
 use crate::utils::enumerate::enumerate_combinations;
+use crate::utils::{is_c_extension, is_h_extension};
 
 use super::Guard;
 
@@ -65,8 +67,8 @@ pub(super) struct AmTarget {
 #[derive(Debug, Clone, Default)]
 pub(super) struct AutomakeFile {
     pub this_file_path: PathBuf,
-    pub include_paths: Vec<PathBuf>,
-    pub sub_dir_paths: Vec<PathBuf>,
+    pub am_includes: Vec<PathBuf>,
+    pub am_sub_dirs: Vec<PathBuf>,
     pub programs: HashMap<String, Vec<AmTarget>>,
     pub libraries: HashMap<String, Vec<AmTarget>>,
     pub headers: HashMap<String, Vec<WithGuard<String>>>,
@@ -75,6 +77,7 @@ pub(super) struct AutomakeFile {
     pub extra_dist: Vec<String>,
     pub built_sources: Vec<PathBuf>,
     pub raw_variable_info: HashMap<String, Vec<WithGuard<AmWord>>>,
+    pub include_paths: Vec<PathBuf>,
 }
 
 #[allow(dead_code)]
@@ -197,6 +200,7 @@ impl Analyzer {
         let project_dir = self.project_info.project_dir.clone();
         let contents = load_automake_file(&path, &project_dir);
         let lexer = Lexer::new(contents.chars());
+        std::fs::write("/tmp/expanded_makefile.am", &contents).unwrap();
         let (nodes, top_ids) =
             AutomakeParser::<_, AutomakeNodeBuilder<AmNodeInfo>>::new(lexer).parse_all();
         let mut nodes = nodes
@@ -212,6 +216,9 @@ impl Analyzer {
             .strip_prefix(&self.project_info.project_dir)
             .unwrap()
             .to_owned();
+
+        let base_dir = automake.this_file_path.parent();
+
         for id in top_ids.iter() {
             self.analyze_automake_variables(*id, &mut nodes, &mut condition, &mut vars);
             if let Some(AmLine::Include(w)) = nodes.get(*id).map(|n| &n.cmd) {
@@ -219,7 +226,7 @@ impl Analyzer {
                 if let Word::Single(MayAm::Shell(WordFragment::Literal(lit))) = &w.0 {
                     let relative = PathBuf::from(lit);
                     if let Some(include_path) = resolve_path(&relative, &path, &project_dir) {
-                        automake.include_paths.push(include_path.clone());
+                        automake.am_includes.push(include_path.clone());
                         if !self.automake().files.contains_key(&include_path) {
                             let node_condition = nodes.get(*id).unwrap().info.condition.clone();
                             let res = self.analyze_automake_file(&include_path, node_condition);
@@ -238,7 +245,7 @@ impl Analyzer {
                 {
                     let relative = PathBuf::from(lit).join("Makefile.am");
                     if let Some(sub_path) = resolve_path(&relative, &path, &project_dir) {
-                        automake.sub_dir_paths.push(sub_path.clone());
+                        automake.am_sub_dirs.push(sub_path.clone());
                         if !self.automake().files.contains_key(&sub_path) {
                             let val_condition = subdir_val.am_cond.clone();
                             let res = self.analyze_automake_file(&sub_path, val_condition);
@@ -260,6 +267,29 @@ impl Analyzer {
             automake.built_sources.push(src);
         }
 
+        for val in self.resolve_automake_var(&vars, "AM_CPPFLAGS") {
+            if !val.am_cond.is_empty() {
+                continue;
+            }
+            for val in self.resolve_value_derived_from_autoconf(&val) {
+                if !val.am_cond.is_empty() {
+                    continue;
+                }
+                let lit = val.value;
+                if lit.starts_with("-I") {
+                    if let Some(include_path) = resolve_path(
+                        &PathBuf::from(lit.strip_prefix("-I").unwrap()),
+                        &automake.this_file_path,
+                        &project_dir,
+                    ) {
+                        if include_path.exists() {
+                            automake.include_paths.push(include_path);
+                        }
+                    }
+                }
+            }
+        }
+
         for dir in vars.keys().filter_map(|name| name.strip_suffix("dir")) {
             let dir_var = format!("{}dir", dir);
             if let Some(val) = self.resolve_automake_var(&vars, &dir_var).first() {
@@ -277,7 +307,7 @@ impl Analyzer {
                 if !val.am_cond.is_empty() {
                     continue;
                 }
-                resolved.extend(self.resolve_automake_value(&val));
+                resolved.extend(self.resolve_value_derived_from_autoconf(&val));
             }
             for val in resolved {
                 if !val.am_cond.is_empty() {
@@ -291,7 +321,7 @@ impl Analyzer {
                 let target = self.automake_new_target(
                     target_name.as_str(),
                     &vars,
-                    automake.this_file_path.parent(),
+                    base_dir,
                     &automake.built_sources,
                 );
                 automake
@@ -319,7 +349,7 @@ impl Analyzer {
                 let target = self.automake_new_target(
                     name.as_str(),
                     &vars,
-                    automake.this_file_path.parent(),
+                    base_dir,
                     &automake.built_sources,
                 );
                 automake
@@ -473,7 +503,10 @@ impl Analyzer {
         }
     }
 
-    fn resolve_automake_value(&self, val: &WithGuard<AmValue>) -> HashSet<WithGuard<String>> {
+    fn resolve_value_derived_from_autoconf(
+        &self,
+        val: &WithGuard<AmValue>,
+    ) -> HashSet<WithGuard<String>> {
         match &val.value {
             AmValue::Var(var) => self
                 .resolve_var(var, None, false)
@@ -495,7 +528,7 @@ impl Analyzer {
                             value: v.clone(),
                             am_cond: val.am_cond.clone(),
                         };
-                        self.resolve_automake_value(&with_guard)
+                        self.resolve_value_derived_from_autoconf(&with_guard)
                     })
                     .collect(),
             )
@@ -694,7 +727,7 @@ impl Analyzer {
                         .iter()
                         .chain(target.links.iter())
                         // .filter(|v| v.am_cond.is_empty()) // FIXME
-                        .filter(|v| v.value.extension().is_some_and(|ext| ext == "c"))
+                        .filter(|v| v.value.extension().is_some_and(|ext| is_c_extension(ext)))
                         .filter(|v| !am_file.built_sources.contains(&v.value))
                         .map(|v| v.clone()),
                 );
@@ -703,7 +736,7 @@ impl Analyzer {
                 am_file
                     .built_sources
                     .iter()
-                    .filter(|&v| v.extension().is_some_and(|ext| ext == "c"))
+                    .filter(|&v| v.extension().is_some_and(|ext| is_c_extension(ext)))
                     .cloned(),
             );
         }
@@ -715,7 +748,7 @@ impl Analyzer {
                 am_file
                     .built_sources
                     .iter()
-                    .filter(|&v| v.extension().is_some_and(|ext| ext == "h"))
+                    .filter(|&v| v.extension().is_some_and(|ext| is_h_extension(ext)))
                     .cloned(),
             );
         }
@@ -732,58 +765,160 @@ impl Analyzer {
                     .flat_map(|(from, _)| from.iter()),
             )
             .collect::<HashSet<_>>();
-        self.project_info.h_files.extend(
-            self.project_info
-                .c_files
-                .iter()
-                .flat_map(|c_file| {
-                    get_included_headers(&c_file.value, &self.project_info.project_dir).into_iter()
-                })
-                .filter(|h| !will_be_generated.contains(&h))
-                .collect::<HashSet<_>>(),
-        );
+        let c_files = self
+            .project_info
+            .c_files
+            .iter()
+            .map(|c_file| c_file.value.as_path())
+            .collect::<Vec<_>>();
+
+        let root_dir = PathBuf::from(".");
+        let include_paths = std::iter::once(root_dir.as_path())
+            .chain(
+                self.automake()
+                    .files
+                    .values()
+                    .map(|automake_file| automake_file.include_paths.iter().map(|p| p.as_path()))
+                    .flatten(),
+            )
+            .collect::<Vec<_>>();
+        let (internal_headers, other_headers) = get_included_headers(&c_files, &include_paths);
+        let internal_headers_without_generated = internal_headers
+            .into_iter()
+            .filter(|p| {
+                include_paths
+                    .iter()
+                    .all(|dir| !will_be_generated.contains(&dir.join(p)))
+            })
+            .collect::<Vec<_>>();
+        let external_headers = other_headers
+            .into_iter()
+            .filter(|p| {
+                include_paths
+                    .iter()
+                    .all(|dir| !will_be_generated.contains(&dir.join(p)))
+            })
+            .collect::<Vec<_>>();
+
+        self.project_info
+            .h_files
+            .extend(internal_headers_without_generated);
+        self.project_info.ext_h_files.extend(external_headers);
     }
 }
 
-/// Get a unique set of included headers.
-fn get_included_headers(file_path: &Path, base_dir: &Path) -> HashSet<PathBuf> {
-    // Execute GCC and capture stdout. -MG allows missing headers.
-    let output = Command::new("gcc")
-        .args([file_path.to_str().unwrap(), "-MG", "-MM"])
-        .current_dir(base_dir)
-        .output();
+// /// Get a unique set of included headers.
+// fn get_included_headers(file_path: &Path, base_dir: &Path) -> HashSet<PathBuf> {
+//     // Execute compiler and capture stdout. -MG allows missing headers.
+//     let output = Command::new("cc")
+//         .args([file_path.to_str().unwrap(), "-MG", "-MM", "-Ibuild"])
+//         .current_dir(base_dir)
+//         .output();
+//
+//     let Ok(out) = output else {
+//         return HashSet::new();
+//     };
+//     if !out.status.success() {
+//         return HashSet::new();
+//     };
+//
+//     let Ok(stdout_str) = std::str::from_utf8(&out.stdout) else {
+//         return HashSet::new();
+//     };
+//
+//     let mut headers = HashSet::new();
+//
+//     for line in stdout_str.lines() {
+//         let clean_line = line.trim_end_matches('\\').trim();
+//
+//         for part in clean_line.split_whitespace() {
+//             if !part.contains(':') && part != file_path {
+//                 let header_file = PathBuf::from(part);
+//                 if base_dir.join(&header_file).exists() {
+//                     headers.insert(header_file);
+//                 } else if let Some(parent) = file_path.parent() {
+//                     if parent.join(&header_file).exists() {
+//                         headers.insert(parent.join(&header_file));
+//                     }
+//                 }
+//             }
+//         }
+//     }
+//
+//     headers
+// }
 
-    let Ok(out) = output else {
-        return HashSet::new();
-    };
-    if !out.status.success() {
-        return HashSet::new();
-    };
+/// Recursively scans files to find included headers using Regex.
+fn get_included_headers(
+    file_paths: &[&Path],
+    include_paths: &[&Path],
+) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
+    // Regex pattern to capture include directives.
+    // Matches: Start of line -> # -> include -> " or < -> filename -> " or >
+    // Example: #include "foo.h", # include <vector>
+    let include_re = Regex::new(r#"(?m)^\s*#\s*include\s+["<]([^">]+)[">]"#).unwrap();
 
-    let Ok(stdout_str) = std::str::from_utf8(&out.stdout) else {
-        return HashSet::new();
-    };
+    let mut visited = HashSet::new();
+    let mut internal_headers = HashSet::new();
+    let mut other_headers = HashSet::new();
+    let mut queue = VecDeque::new();
 
-    let mut headers = HashSet::new();
+    // Initialize the queue with the entry point files.
+    for path in file_paths {
+        if let Some(path) = include_paths.iter().find_map(|dir| {
+            let full = dir.join(&path);
+            full.exists().then_some(full)
+        }) {
+            // We clone into the queue to track traversal.
+            queue.push_back((*path).to_owned());
+            visited.insert((*path).to_owned());
+        }
+    }
 
-    for line in stdout_str.lines() {
-        let clean_line = line.trim_end_matches('\\').trim();
+    // Use Breadth-First Search (BFS) to traverse dependencies.
+    while let Some(current_file_path) = queue.pop_front() {
+        // Read file content. If it fails (e.g., non-UTF8 or permission issues), skip it.
+        let Ok(content) = std::fs::read_to_string(&current_file_path) else {
+            continue;
+        };
 
-        for part in clean_line.split_whitespace() {
-            if !part.contains(':') && part != file_path {
-                let header_file = PathBuf::from(part);
-                if base_dir.join(&header_file).exists() {
-                    headers.insert(header_file);
-                } else if let Some(parent) = file_path.parent() {
-                    if parent.join(&header_file).exists() {
-                        headers.insert(parent.join(&header_file));
-                    }
+        // Iterate over all regex matches in the file content.
+        for cap in include_re.captures_iter(&content) {
+            let header_name = &cap[1]; // The filename part (e.g., "foo.h")
+            let header_path = PathBuf::from(header_name);
+
+            let mut found_path = None;
+
+            // Path Resolution Logic:
+            if let Some(path) = include_paths.iter().find_map(|dir| {
+                let full = dir.join(&header_path);
+                full.exists().then_some(full)
+            }) {
+                // 1. Check relative to base_dir (e.g., build root).
+                found_path = Some(path.clone());
+            } else if let Some(parent) = current_file_path.parent() {
+                // 3. Check relative to the current file's parent directory.
+                let check_relative = parent.join(&header_path);
+                if check_relative.exists() {
+                    found_path = Some(check_relative);
+                }
+            }
+
+            if let Some(path) = found_path {
+                // If the path hasn't been visited yet, add it to headers and the queue.
+                if visited.insert(path.to_owned()) {
+                    internal_headers.insert(path.to_owned());
+                    queue.push_back(path.to_owned());
+                }
+            } else {
+                if visited.insert(header_path.to_owned()) {
+                    other_headers.insert(header_path);
                 }
             }
         }
     }
 
-    headers
+    (internal_headers, other_headers)
 }
 
 /// Recursively loads Automake files and resolves includes.
@@ -803,11 +938,13 @@ fn load_automake_file(path: &Path, project_dir: &Path) -> String {
                 let file = PathBuf::from(caps.name("file").unwrap().as_str());
 
                 // Resolve the full path of the included file
-                let include_path =
-                    resolve_path(&file, path, project_dir).expect("Failed at resolving a path.");
-                // Recursively load the included file
-                let full_read_path = project_dir.join(&include_path);
-                load_automake_file(&full_read_path, project_dir)
+                if let Some(include_path) = resolve_path(&file, path, project_dir) {
+                    // Recursively load the included file
+                    let full_read_path = project_dir.join(&include_path);
+                    load_automake_file(&full_read_path, project_dir)
+                } else {
+                    String::default()
+                }
             })
             .into_owned()
     };

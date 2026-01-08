@@ -191,7 +191,8 @@ impl Analyzer {
             } else if first_char.is_ascii_lowercase() {
                 prefix.to_lowercase() + symbol
             } else {
-                panic!("Invalid CPP symbol found");
+                symbol.to_owned()
+                // panic!("Invalid CPP symbol: {:?} found", symbol);
             }
         } else {
             symbol.to_owned()

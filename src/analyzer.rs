@@ -25,9 +25,9 @@ use chunk::{Chunk, ChunkId, FunctionSkelton, Scope};
 use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
-use record::{AnalysisParameters, RecordCollector};
 use platform_support::PlatformSupport;
 use project_info::ProjectInfo;
+use record::{AnalysisParameters, RecordCollector};
 use type_inference::{DataType, TypeHint};
 
 use flatten::Flattener;
@@ -40,6 +40,7 @@ use slab::Slab;
 use crate::{
     analyzer::{
         conditional_compilation::ConditionalCompilationMap, macro_call::FixedMacroSideEffect,
+        pkg_config::PkgConfigAnalyzer,
     },
     display::AutoconfPool,
 };
@@ -56,6 +57,7 @@ mod flatten;
 mod guard;
 mod location;
 mod macro_call;
+mod pkg_config;
 mod platform_support;
 mod project_info;
 mod removal;
@@ -569,6 +571,9 @@ pub struct AnalyzerOptions {
     /// Whether to use cached translation results.
     /// When enabled, LLM translation results are cached per chunk and reused.
     pub use_translation_cache: bool,
+    /// Whether to use cached pkg-config analysis results.
+    /// When enabled, system package manager results are cached to disk and reused.
+    pub use_pkg_config_cache: bool,
 }
 
 impl Default for AnalyzerOptions {
@@ -577,6 +582,7 @@ impl Default for AnalyzerOptions {
             flatten_threshold: 200,
             use_build_option_cache: true,
             use_translation_cache: true,
+            use_pkg_config_cache: true,
         }
     }
 }
@@ -657,6 +663,8 @@ pub struct Analyzer {
     record_collector: Option<RecordCollector>,
     /// Project metadata from AC_INIT
     project_metadata: Option<ProjectMetadata>,
+    /// Save analysis results of pkg config macro calls
+    pkg_config_analyzer: Option<PkgConfigAnalyzer>,
 }
 
 /// Project metadata extracted from AC_INIT macro
@@ -700,6 +708,9 @@ impl Analyzer {
                 "srcdir".into(),
                 ".".into(), // project_dir.to_str().unwrap().to_owned(),
             ),
+            ("builddir".into(), ".".into()),
+            ("top_srcdir".into(), ".".into()),
+            ("top_builddir".into(), ".".into()),
             ("U".into(), "".into()),
         ];
         let lexer = Lexer::new(contents.chars());
@@ -764,10 +775,14 @@ impl Analyzer {
         s.froze_macros();
         s.consume_automake_macros();
 
+        println!("==================== EXTERNAL LIBRARY =======================");
+        s.consume_pkg_config_macros();
+
+        println!("==================== GENERATED FILES =======================");
         s.collect_files_generated_by_script();
 
         s.load_project_files();
-        println!("==================== CCP =======================");
+        println!("==================== CPP =======================");
         s.create_conditional_compilation_map();
 
         s.remove_unused_variables();
@@ -1287,6 +1302,8 @@ impl Analyzer {
 
         toml_content.push_str("[build-dependencies]\n");
         toml_content.push_str("regex = \"*\"\n");
+        toml_content.push_str("pkg_config = \"*\"\n");
+        toml_content.push_str("bindgen = \"*\"\n");
 
         toml_content
     }

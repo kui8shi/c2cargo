@@ -177,7 +177,7 @@ pub(super) enum VarCond {
     MatchAny,      // *
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, bincode::Encode, bincode::Decode)]
 pub(super) enum VoL {
     Var(String),
     Lit(String),

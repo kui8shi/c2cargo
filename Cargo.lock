@@ -217,6 +217,7 @@ dependencies = [
  "itertools",
  "llm",
  "owned_chars",
+ "pkg-config",
  "regex",
  "serde",
  "serde_json",

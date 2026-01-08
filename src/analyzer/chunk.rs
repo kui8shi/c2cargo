@@ -72,6 +72,10 @@ impl Analyzer {
         self.var_scopes.as_ref().unwrap().get(var_name)
     }
 
+    pub(crate) fn get_chunk_id(&self, node_id: NodeId) -> Option<ChunkId> {
+        self.get_node(node_id).and_then(|n| n.info.chunk_id)
+    }
+
     /// Check if any node in a chunk is related to any node within a window of nodes.
     /// Return the index (not NodeId) of the last related window node.
     fn are_nodes_related_with_window(
@@ -218,7 +222,7 @@ impl Analyzer {
             .unwrap()
             .info
             .parent
-            .and_then(|parent| self.get_node(parent).unwrap().info.chunk_id);
+            .and_then(|parent| self.get_chunk_id(parent));
         let range = (
             self.get_node(*nodes.first().unwrap())
                 .unwrap()
@@ -771,6 +775,10 @@ pub(crate) struct FunctionSkelton {
 }
 
 impl Analyzer {
+    pub(crate) fn get_chunk_skeleton(&self, id: ChunkId) -> Option<&FunctionSkelton> {
+        self.chunk_skeletons.as_ref().unwrap().get(&id)
+    }
+
     pub(crate) fn print_chunk_skeleton_signature(&self, id: ChunkId) -> String {
         let sk = self.chunk_skeletons.as_ref().unwrap().get(&id).unwrap();
         let print_mut = |is_mut: bool| -> &'static str {
