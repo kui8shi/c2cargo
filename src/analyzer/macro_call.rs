@@ -414,7 +414,7 @@ impl Analyzer {
                         })
                         .collect::<String>()
                         .to_lowercase();
-                    metadata.package_name = Some(rust_name);
+                    metadata.name = Some(rust_name);
                 }
                 if let Some(version) = macro_call.get_arg_as_literal(1) {
                     metadata.version = Some(version);

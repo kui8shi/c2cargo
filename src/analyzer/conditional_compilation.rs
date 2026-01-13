@@ -53,6 +53,10 @@ pub(super) enum CCMigrationType {
 }
 
 impl Analyzer {
+    pub(crate) fn print_conditional_compilation_map(&self) -> String {
+        serde_json::to_string_pretty(self.conditional_compilation_map.as_ref().unwrap()).unwrap()
+    }
+
     pub(super) fn query_conditional_compilation_migration_policy(
         &self,
         key: &str,
@@ -178,7 +182,6 @@ impl Analyzer {
             subst_to_cpp_map,
             src_incl_map,
         };
-        println!("{}", serde_json::to_string_pretty(&ccm).unwrap());
         self.conditional_compilation_map.replace(ccm);
     }
 

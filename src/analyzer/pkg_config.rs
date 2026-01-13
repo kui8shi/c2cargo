@@ -768,22 +768,37 @@ impl Analyzer {
 
 pub(super) fn get_function_definition_pkg_config() -> &'static str {
     r#"
-fn run_pkg_config(package: &str, min_version: Option<&str>) -> Option<pkg_conig::Library> {
-  let config = if let Some(min) = min_version {
-    pkg_config::Config::new()::at_least_version(min);
-  } else {
-    pkg_config::Config::new();
-  };
-  config.probe(package).ok()?
-}"#
+fn run_pkg_config(package: &str, min_version: Option<&str>) -> Option<(Vec<String>, Vec<String>)> {
+    if let Some(min) = min_version {
+        pkg_config::Config::new()
+            .atleast_version(min)
+            .probe(package)
+            .ok()
+    } else {
+        pkg_config::probe_library(package).ok()
+    }
+    .and_then(|lib| {
+        let cflags = lib.include_paths.iter().map(|path| format!("-I{}", path.display()))
+            .chain(lib.defines.iter().map(|(k, v)| format!("-D{}{}", k, v.clone().map(|s| format!("={}", s)).unwrap_or_default())))
+            .collect();
+        let libs = lib.link_paths.iter().map(|path| format!("-L{}", path.display()))
+            .chain(lib.libs.iter().map(|lib| format!("-l{}", lib)))
+            .chain(lib.ld_args.iter().map(|vals| format!("-Wl,{}", vals.join(","))))
+            .collect();
+        Some((cflags, libs))
+    })
+}
+"#
 }
 
 pub(super) fn get_function_definition_bindgen() -> &'static str {
     r#"
-fn run_bindgen() {
+fn run_bindgen(cflags: &[&str]) {
     let bindings = bindgen::Builder::default()
         // The input header we would like to generate bindings for.
         .header("wrapper.h")
+        // Feed cflags to find dependent headers.
+        .clang_args(cflags)
         // Tell cargo to invalidate the built crate whenever any of the included header files changed.
         .parse_callbacks(Box::new(bindgen::CargoCallbacks::new()))
         // Finish the builder and generate the bindings.
@@ -792,7 +807,7 @@ fn run_bindgen() {
         .expect("Unable to generate bindings");
 
     // Write the bindings to the $OUT_DIR/bindings.rs file.
-    let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
+    let out_path = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     bindings.write_to_file(out_path.join("bindings.rs")).expect("Couldn't write bindings!");
 }
 "#

@@ -9,9 +9,9 @@ use super::chunk::ChunkId;
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub(crate) struct RecordData {
     pub project_info: ProjectAnalysisRecord,
+    pub timing: TimingRecord,
     pub build_options: Vec<BuildOptionAnalysisRecord>,
     pub chunks: Vec<ChunkAnalysisRecord>,
-    pub timing: TimingRecord,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -44,9 +44,10 @@ pub(crate) struct BuildOptionAnalysisRecord {
     pub success: bool,
     pub failure_reason: Option<String>,
     pub llm_cost: Option<f64>,
-    pub analysis_duration: Duration,
+    pub duration: Duration,
     pub value_candidates: Vec<String>,
     pub generated_features: Vec<String>,
+    pub retry_count: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -57,7 +58,7 @@ pub(crate) struct ChunkAnalysisRecord {
     pub success: bool,
     pub failure_reason: Option<String>,
     pub llm_cost: Option<f64>,
-    pub translation_duration: Duration,
+    pub duration: Duration,
     pub retry_count: usize,
 }
 
@@ -199,9 +200,10 @@ impl RecordCollector {
         success: bool,
         failure_reason: Option<String>,
         llm_cost: Option<f64>,
-        analysis_duration: Duration,
+        duration: Duration,
         value_candidates: Vec<String>,
         generated_features: Vec<String>,
+        retry_count: usize,
     ) {
         self.record_data
             .build_options
@@ -210,9 +212,10 @@ impl RecordCollector {
                 success,
                 failure_reason,
                 llm_cost,
-                analysis_duration,
+                duration,
                 value_candidates,
                 generated_features,
+                retry_count,
             });
     }
 
@@ -224,7 +227,7 @@ impl RecordCollector {
         success: bool,
         failure_reason: Option<String>,
         llm_cost: Option<f64>,
-        translation_duration: Duration,
+        duration: Duration,
         retry_count: usize,
     ) {
         self.record_data.chunks.push(ChunkAnalysisRecord {
@@ -234,12 +237,12 @@ impl RecordCollector {
             success,
             failure_reason,
             llm_cost,
-            translation_duration,
+            duration,
             retry_count,
         });
     }
 
-    pub(crate) fn export_json(&self, path: &std::path::Path) -> std::io::Result<()> {
+    pub(crate) fn export_record_json(&self, path: &std::path::Path) -> std::io::Result<()> {
         let json = serde_json::to_string_pretty(&self.record_data)?;
         std::fs::write(path, json)
     }
@@ -252,10 +255,11 @@ impl RecordCollector {
             "option_name",
             "success",
             "failure_reason",
-            "llm_cost",
-            "analysis_duration_ms",
             "value_candidates",
             "generated_features",
+            "llm_cost",
+            "duration_ms",
+            "retry_count",
         ])?;
 
         for record in &self.record_data.build_options {
@@ -263,10 +267,11 @@ impl RecordCollector {
                 record.option_name.clone(),
                 record.success.to_string(),
                 record.failure_reason.clone().unwrap_or_default(),
-                record.llm_cost.map_or_else(String::new, |c| c.to_string()),
-                record.analysis_duration.as_millis().to_string(),
                 record.value_candidates.join(";"),
                 record.generated_features.join(";"),
+                record.llm_cost.map_or_else(String::new, |c| c.to_string()),
+                record.duration.as_millis().to_string(),
+                record.retry_count.to_string(),
             ])?;
         }
 
@@ -285,7 +290,7 @@ impl RecordCollector {
             "success",
             "failure_reason",
             "llm_cost",
-            "translation_duration_ms",
+            "duration_ms",
             "retry_count",
         ])?;
 
@@ -300,7 +305,7 @@ impl RecordCollector {
                 record.success.to_string(),
                 record.failure_reason.clone().unwrap_or_default(),
                 record.llm_cost.map_or_else(String::new, |c| c.to_string()),
-                record.translation_duration.as_millis().to_string(),
+                record.duration.as_millis().to_string(),
                 record.retry_count.to_string(),
             ])?;
         }

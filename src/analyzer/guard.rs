@@ -745,23 +745,25 @@ impl<'a> GuardAnalyzer<'a> {
                                     .take(3)
                                     .tuples()
                                     .collect();
-                            if arch != "*" && os != "*" {
-                                Some(Guard::And(vec![
-                                    Guard::confirmed(Atom::ArchGlob(arch)),
-                                    Guard::confirmed(Atom::OsAbiGlob(os)),
-                                ]))
-                            } else if arch != "*" {
-                                Some(Guard::confirmed(Atom::ArchGlob(arch)))
-                            } else if os != "*" {
-                                Some(Guard::confirmed(Atom::OsAbiGlob(os)))
-                            } else {
+                            if arch == "*" && os == "*" {
                                 Some(Guard::confirmed(Atom::Var(
                                     var.to_owned(),
                                     VarCond::MatchAny,
                                 )))
+                            } else if arch == "*" {
+                                Some(Guard::confirmed(Atom::OsAbiGlob(os)))
+                            } else if os == "*" {
+                                Some(Guard::confirmed(Atom::ArchGlob(arch)))
+                            } else {
+                                Some(Guard::And(vec![
+                                    Guard::confirmed(Atom::ArchGlob(arch)),
+                                    Guard::confirmed(Atom::OsAbiGlob(os)),
+                                ]))
                             }
                         } else if var == "host_cpu" {
                             Some(Guard::confirmed(Atom::ArchGlob(pattern_string)))
+                        } else if var == "host_os" {
+                            Some(Guard::confirmed(Atom::OsAbiGlob(pattern_string)))
                         } else if pattern_string.contains("*")
                             || pattern_string.contains("[")
                             || pattern_string.contains("]")
@@ -935,9 +937,8 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 }
             }
             if let Some(var_name) = as_var(w) {
-                // FIXME: host_os?
                 is_platform_branch = match var_name {
-                    "host" | "host_cpu" => true,
+                    "host" | "host_cpu" | "host_os" => true,
                     _ => false,
                 };
             }
@@ -967,6 +968,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     if self.in_condition && is_match_any {
                         false
                     } else {
+                        // !is_match_any
                         true
                     }
                 }

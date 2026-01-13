@@ -192,6 +192,7 @@ impl Analyzer {
         self.project_info.am_files.extend(files);
         self.extract_source_files();
         self.extract_header_files();
+        self.extract_cflags_var_names();
     }
 
     fn analyze_automake_file(&mut self, path: &Path, mut condition: Vec<AmGuard>) -> AutomakeFile {
@@ -804,6 +805,24 @@ impl Analyzer {
             .h_files
             .extend(internal_headers_without_generated);
         self.project_info.ext_h_files.extend(external_headers);
+    }
+
+    fn extract_cflags_var_names(&mut self) {
+        for (_, am_file) in self.automake.as_ref().unwrap().files.iter() {
+            for target in am_file.libraries.get("lib").iter().flat_map(|v| v.iter()) {
+                if let Some(cflags) = &target.cflags {
+                    self.project_info.cflags_var_names.extend(
+                        cflags
+                            .iter()
+                            .filter_map(|v| match v {
+                                AmValue::Var(var) => Some(var),
+                                _ => None,
+                            })
+                            .map(|v| v.clone()),
+                    );
+                }
+            }
+        }
     }
 }
 

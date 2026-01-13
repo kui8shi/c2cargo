@@ -5,8 +5,16 @@ use llm::{
     chat::{ChatMessage, Usage},
 };
 use serde::{de::DeserializeOwned, Serialize};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::time::sleep;
+
+/// Wrapper struct to return LLM output with metadata for recording
+pub(crate) struct LLMResultWithMeta<O> {
+    pub output: O,
+    pub cost: Option<f64>,
+    pub retry_count: usize,
+    pub duration: Duration,
+}
 
 pub(crate) trait LLMOutput<E>: std::fmt::Debug + Serialize + DeserializeOwned {
     fn validate(&self, evidence: &E) -> Result<(), Vec<String>>;
@@ -28,7 +36,7 @@ pub(crate) trait LLMAnalysis {
     async fn run_llm_analysis<'a, I: Iterator<Item = (&'a Self::Input, &'a Self::Evidence)>>(
         &'a mut self,
         inputs: I,
-    ) -> Vec<Self::Output> {
+    ) -> Vec<LLMResultWithMeta<Self::Output>> {
         futures::stream::iter(
             inputs.map(|(input, evidence)| self.make_api_request_with_retry(input, evidence)),
         )
@@ -38,7 +46,7 @@ pub(crate) trait LLMAnalysis {
                 Ok(analysis) => Some(analysis),
                 Err(e) => {
                     eprintln!("Failed to run LLM analysis: {}", e);
-                    None
+                    std::process::exit(1);
                 }
             }
         })
@@ -91,7 +99,7 @@ pub(crate) trait LLMAnalysis {
         &self,
         input: &Self::Input,
         evidence: &Self::Evidence,
-    ) -> Result<Self::Output, String> {
+    ) -> Result<LLMResultWithMeta<Self::Output>, String> {
         const MAX_RETRIES: usize = 3;
         const RETRY_DELAY_MS: u64 = 5000;
 
@@ -100,6 +108,10 @@ pub(crate) trait LLMAnalysis {
         // Keep last errors and raw JSON to feed back into the next retry
         let mut last_errors: Option<Vec<String>> = None;
         let mut last_raw_json: Option<String> = None;
+
+        // Track metadata for recording
+        let start_time = Instant::now();
+        let mut total_cost: f64 = 0.0;
 
         for attempt in 0..MAX_RETRIES {
             let llm = LLMBuilder::new()
@@ -122,7 +134,8 @@ pub(crate) trait LLMAnalysis {
                     let text = response.text().ok_or("No text in response")?;
                     println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
                     if let Some(usage) = response.usage() {
-                        Self::show_cost(usage);
+                        Self::show_cost(&usage);
+                        total_cost += Self::calculate_cost(&usage);
                     }
 
                     match serde_json::from_str::<Self::Output>(&text) {
@@ -132,7 +145,12 @@ pub(crate) trait LLMAnalysis {
                                 Ok(()) => {
                                     println!("  Validated.");
                                     result.normalize();
-                                    return Ok(result);
+                                    return Ok(LLMResultWithMeta {
+                                        output: result,
+                                        cost: Some(total_cost),
+                                        retry_count: attempt,
+                                        duration: start_time.elapsed(),
+                                    });
                                 }
                                 Err(errs) => {
                                     println!(
@@ -172,7 +190,7 @@ pub(crate) trait LLMAnalysis {
                     }
                 }
                 Err(e) => {
-                    return Err(format!("API request failed: {}", e));
+                    eprintln!("API request failed: {}", e);
                 }
             }
         }
@@ -180,7 +198,7 @@ pub(crate) trait LLMAnalysis {
         unreachable!()
     }
 
-    fn show_cost(usage: Usage) {
+    fn show_cost(usage: &Usage) {
         // Show usage and rough cost estimation
 
         eprintln!(
@@ -188,6 +206,11 @@ pub(crate) trait LLMAnalysis {
             usage.prompt_tokens, usage.completion_tokens, usage.total_tokens
         );
 
+        let cost = Self::calculate_cost(usage);
+        eprintln!("Estimated cost: ${:.6}", cost);
+    }
+
+    fn calculate_cost(usage: &Usage) -> f64 {
         const M: f64 = 1_000_000.;
         // Simple cost estimation (adjust rates to your provider/model)
         let (prompt_rate, completion_rate) = match Self::MODEL {
@@ -196,8 +219,7 @@ pub(crate) trait LLMAnalysis {
             "gpt-5-mini" => (0.25, 2.),
             _ => (0.05, 0.40), // gpt5-nano
         };
-        let cost = (usage.prompt_tokens as f64) / M * prompt_rate
-            + (usage.completion_tokens as f64) / M * completion_rate;
-        eprintln!("Estimated cost: ${:.6}", cost);
+        (usage.prompt_tokens as f64) / M * prompt_rate
+            + (usage.completion_tokens as f64) / M * completion_rate
     }
 }

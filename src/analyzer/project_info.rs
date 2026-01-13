@@ -13,6 +13,7 @@ pub(crate) struct ProjectInfo {
     pub project_dir: PathBuf,
     pub c_files: Vec<WithGuard<PathBuf>>,
     pub h_files: Vec<PathBuf>,
+    pub cflags_var_names: Vec<String>,
     pub ext_h_files: Vec<PathBuf>,
     pub built_files: HashSet<PathBuf>,
     pub generated_files: HashSet<PathBuf>,

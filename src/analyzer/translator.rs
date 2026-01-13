@@ -1,15 +1,18 @@
 use itertools::Itertools;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
 };
 use use_llm::{LLMBasedTranslationEvidence, LLMBasedTranslationInput};
 
+use std::time::Duration;
+
 use crate::{
     analyzer::{
         chunk::ChunkId,
         pkg_config::get_function_definition_bindgen,
+        record::TranslationType,
         translator::{printer::TranslatingPrinter, use_llm::LLMBasedTranslationOutput},
         type_inference::DataType,
         MayM4, ShellCommand,
@@ -21,6 +24,7 @@ use super::{AcWord, Analyzer};
 use autotools_parser::ast::{node::WordFragment, Parameter};
 
 mod printer;
+mod pretranslation;
 mod use_llm;
 
 #[derive(Debug, Clone)]
@@ -33,6 +37,18 @@ struct InlinedTranslationOutput {
 enum ChunkTranslationOutput {
     Inlined(InlinedTranslationOutput),
     LLM(LLMBasedTranslationOutput),
+}
+
+/// Metadata for recording chunk translation results
+#[derive(Debug, Clone)]
+struct ChunkTranslationMeta {
+    chunk_size: usize,
+    translation_type: TranslationType,
+    success: bool,
+    failure_reason: Option<String>,
+    llm_cost: Option<f64>,
+    duration: Duration,
+    retry_count: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -338,6 +354,13 @@ impl Analyzer {
             })
             .join("\n");
 
+        let unused_subst_vars = self.subst_vars.as_ref().unwrap().iter().filter(|var| {
+            self.var_scopes
+                .as_ref()
+                .unwrap()
+                .get(var.as_str())
+                .is_none_or(|scopes| scopes.first().is_none_or(|scope| scope.owner.is_none()))
+        });
         let default_init = self
             .var_scopes
             .as_ref()
@@ -350,16 +373,17 @@ impl Analyzer {
                     .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
             })
             .map(|(var_name, _)| var_name)
+            .chain(unused_subst_vars)
+            .collect::<HashSet<_>>()
+            .into_iter()
             .sorted()
             .map(|name| {
-                dbg!(&name);
                 let data_type = self.get_inferred_type(name);
-                let mutability = if self
-                    .get_scopes(name.as_str())
-                    .unwrap()
-                    .first()
-                    .is_some_and(|scope| !scope.writers.is_empty() || !scope.overwriters.is_empty())
-                {
+                let mutability = if self.get_scopes(name.as_str()).is_some_and(|scopes| {
+                    scopes.first().is_some_and(|scope| {
+                        !scope.writers.is_empty() || !scope.overwriters.is_empty()
+                    })
+                }) {
                     "mut "
                 } else {
                     "    "
@@ -373,23 +397,40 @@ impl Analyzer {
             })
             .join("\n");
         let translated = self.translate_chunks().await;
+
+        // Record each chunk translation
+        for (chunk_id, (_, meta)) in translated.iter() {
+            self.record_collector_mut().add_chunk_record(
+                *chunk_id,
+                meta.chunk_size,
+                meta.translation_type.clone(),
+                meta.success,
+                meta.failure_reason.clone(),
+                meta.llm_cost,
+                meta.duration,
+                meta.retry_count,
+            );
+        }
+
         let main_function_body = self
             .chunks
             .iter()
             .filter(|(_, chunk)| chunk.parent.is_none())
             .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
-            .map(|(chunk_id, _)| match translated.get(&chunk_id).unwrap() {
-                ChunkTranslationOutput::Inlined(res) => {
-                    format!("{tab}{}", res.inline_rust_code.join(&format!("\n{tab}")))
-                }
-                ChunkTranslationOutput::LLM(_) => {
-                    let call_site = self.print_chunk_skeleton_call_site(
-                        chunk_id,
-                        &rust_func_placeholder_name(chunk_id),
-                    );
-                    format!("{tab}{call_site}")
-                }
-            })
+            .map(
+                |(chunk_id, _)| match &translated.get(&chunk_id).unwrap().0 {
+                    ChunkTranslationOutput::Inlined(res) => {
+                        format!("{tab}{}", res.inline_rust_code.join(&format!("\n{tab}")))
+                    }
+                    ChunkTranslationOutput::LLM(_) => {
+                        let call_site = self.print_chunk_skeleton_call_site(
+                            chunk_id,
+                            &rust_func_placeholder_name(chunk_id),
+                        );
+                        format!("{tab}{call_site}")
+                    }
+                },
+            )
             .join("\n");
         let am_cond_to_cfg = {
             let dummy = Default::default();
@@ -435,7 +476,6 @@ impl Analyzer {
             let mut output = Vec::new();
 
             // Output subst variables
-            output.push(format!("{tab}// recording subst vars"));
             if let Some(subst_vars) = &self.subst_vars {
                 for var_name in subst_vars.iter().sorted() {
                     let data_type = self.get_inferred_type(var_name);
@@ -463,12 +503,16 @@ impl Analyzer {
             output.join("\n")
         };
 
-        let bindgen = if self
+        let bindgen = if !self
             .pkg_config_analyzer()
             .pkg_check_modules_calls
             .is_empty()
         {
-            format!("{tab}run_bindgen();")
+            let mut cflags_var_names = self.project_info.cflags_var_names.clone();
+            if cflags_var_names.is_empty() {
+                cflags_var_names.push("CFLAGS".into());
+            }
+            get_bindgen_callsite(&tab, &cflags_var_names)
         } else {
             Default::default()
         };
@@ -477,10 +521,12 @@ impl Analyzer {
             .chunks
             .iter()
             .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
-            .filter_map(|(chunk_id, _)| match translated.get(&chunk_id).unwrap() {
-                ChunkTranslationOutput::Inlined(res) => None,
-                ChunkTranslationOutput::LLM(res) => Some(res),
-            })
+            .filter_map(
+                |(chunk_id, _)| match &translated.get(&chunk_id).unwrap().0 {
+                    ChunkTranslationOutput::Inlined(_) => None,
+                    ChunkTranslationOutput::LLM(res) => Some(res),
+                },
+            )
             .map(|res| {
                 self.construct_rust_func_definition(
                     res.id,
@@ -501,7 +547,9 @@ impl Analyzer {
     }
 
     /// Translate chunks using inlined translation or LLMs
-    async fn translate_chunks(&self) -> HashMap<ChunkId, ChunkTranslationOutput> {
+    async fn translate_chunks(
+        &self,
+    ) -> HashMap<ChunkId, (ChunkTranslationOutput, ChunkTranslationMeta)> {
         let mut results = HashMap::new();
         let mut user = use_llm::LLMUser::new();
         let mut inputs = Vec::new();
@@ -521,20 +569,62 @@ impl Analyzer {
             })
             .collect();
 
-        results.extend(
-            inlined_translations
-                .iter()
-                .map(|(chunk_id, inlined_translation)| {
-                    (
-                        *chunk_id,
-                        ChunkTranslationOutput::Inlined(inlined_translation.clone()),
-                    )
-                }),
-        );
+        // Add inlined translations with metadata
+        for (chunk_id, inlined_translation) in inlined_translations.iter() {
+            let chunk_size = self
+                .chunks
+                .get(*chunk_id)
+                .map(|c| c.nodes.len())
+                .unwrap_or(0);
+            let meta = ChunkTranslationMeta {
+                chunk_size,
+                translation_type: TranslationType::Inlined,
+                success: true,
+                failure_reason: None,
+                llm_cost: None,
+                duration: Duration::ZERO,
+                retry_count: 0,
+            };
+            results.insert(
+                *chunk_id,
+                (
+                    ChunkTranslationOutput::Inlined(inlined_translation.clone()),
+                    meta,
+                ),
+            );
+        }
+
+        // Track LLM metadata separately since cache may not have it
+        let mut llm_metadata: HashMap<ChunkId, ChunkTranslationMeta> = HashMap::new();
 
         let llm_translations = if let Some(cached) = self.load_translation_cache() {
+            // For cached translations, we don't have the original metadata
+            for (chunk_id, _) in cached.iter() {
+                let chunk_size = self
+                    .chunks
+                    .get(*chunk_id)
+                    .map(|c| c.nodes.len())
+                    .unwrap_or(0);
+                llm_metadata.insert(
+                    *chunk_id,
+                    ChunkTranslationMeta {
+                        chunk_size,
+                        translation_type: TranslationType::LLMAssisted,
+                        success: true,
+                        failure_reason: None,
+                        llm_cost: None,           // Not available from cache
+                        duration: Duration::ZERO, // Not available from cache
+                        retry_count: 0,           // Not available from cache
+                    },
+                );
+            }
             cached
         } else {
+            if use_llm::get_rust_check_dir().exists() {
+                // clean directory
+                std::fs::remove_dir_all(use_llm::get_rust_check_dir())
+                    .expect("Failed to remove a directory");
+            }
             // Process all chunks: inlined ones go directly to results, complex ones go to LLM
             for (chunk_id, _) in self.chunks.iter() {
                 if inlined_translations.contains_key(&chunk_id) {
@@ -591,18 +681,40 @@ impl Analyzer {
                     id: chunk_id,
                     rust_snippets: printer.get_translated_fragments(),
                     predefinition: use_llm::get_predefinition(&required_funcs),
+                    features: printer.get_cargo_features(),
                     header,
                     footer,
                 };
                 inputs.push((input, evidence));
             }
 
-            let mut res = user
+            let llm_results = user
                 .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
-                .await
-                .into_iter()
-                .map(|res| (res.id, res))
-                .collect::<HashMap<_, _>>();
+                .await;
+
+            // Process results and collect metadata
+            let mut res = HashMap::new();
+            for result in llm_results {
+                let chunk_id = result.output.id;
+                let chunk_size = self
+                    .chunks
+                    .get(chunk_id)
+                    .map(|c| c.nodes.len())
+                    .unwrap_or(0);
+                llm_metadata.insert(
+                    chunk_id,
+                    ChunkTranslationMeta {
+                        chunk_size,
+                        translation_type: TranslationType::LLMAssisted,
+                        success: true,
+                        failure_reason: None,
+                        llm_cost: result.cost,
+                        duration: result.duration,
+                        retry_count: result.retry_count,
+                    },
+                );
+                res.insert(chunk_id, result.output);
+            }
 
             // Handle LLM function name dependencies
             for chunk_id in res.keys().cloned().collect::<Vec<_>>() {
@@ -619,7 +731,23 @@ impl Analyzer {
 
         // Convert LLM results to ChunkTranslationResult and merge with inlined results
         for (chunk_id, llm_output) in llm_translations {
-            results.insert(chunk_id, ChunkTranslationOutput::LLM(llm_output));
+            let meta = llm_metadata.remove(&chunk_id).unwrap_or_else(|| {
+                let chunk_size = self
+                    .chunks
+                    .get(chunk_id)
+                    .map(|c| c.nodes.len())
+                    .unwrap_or(0);
+                ChunkTranslationMeta {
+                    chunk_size,
+                    translation_type: TranslationType::LLMAssisted,
+                    success: true,
+                    failure_reason: None,
+                    llm_cost: None,
+                    duration: Duration::ZERO,
+                    retry_count: 0,
+                }
+            });
+            results.insert(chunk_id, (ChunkTranslationOutput::LLM(llm_output), meta));
         }
 
         results
@@ -727,8 +855,7 @@ impl Analyzer {
 impl Analyzer {
     pub(crate) fn print_build_rs(&self, res: &TranslationResult, record_path: &Path) -> String {
         let tab = " ".repeat(TranslatingPrinter::get_tab_width());
-        let predefinition =
-            self.get_predefinition(record_path.to_str().unwrap_or("/tmp/record.txt"));
+        let predefinition = self.get_predefinition_with_recording(record_path.to_str().unwrap());
         let build_rs = format!(
             "#![allow(non_snake_case)]
 
@@ -745,7 +872,7 @@ fn main() {{
 {}
 {tab}// bindgen
 {}
-{tab}// record
+{tab}// record subst vars for evaluation
 {}
 }}
 {}",
@@ -754,20 +881,23 @@ fn main() {{
             &res.default_init,
             &res.main_function_body,
             &res.am_cond_to_cfg,
-            &res.recording,
             &res.bindgen,
+            &res.recording,
             &res.chunk_funcs.join("\n\n")
         );
         build_rs
     }
 
-    fn get_predefinition(&self, record_path: &str) -> String {
+    fn get_predefinition_with_recording(&self, record_path: &str) -> String {
         use_llm::get_predefinition(&[
             "module_regex",
             "module_pkg_config",
             "write_file",
             "define_cfg_with_record",
             "define_env_with_record",
+            "check_header",
+            "check_library",
+            "check_decl",
             "pkg_config",
         ]) + &get_function_definition_record(record_path)
             + &get_function_definition_bindgen()
@@ -783,5 +913,20 @@ fn record(category: &str, key: &str, value: &str) {{
   write_file(&path, &line)
 }}"#,
         record_path
+    )
+}
+
+fn get_bindgen_callsite<S: std::fmt::Display>(tab: &str, cflags_var_names: &[S]) -> String {
+    format!(
+        r#"{tab}let mut cflags = Vec::new();
+{tab}for v in [{}] {{
+{tab}{tab}cflags.extend(v.iter().map(|flag| flag.split_whitespace()).flatten());
+{tab}}}
+{tab}run_bindgen(&cflags);
+"#,
+        cflags_var_names
+            .iter()
+            .map(|var_name| format!("&{}", var_name))
+            .join(", ")
     )
 }

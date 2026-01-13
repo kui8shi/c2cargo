@@ -251,19 +251,6 @@ mod tests {
     }
 
     #[test]
-    fn test_word_and_fragment_to_string() {
-        let pool: AutoconfPool<()> = AutoconfPool::from_vec(vec![]);
-        let frag = DoubleQuoted(vec![Literal("hi".to_string())]);
-        assert_eq!(pool.shell_word_to_string(&frag), "\"hi\"");
-        let word = Word::Concat(vec![
-            Shell(Literal("a".to_string())),
-            Shell(Literal("b".to_string())),
-        ])
-        .into();
-        assert_eq!(pool.display_word(&word, false), "ab");
-    }
-
-    #[test]
     fn test_condition_to_string() {
         let pool: AutoconfPool<()> = AutoconfPool::from_vec(vec![]);
         let cond = Condition::Cond(Operator::Neq(

@@ -670,7 +670,7 @@ pub struct Analyzer {
 /// Project metadata extracted from AC_INIT macro
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ProjectMetadata {
-    pub package_name: Option<String>,
+    pub name: Option<String>,
     pub version: Option<String>,
     pub bug_report: Option<String>,
     pub tarname: Option<String>,
@@ -1202,7 +1202,7 @@ impl Analyzer {
 
         if let Some(meta) = metadata {
             // Package name
-            let name = meta.package_name.as_deref().unwrap_or("unnamed-project");
+            let name = meta.name.as_deref().unwrap_or("unnamed-project");
             toml_content.push_str(&format!("name = \"{}\"\n", name));
 
             // Version
@@ -1302,7 +1302,7 @@ impl Analyzer {
 
         toml_content.push_str("[build-dependencies]\n");
         toml_content.push_str("regex = \"*\"\n");
-        toml_content.push_str("pkg_config = \"*\"\n");
+        toml_content.push_str("pkg-config = \"*\"\n");
         toml_content.push_str("bindgen = \"*\"\n");
 
         toml_content

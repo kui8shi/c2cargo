@@ -87,6 +87,8 @@ pub enum TypeHint {
     /// used in `rm` or `cat` commands.
     /// or, appear in redirection
     UsedAsPath,
+    /// used in expr command
+    UsedAsExpr,
 }
 
 use TypeHint::*;
@@ -119,9 +121,16 @@ impl Analyzer {
     }
 
     pub(crate) fn get_inferred_type(&self, name: &str) -> DataType {
-        self.get_type_inference_result(name)
+        if let Some(inferred) = self
+            .get_type_inference_result(name)
             .map(|(_, data_type)| data_type.clone())
-            .unwrap_or(DataType::Literal)
+        {
+            inferred
+        } else if let Some(known) = has_known_type(name) {
+            known
+        } else {
+            DataType::Literal
+        }
     }
 
     fn convert_guards_for_numeric_boolean(&mut self) {
@@ -190,6 +199,9 @@ impl<'a> TypeInferrer<'a> {
     }
 
     fn infer_type(&mut self, name: &str) -> DataType {
+        if let Some(ty) = has_known_type(name) {
+            return ty;
+        }
         use DataType::*;
         if let Some(t) = self.types.get(name) {
             return t.clone();
@@ -235,6 +247,9 @@ impl<'a> TypeInferrer<'a> {
         }
         if hints.contains(&UsedAsPath) {
             inferred = Path;
+        }
+        if hints.contains(&UsedAsExpr) {
+            inferred = Integer;
         }
         // if hints.contains(&CanBeEmpty) {
         //     if !matches!(inferred, List(_)) {
@@ -350,6 +365,13 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                     for arg in &cmd_words[1..] {
                         if let Some(name) = as_shell(arg).and_then(as_var) {
                             self.add_type_hint(name, UsedAsPath);
+                        }
+                    }
+                }
+                if matches!(lit, "expr") {
+                    for arg in &cmd_words[1..] {
+                        if let Some(name) = as_shell(arg).and_then(as_var) {
+                            self.add_type_hint(name, UsedAsExpr);
                         }
                     }
                 }
@@ -495,4 +517,51 @@ fn convert_guard_numeric_boolean(guard: &Guard, bool_vars: &HashSet<&str>) -> Gu
                 .collect(),
         ),
     }
+}
+
+lazy_static::lazy_static! {
+    /// Predefined m4/autoconf macros
+    static ref KNOWN_TYPES: HashMap<&'static str, DataType> = known_types();
+}
+
+fn known_types() -> HashMap<&'static str, DataType> {
+    HashMap::from([
+        ("LIBS", DataType::List(Box::new(DataType::Literal))),
+        ("LDFLAGS", DataType::List(Box::new(DataType::Literal))),
+        ("CPPFLAGS", DataType::List(Box::new(DataType::Literal))),
+        ("CFLAGS", DataType::List(Box::new(DataType::Literal))),
+        ("enable_shared", DataType::Boolean),
+        ("prefix", DataType::Path),
+        ("exec_prefix", DataType::Path),
+        ("srcdir", DataType::Path),
+        ("bindir", DataType::Path),
+        ("sbindir", DataType::Path),
+        ("libexecdir", DataType::Path),
+        ("datarootdir", DataType::Path),
+        ("datadir", DataType::Path),
+        ("sysconfdir", DataType::Path),
+        ("sharedstatdir", DataType::Path),
+        ("localstatedir", DataType::Path),
+        ("localstatedir", DataType::Path),
+        ("runstatedir", DataType::Path),
+        ("includedir", DataType::Path),
+        ("oldincludedir", DataType::Path),
+        ("docdir", DataType::Path),
+        ("infodir", DataType::Path),
+        ("htmldir", DataType::Path),
+        ("dvidir", DataType::Path),
+        ("pdfdir", DataType::Path),
+        ("psdir", DataType::Path),
+        ("libdir", DataType::Path),
+        ("localedir", DataType::Path),
+        ("mandir", DataType::Path),
+        ("cross_compiling", DataType::Boolean),
+        ("top_srcdir", DataType::Path),
+        ("abs_top_srcdir", DataType::Path),
+        ("EXEEXT", DataType::Literal),
+    ])
+}
+
+fn has_known_type(name: &str) -> Option<DataType> {
+    KNOWN_TYPES.get(name).cloned()
 }

@@ -5,16 +5,7 @@ use std::{
 
 use super::InlinedTranslationOutput;
 use crate::analyzer::{
-    as_literal, as_shell,
-    build_option::FeatureState,
-    chunk::ChunkId,
-    conditional_compilation::CCMigrationType,
-    dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue},
-    guard::{Atom, VarCond, VoL},
-    location::Location,
-    type_inference::DataType,
-    variable::is_eval,
-    Analyzer, BlockId, Guard, NodeInfo,
+    as_literal, as_shell, build_option::FeatureState, chunk::ChunkId, conditional_compilation::CCMigrationType, dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue}, guard::{Atom, VarCond, VoL}, location::Location, translator::pretranslation::get_function_body_ac_init, type_inference::DataType, variable::is_eval, Analyzer, BlockId, Guard, NodeInfo
 };
 use autotools_parser::{
     ast::{
@@ -53,6 +44,8 @@ pub(crate) struct TranslatingPrinter<'a> {
     formatted_vars: RefCell<Vec<String>>,
     /// Appeared chunks when embedding
     embedded_chunks: RefCell<HashMap<ChunkId, String>>,
+    /// Appeared features
+    cargo_features: RefCell<Vec<String>>,
     /// Simple translations available for inlining
     inlined_translations: &'a HashMap<ChunkId, InlinedTranslationOutput>,
     /// Whether we have found a usage of redirection.
@@ -63,6 +56,12 @@ pub(crate) struct TranslatingPrinter<'a> {
     found_define: Cell<bool>,
     /// Whether we have found a usage of pkg_config
     found_pkg_config: Cell<bool>,
+    /// Whether we have found a usage of AC_CHECK_HEADER/AC_CHECK_HEADERS
+    found_check_header: Cell<bool>,
+    /// Whether we have found a usage of AC_CHECK_LIB/AC_SEARCH_LIBS
+    found_check_library: Cell<bool>,
+    /// Whether we have found a usage of AC_CHECK_DECL/AC_CHECK_DECLS
+    found_check_decl: Cell<bool>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -104,11 +103,15 @@ impl<'a> TranslatingPrinter<'a> {
             in_format_string: Cell::new(false),
             formatted_vars: RefCell::new(Vec::new()),
             embedded_chunks: RefCell::new(HashMap::new()),
+            cargo_features: RefCell::new(Vec::new()),
             inlined_translations,
             found_redirection: Cell::new(false),
             found_sed: Cell::new(false),
             found_define: Cell::new(false),
             found_pkg_config: Cell::new(false),
+            found_check_header: Cell::new(false),
+            found_check_library: Cell::new(false),
+            found_check_decl: Cell::new(false),
         }
     }
 
@@ -128,6 +131,10 @@ impl<'a> TranslatingPrinter<'a> {
         self.translated_fragments.borrow().clone()
     }
 
+    pub fn get_cargo_features(&self) -> Vec<String> {
+        self.cargo_features.borrow().clone()
+    }
+
     fn enclose_by_rust_tags(&self, fragment: String, record: bool) -> String {
         if self.full_rust_mode {
             // early return
@@ -142,19 +149,32 @@ impl<'a> TranslatingPrinter<'a> {
 
     pub fn get_rust_funcs_required_for_chunk(&self) -> Vec<&str> {
         let mut ret = Vec::new();
-        if self.found_redirection.get() {
-            ret.push("write_file");
-        }
+        // module imports
         if self.found_sed.get() {
             ret.push("module_regex");
+        }
+        if self.found_pkg_config.get() {
+            ret.push("module_pkg_config");
+        }
+        // function definitions
+        if self.found_redirection.get() {
+            ret.push("write_file");
         }
         if self.found_define.get() {
             ret.push("define_cfg");
             ret.push("define_env");
         }
         if self.found_pkg_config.get() {
-            ret.push("module_pkg_config");
             ret.push("pkg_config");
+        }
+        if self.found_check_header.get() {
+            ret.push("check_header");
+        }
+        if self.found_check_library.get() {
+            ret.push("check_library");
+        }
+        if self.found_check_decl.get() {
+            ret.push("check_decl");
         }
         ret
     }
@@ -366,7 +386,10 @@ impl<'a> TranslatingPrinter<'a> {
 
     fn display_cfg_atom(&self, atom: &Atom, negated: bool) -> String {
         use Atom::*;
-        let as_feature = |feature: &str| format!("feature = \"{}\"", feature);
+        let as_feature = |feature: &str| {
+            self.cargo_features.borrow_mut().push(feature.into());
+            format!("feature = \"{}\"", feature)
+        };
         let may_negate = |str: String, negated: bool| {
             if negated {
                 format!("not({})", str)
@@ -631,7 +654,7 @@ impl<'a> TranslatingPrinter<'a> {
             }
             "{}" => Some(format!("&{}", vars_in_value.first().unwrap())),
             _ => Some(format!(
-                "&format!({:?}, {})",
+                "&format!(\"{}\", {})",
                 value_fstr,
                 vars_in_value
                     .iter()
@@ -692,6 +715,154 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
+    fn display_ac_check_headers(
+        &self,
+        indent_level: usize,
+        headers: &[String],
+        action_if_found: Option<&Vec<NodeId>>,
+        action_if_not_found: Option<&Vec<NodeId>>,
+        includes: &str,
+        defines: &[String],
+    ) -> String {
+        self.found_check_header.replace(true);
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        let hint = if defines.is_empty() {
+            Default::default()
+        } else {
+            format!(
+                "{tab}# NOTE: You MUST insert: {} somewhere below\n",
+                defines.join(", ")
+            )
+        };
+        let mut ret = hint;
+        for header in headers {
+            let check_header = self.enclose_by_rust_tags(
+                format!("check_header(\"{}\", {:?}, &CPPFLAGS)", header, includes),
+                false,
+            );
+            let action_if_found = action_if_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+            let action_if_not_found = action_if_not_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+
+            ret.push_str(&format!(
+                "{tab}if {} {{\n{}{tab}}}{}",
+                check_header,
+                action_if_found,
+                if !action_if_not_found.is_empty() {
+                    format!(" else {{\n{action_if_not_found}{tab}}}")
+                } else {
+                    "".into()
+                },
+            ));
+        }
+        ret
+    }
+
+    fn display_ac_check_libraries(
+        &self,
+        indent_level: usize,
+        func: &str,
+        libs: &[String],
+        other_libs: &[String],
+        action_if_found: Option<&Vec<NodeId>>,
+        action_if_not_found: Option<&Vec<NodeId>>,
+        try_std: bool,
+        defines: &[String],
+    ) -> String {
+        self.found_check_library.replace(true);
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
+
+        let mut ret = String::new();
+        let func_call = format!(
+            "check_library(\"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
+            func, libs, other_libs, try_std
+        );
+        self.record_translated_fragment(func_call.clone());
+        let check_library =
+            self.enclose_by_rust_tags(format!("let Ok(opt) = {}", func_call), false);
+        let append_libs = self.enclose_by_rust_tags("opt.map(|lib| LIBS.push(l))".into(), false);
+        let action_if_found = action_if_found
+            .map(|cmds| self.display_body(cmds, indent_level + 1))
+            .unwrap_or_default();
+        let action_if_not_found = action_if_not_found
+            .map(|cmds| self.display_body(cmds, indent_level + 1))
+            .unwrap_or_default();
+        let defines = if defines.is_empty() {
+            Default::default()
+        } else {
+            format!(
+                "\n{tab_1}{}",
+                defines
+                    .iter()
+                    .map(|def| self.enclose_by_rust_tags(def.into(), true))
+                    .join("\n")
+            )
+        };
+        ret.push_str(&format!(
+            "{tab}if {} {{\n{tab_1}{}{}\n{}{tab}}}{}",
+            check_library,
+            append_libs,
+            defines,
+            action_if_found,
+            if action_if_not_found.is_empty() {
+                Default::default()
+            } else {
+                format!(" else {{\n{action_if_not_found}{tab}}}")
+            },
+        ));
+        ret
+    }
+
+    fn display_ac_check_decls(
+        &self,
+        indent_level: usize,
+        symbols: &[String],
+        action_if_found: Option<&Vec<NodeId>>,
+        action_if_not_found: Option<&Vec<NodeId>>,
+        includes: &str,
+        defines: &[String],
+    ) -> String {
+        self.found_check_decl.replace(true);
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
+        let hint = if defines.is_empty() {
+            Default::default()
+        } else {
+            format!(
+                "{tab}# NOTE: You MUST insert: {} somewhere below\n",
+                defines.join(", ")
+            )
+        };
+        let mut ret = hint;
+        for symbol in symbols {
+            let check_decl = self.enclose_by_rust_tags(
+                format!("check_decl(\"{}\", {:?}, &CPPFLAGS)", symbol, includes),
+                false,
+            );
+            let action_if_found = action_if_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+            let action_if_not_found = action_if_not_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+            ret.push_str(&format!(
+                "{tab}if {} {{\n{}{tab}}}{}",
+                check_decl,
+                action_if_found,
+                if action_if_not_found.is_empty() {
+                    Default::default()
+                } else {
+                    format!(" else {{\n{action_if_not_found}{tab}}}")
+                },
+            ));
+        }
+        ret
+    }
+
     fn display_pkg_check_modules(&self, node_id: NodeId, indent_level: usize) -> String {
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
@@ -711,6 +882,7 @@ impl<'a> TranslatingPrinter<'a> {
 
         for (name, min_version) in &info.packages {
             if let Some(sys_info) = pkg_config.get_system_package_info(name) {
+                self.found_pkg_config.replace(true);
                 let min_version_str = match min_version {
                     None => "None".into(),
                     Some(VoL::Var(var)) => format!("Some(&{})", var),
@@ -718,7 +890,7 @@ impl<'a> TranslatingPrinter<'a> {
                 };
                 let run_pkg_config = self.enclose_by_rust_tags(
                     format!(
-                        "let Some(lib) = run_pkg_config(\"{}\", {})",
+                        "let Some((cflags, libs)) = run_pkg_config(\"{}\", {})",
                         name, min_version_str
                     ),
                     true,
@@ -729,15 +901,15 @@ impl<'a> TranslatingPrinter<'a> {
                         "{}.push(\"-D{}\".to_string());",
                         info.cflags_var_name, &sys_info.include_guard_macro_name
                     ),
-                    true,
+                    false,
                 );
                 let add_pkg_cflags = self.enclose_by_rust_tags(
-                    format!("{}.extend(&lib.cflags);", info.cflags_var_name),
-                    true,
+                    format!("{}.extend(cflags.iter().cloned());", info.cflags_var_name),
+                    false,
                 );
                 let add_pkg_libs = self.enclose_by_rust_tags(
-                    format!("{}.extend(&lib.cflags);", info.libs_var_name),
-                    true,
+                    format!("{}.extend(libs.iter().cloned());", info.libs_var_name),
+                    false,
                 );
 
                 let action_if_found = self.display_body(&info.action_if_found, indent_level + 1);
@@ -1089,6 +1261,9 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 })
                 .join("\n");
         }
+        // Track required define calls for hint comment
+        let mut required_defines: Vec<String> = Vec::new();
+
         if let Some(effects) = &m4_macro.effects {
             if let Some(shell_vars) = &effects.shell_vars {
                 for var in shell_vars {
@@ -1100,15 +1275,52 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     }
                 }
             }
+            // Process CPP symbols from macro effects
+            if let Some(cpp_symbols) = &effects.cpp_symbols {
+                for cpp in cpp_symbols {
+                    if let Some(policy) = self
+                        .analyzer
+                        .query_conditional_compilation_migration_policy(&cpp.name)
+                    {
+                        match &policy.mig_type {
+                            CCMigrationType::Cfg => {
+                                let key = policy.key.as_ref().unwrap();
+                                self.record_translated_fragment(key.into());
+                                self.found_define.replace(true);
+                                required_defines
+                                    .push(format!("define_cfg({:?}, {:?})", key, policy.value));
+                            }
+                            CCMigrationType::Env => {
+                                let key = policy.key.as_ref().unwrap();
+                                self.record_translated_fragment(key.into());
+                                self.found_define.replace(true);
+                                required_defines.push(format!(
+                                    "define_env({:?}, {:?})",
+                                    key,
+                                    policy.value.clone().unwrap_or_default()
+                                ));
+                            }
+                            _ => (),
+                        }
+                    }
+                }
+            }
         }
+
         match m4_macro.name.as_str() {
+            "AC_INIT" => {
+                format!(
+                    "{tab}# Sample translation of AC_INIT\n{}",
+                    get_function_body_ac_init()
+                )
+            }
             "AC_CACHE_CHECK" => {
                 let description = m4_macro.get_arg_as_literal(0).unwrap();
                 let body = m4_macro.get_arg_as_cmd(2).unwrap();
-                return format!(
+                format!(
                     "{tab}# Check {description}\n{}",
                     self.display_body(&body, indent_level)
-                );
+                )
             }
             "AC_DEFINE" => {
                 let key = match m4_macro.args.get(0).unwrap() {
@@ -1118,7 +1330,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 };
                 let value = m4_macro.get_arg_as_literal(1).unwrap_or_default();
                 let ret = self.display_ac_define(&key, &value);
-                return format!("{tab}{}", self.enclose_by_rust_tags(ret, false));
+                format!("{tab}{}", self.enclose_by_rust_tags(ret, false))
             }
             "AC_DEFINE_UNQUOTED" => {
                 let key = match m4_macro.args.get(0).unwrap() {
@@ -1133,14 +1345,161 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     _ => unreachable!(),
                 };
                 let ret = self.display_ac_define_unquoted(key, value);
-                return format!("{tab}{}", self.enclose_by_rust_tags(ret, false));
+                format!("{tab}{}", self.enclose_by_rust_tags(ret, false))
             }
-            "PKG_CHECK_MODULES" => {
-                return self.display_pkg_check_modules(node_id, indent_level);
+            "AC_CHECK_HEADER" => {
+                let header = match m4_macro.args.get(0).unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone().into(),
+                    _ => unreachable!(),
+                };
+                let action_if_found = m4_macro.get_arg_as_cmd(1);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(2);
+                let includes = m4_macro.get_arg_as_program(3).unwrap_or_default();
+                self.display_ac_check_headers(
+                    indent_level,
+                    &[header],
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &includes,
+                    &required_defines,
+                )
             }
-            _ => (),
+            "AC_CHECK_HEADERS" => {
+                let headers = m4_macro
+                    .get_arg_as_array(0)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                let action_if_found = m4_macro.get_arg_as_cmd(1);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(2);
+                let includes = m4_macro.get_arg_as_program(3).unwrap_or_default();
+                self.display_ac_check_headers(
+                    indent_level,
+                    &headers,
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &includes,
+                    &required_defines,
+                )
+            }
+            "AC_CHECK_LIB" => {
+                let library = match m4_macro.args.get(0).unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone().into(),
+                    _ => unreachable!(),
+                };
+                let function = match m4_macro.args.get(1).unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone().into(),
+                    _ => unreachable!(),
+                };
+                let action_if_found = m4_macro.get_arg_as_cmd(2);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(3);
+                let other_libs = m4_macro
+                    .get_arg_as_array(4)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                self.display_ac_check_libraries(
+                    indent_level,
+                    &function,
+                    &[library],
+                    &other_libs,
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    false,
+                    &required_defines,
+                )
+            }
+            "AC_SEARCH_LIBS" => {
+                let function = match m4_macro.args.get(0).unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone().into(),
+                    _ => unreachable!(),
+                };
+                let libraries = m4_macro
+                    .get_arg_as_array(1)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                let action_if_found = m4_macro.get_arg_as_cmd(2);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(3);
+                let other_libs = m4_macro
+                    .get_arg_as_array(4)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                self.display_ac_check_libraries(
+                    indent_level,
+                    &function,
+                    &libraries,
+                    &other_libs,
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    true,
+                    &required_defines,
+                )
+            }
+            "AC_CHECK_DECL" => {
+                let symbol = match m4_macro.args.get(0).unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone().into(),
+                    _ => unreachable!(),
+                };
+                let action_if_found = m4_macro.get_arg_as_cmd(1);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(2);
+                let includes = m4_macro.get_arg_as_program(3).unwrap_or_default();
+                self.display_ac_check_decls(
+                    indent_level,
+                    &[symbol],
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &includes,
+                    &required_defines,
+                )
+            }
+            "AC_CHECK_DECLS" => {
+                let symbols = m4_macro
+                    .get_arg_as_array(0)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                let action_if_found = m4_macro.get_arg_as_cmd(1);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(2);
+                let includes = m4_macro.get_arg_as_program(3).unwrap_or_default();
+                self.display_ac_check_decls(
+                    indent_level,
+                    &symbols,
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &includes,
+                    &required_defines,
+                )
+            }
+            "PKG_CHECK_MODULES" => self.display_pkg_check_modules(node_id, indent_level),
+            _ => {
+                // Add hint comment for LLM guidance when CPP symbols need define_cfg/define_env
+                let macro_output = self.m4_macro_to_string(m4_macro, indent_level);
+                if !required_defines.is_empty() {
+                    for req_def in &required_defines {
+                        self.record_translated_fragment(req_def.clone());
+                    }
+                    let hint = format!(
+                        "{tab}# NOTE: You MUST include: {}\n",
+                        required_defines.join(", ")
+                    );
+                    format!("{}{}", hint, macro_output)
+                } else {
+                    macro_output
+                }
+            }
         }
-        self.m4_macro_to_string(m4_macro, indent_level)
     }
 }
 

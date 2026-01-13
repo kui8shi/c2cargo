@@ -9,7 +9,7 @@ use super::{
     guard::{Atom, Guard, VarCond, VoL},
     Analyzer, M4Macro, NodeId,
 };
-use crate::utils::llm_analysis::LLMAnalysis;
+use crate::utils::llm_analysis::{LLMAnalysis, LLMResultWithMeta};
 use crate::{
     analyzer::build_option::use_llm::BuildOptionLLMAnalysisResult, utils::glob::glob_enumerate,
 };
@@ -133,26 +133,48 @@ impl Analyzer {
             .unwrap()
             .cargo_features
             .replace(Default::default());
-        for res in results {
-            if res.representatives.iter().sorted().eq(["no", "yes"]) {
-                println!("{}: YesNo", res.option_name);
+        for result in results {
+            let output = result.output;
+            if output.representatives.iter().sorted().eq(["no", "yes"]) {
+                println!("{}: YesNo", output.option_name);
             } else {
-                println!("{}: {:?}", res.option_name, res.representatives);
+                println!("{}: {:?}", output.option_name, output.representatives);
             }
-            if let Some(aliases) = &res.aliases {
-                println!("{}: Aliases: {:?}", res.option_name, aliases);
+            if let Some(aliases) = &output.aliases {
+                println!("{}: Aliases: {:?}", output.option_name, aliases);
             }
 
             // Generate Cargo features
-            let features = self.construct_cargo_features(&res);
-            println!("Cargo features for {}: {:?}", res.option_name, features);
+            let features = self.construct_cargo_features(&output);
+            println!("Cargo features for {}: {:?}", output.option_name, features);
+
+            // Get value_candidates from the build option
+            let value_candidates = self
+                .build_option_info()
+                .build_options
+                .get(&output.option_name)
+                .map(|b| b.value_candidates.clone())
+                .unwrap_or_default();
+
+            // Record the build option analysis result
+            self.record_collector_mut().add_build_option_record(
+                output.option_name.clone(),
+                true, // success
+                None, // failure_reason
+                result.cost,
+                result.duration,
+                value_candidates,
+                features.iter().map(|f| f.name.clone()).collect(),
+                result.retry_count,
+            );
+
             self.build_option_info
                 .as_mut()
                 .unwrap()
                 .cargo_features
                 .as_mut()
                 .unwrap()
-                .insert(res.option_name.clone(), features);
+                .insert(output.option_name.clone(), features);
         }
         self.apply_non_empty_property_of_cargo_features();
 

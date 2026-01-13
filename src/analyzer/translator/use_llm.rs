@@ -1,12 +1,16 @@
 //! LLM analysis module for argument inalysis
-use std::collections::HashMap;
+use std::{collections::HashMap, path::Path};
 
 use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    analyzer::pkg_config::get_function_definition_pkg_config,
+    analyzer::{pkg_config::get_function_definition_pkg_config, translator::pretranslation::get_function_definition_check_decl},
     utils::llm_analysis::{LLMAnalysis, LLMOutput},
+};
+
+use super::pretranslation::{
+    get_function_definition_check_header, get_function_definition_check_library,
 };
 
 use itertools::Itertools;
@@ -95,6 +99,9 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
   record("env", key, value);
 }"#,
         ),
+        ("check_header", get_function_definition_check_header()),
+        ("check_library", get_function_definition_check_library()),
+        ("check_decl", get_function_definition_check_decl()),
         ("pkg_config", get_function_definition_pkg_config()),
     ]);
     std::iter::once("default_modules")
@@ -108,8 +115,13 @@ pub(super) struct LLMBasedTranslationEvidence {
     pub id: usize,
     pub rust_snippets: Vec<String>,
     pub predefinition: String,
+    pub features: Vec<String>,
     pub header: String,
     pub footer: String,
+}
+
+pub(super) fn get_rust_check_dir() -> &'static Path {
+    Path::new("/tmp/rust_check")
 }
 
 impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
@@ -144,7 +156,7 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
                 evidence.footer
             );
             println!("{}", &rust_func);
-            let check_dir = std::path::Path::new("/tmp/rust_check");
+            let check_dir = get_rust_check_dir();
             let src_dir = check_dir.join("src");
 
             // Create project directory if it doesn't exist
@@ -153,14 +165,25 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
             // Create Cargo.toml if it doesn't exist
             let cargo_toml_path = check_dir.join("Cargo.toml");
             if !cargo_toml_path.exists() {
-                let cargo_toml = r#"[package]
+                let cargo_toml = format!(
+                    r#"[package]
 name = "rust_check"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-regex = "1.0"
-"#;
+regex = "*"
+pkg-config = "*"
+
+[features]
+{}
+"#,
+                    evidence
+                        .features
+                        .iter()
+                        .map(|f| format!("{} = []", f))
+                        .join("\n")
+                );
                 std::fs::write(&cargo_toml_path, cargo_toml).expect("writing Cargo.toml");
             }
 
@@ -223,18 +246,26 @@ regex = "1.0"
 }
 
 fn detect_no_op_patterns(src: &str, values: &Vec<String>) -> Result<(), Vec<String>> {
+    let sanitize = |s: &str| {
+        s.replace("{}", "")
+            .replace("(", "\\(")
+            .replace(")", "\\)")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+    };
     let mut err = Vec::new();
     let patterns = [r"let\s+_[A-Za-z0-9_]*\s*=\s*_[A-Za-z0-9_]*".into()]
         .into_iter()
         .chain(
             values
                 .iter()
-                .map(|val| format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", val.replace("{}", ""))),
+                .map(|val| format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", sanitize(val))),
         );
     for pat in patterns {
-        let re = regex::Regex::new(&pat).unwrap();
-        for mat in re.find_iter(src) {
-            err.push(format!("Evil cheating found: {}.", mat.as_str()));
+        if let Ok(re) = regex::Regex::new(&pat) {
+            for mat in re.find_iter(src) {
+                err.push(format!("Evil cheating found: {}.", mat.as_str()));
+            }
         }
     }
     if err.is_empty() {
