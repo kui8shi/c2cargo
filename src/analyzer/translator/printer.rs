@@ -5,7 +5,17 @@ use std::{
 
 use super::InlinedTranslationOutput;
 use crate::analyzer::{
-    as_literal, as_shell, build_option::FeatureState, chunk::ChunkId, conditional_compilation::CCMigrationType, dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue}, guard::{Atom, VarCond, VoL}, location::Location, translator::pretranslation::get_function_body_ac_init, type_inference::DataType, variable::is_eval, Analyzer, BlockId, Guard, NodeInfo
+    as_literal, as_shell,
+    build_option::FeatureState,
+    chunk::ChunkId,
+    conditional_compilation::CCMigrationType,
+    dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue},
+    guard::{Atom, VarCond, VoL},
+    location::Location,
+    translator::pretranslation::get_function_body_ac_init,
+    type_inference::DataType,
+    variable::is_eval,
+    Analyzer, BlockId, Guard, NodeInfo,
 };
 use autotools_parser::{
     ast::{
@@ -675,6 +685,7 @@ impl<'a> TranslatingPrinter<'a> {
                 Some(f) => format!("Some({f})"),
                 None => "None".into(),
             };
+            self.found_define.replace(true);
             let define_call = format!("define_cfg({}, {})", format_key, format_value);
             self.record_translated_fragment(define_call.clone());
             define_call

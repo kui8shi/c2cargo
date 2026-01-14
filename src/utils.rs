@@ -24,7 +24,7 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
 
     for component in components {
         match component {
-            Component::CurDir => {}, // Ignore '.'
+            Component::CurDir => {} // Ignore '.'
             Component::ParentDir => {
                 ret.pop(); // Resolve '..' by popping the last element
             }
@@ -34,7 +34,7 @@ pub(crate) fn normalize_path(path: &Path) -> PathBuf {
             Component::RootDir => {
                 ret.push(component.as_os_str());
             }
-            Component::Prefix(_) => unreachable!()
+            Component::Prefix(_) => unreachable!(),
         }
     }
     ret

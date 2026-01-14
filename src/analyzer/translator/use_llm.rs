@@ -132,6 +132,7 @@ pub(super) struct LLMBasedTranslationEvidence {
     pub features: Vec<String>,
     pub header: String,
     pub footer: String,
+    pub depending_func_defs: String,
 }
 
 pub(super) fn get_rust_check_dir() -> &'static Path {
@@ -162,8 +163,9 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
         // compile check
         {
             let rust_func = format!(
-                "{}\nfn main() {{}}\nfn {}{}{}{}",
+                "{}\nfn main() {{}}\n{}\nfn {}{}{}{}",
                 evidence.predefinition,
+                evidence.depending_func_defs,
                 self.rust_func_name,
                 evidence.header,
                 self.rust_func_body,

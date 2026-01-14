@@ -120,7 +120,7 @@ fn check_decl(symbol: &str, prelude: &str, cppflags: &Vec<String>) -> bool {
 }
 
 pub(super) fn get_function_body_ac_init() -> &'static str {
-r#"  {
+    r#"  {
     // Package Metadata from Cargo
     let package_name = env!("CARGO_PKG_NAME");
     let package_version = env!("CARGO_PKG_VERSION");

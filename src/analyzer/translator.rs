@@ -709,7 +709,53 @@ impl Analyzer {
                 });
                 let skeleton = format!("{}{{body}}{}", header, footer);
                 let required_funcs = printer.get_rust_funcs_required_for_chunk();
-                depending_funcs.insert(chunk_id, printer.get_embedded_chunks());
+                let embedded_chunks = printer.get_embedded_chunks();
+                depending_funcs.insert(chunk_id, embedded_chunks.clone());
+
+                // Generate dummy function definitions for all embedded/depending chunks
+                let depending_func_defs = embedded_chunks
+                    .iter()
+                    .filter(|(_, placeholder)| *placeholder != "inlined")
+                    .map(|(dep_chunk_id, placeholder)| {
+                        // Get skeleton to access return variables
+                        let sk = self.get_chunk_skeleton(*dep_chunk_id).unwrap();
+
+                        // Collect all declarations: declared + return_to_bind + return_to_overwrite
+                        let declarations: Vec<String> = sk
+                            .declared
+                            .iter()
+                            .chain(sk.return_to_bind.iter())
+                            .map(|(is_mut, name, ty)| {
+                                let mutability = if *is_mut { "mut " } else { "" };
+                                format!(
+                                    "let {}{}: {} = Default::default();",
+                                    mutability,
+                                    name,
+                                    ty.print()
+                                )
+                            })
+                            .chain(sk.return_to_overwrite.iter().map(|(name, ty)| {
+                                format!("let {}: {} = Default::default();", name, ty.print())
+                            }))
+                            .collect();
+
+                        format!(
+                            "fn {}{} {{\n  {}\n}}",
+                            placeholder,
+                            self.print_chunk_skeleton_signature(*dep_chunk_id),
+                            declarations
+                                .into_iter()
+                                .chain(std::iter::once(
+                                    self.print_chunk_skeleton_body_footer(*dep_chunk_id)
+                                ))
+                                .filter(|s| !s.is_empty())
+                                .collect::<Vec<_>>()
+                                .join("\n  ")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n");
+
                 let input = LLMBasedTranslationInput::new(
                     chunk_id,
                     script,
@@ -723,6 +769,7 @@ impl Analyzer {
                     features: printer.get_cargo_features(),
                     header,
                     footer,
+                    depending_func_defs,
                 };
                 inputs.push((input, evidence));
             }
