@@ -377,7 +377,7 @@ impl<'a> TranslatingPrinter<'a> {
                         .map(|s| format!("\"{s}\".to_string()"))
                         .join(", ")
                 );
-                self.enclose_by_rust_tags(list, true)
+                self.enclose_by_rust_tags(list, false)
             }
             _ => value.to_owned(),
         };

@@ -1,5 +1,5 @@
-//! An example of how to use the DependencyAnalyzer to analyze variable dependencies
-//! in a shell script or autoconf file.
+//! Analysis module for c2cargo.
+//! Handles the main analysis pipeline for converting autoconf to Cargo.
 
 use crate::analyzer::{record::AnalysisParameters, Analyzer, AnalyzerOptions};
 use std::path::Path;
@@ -7,22 +7,25 @@ use std::path::Path;
 pub(crate) async fn analysis(
     configure_path: &Path,
     output_dir: &Path,
+    options: Option<AnalyzerOptions>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Read file contents
     let configure_path = std::path::absolute(configure_path).unwrap();
     let output_dir = std::path::absolute(output_dir).unwrap();
 
-    let options = AnalyzerOptions::default();
-    // Initialize the lexer and parser
-    let mut analyzer = Analyzer::new(&configure_path, Some(options));
+    // Use provided options or default
+    let opts = options.unwrap_or_default();
 
-    // Initialize record collector
+    // Initialize record collector with parameters matching the options
     let parameters = AnalysisParameters {
-        chunk_window_size: Some(2),
-        disrespect_assignment: false,
-        type_inference_enabled: true,
+        chunk_window_size: Some(opts.chunk_window_size),
+        disrespect_assignment: opts.chunk_disrespect_assignment,
+        type_inference_enabled: opts.type_inference,
         build_option_analysis_enabled: true,
     };
+
+    // Initialize the lexer and parser with options
+    let mut analyzer = Analyzer::new(&configure_path, Some(opts));
     analyzer.init_record_collector(parameters);
     analyzer.record_collector_mut().start_timing();
 
@@ -82,12 +85,18 @@ pub(crate) async fn analysis(
     analyzer
         .record_collector()
         .export_project_info_json(&record_dir.join("project_info.json"))?;
-    analyzer
-        .record_collector()
-        .export_build_options_csv(&record_dir.join("build_options.csv"))?;
-    analyzer
-        .record_collector()
-        .export_chunks_csv(&record_dir.join("chunks.csv"))?;
+    // Only export build options CSV if cache wasn't used (otherwise data is incomplete)
+    if !analyzer.record_collector().build_option_cache_used {
+        analyzer
+            .record_collector()
+            .export_build_options_csv(&record_dir.join("build_options.csv"))?;
+    }
+    // Only export chunks CSV if cache wasn't used (otherwise data has placeholder values)
+    if !analyzer.record_collector().translation_cache_used {
+        analyzer
+            .record_collector()
+            .export_chunks_csv(&record_dir.join("chunks.csv"))?;
+    }
 
     println!("Evaluation data exported to: {}", record_dir.display());
 

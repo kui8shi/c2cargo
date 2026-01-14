@@ -98,6 +98,8 @@ pub(crate) struct RecordCollector {
     pub record_data: RecordData,
     timing_start: Option<Instant>,
     stage_start: Option<Instant>,
+    pub build_option_cache_used: bool,
+    pub translation_cache_used: bool,
 }
 
 impl RecordCollector {
@@ -169,6 +171,14 @@ impl RecordCollector {
         if let Some(start) = self.timing_start.take() {
             self.record_data.timing.total_duration_ms = start.elapsed().as_millis() as u64;
         }
+    }
+
+    pub(crate) fn set_build_option_cache_used(&mut self) {
+        self.build_option_cache_used = true;
+    }
+
+    pub(crate) fn set_translation_cache_used(&mut self) {
+        self.translation_cache_used = true;
     }
 
     pub(crate) fn collect_project_info(

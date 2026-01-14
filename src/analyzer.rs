@@ -562,9 +562,6 @@ impl NodeInfo {
 /// Configuration options for the analyzer
 #[derive(Debug)]
 pub struct AnalyzerOptions {
-    /// Threshold for flattening large command structures.
-    /// Commands with more than this many nodes will be flattened.
-    pub flatten_threshold: usize,
     /// Whether to use cached build option analysis results.
     /// When enabled, LLM analysis results are cached to disk and reused.
     pub use_build_option_cache: bool,
@@ -574,6 +571,15 @@ pub struct AnalyzerOptions {
     /// Whether to use cached pkg-config analysis results.
     /// When enabled, system package manager results are cached to disk and reused.
     pub use_pkg_config_cache: bool,
+    /// Threshold for flattening large command structures.
+    /// Commands with more than this many nodes will be flattened.
+    pub flatten_threshold: usize,
+    /// Whether to use type inference results.
+    pub type_inference: bool,
+    /// Whether to use type inference results.
+    pub chunk_window_size: usize,
+    /// Whether to use type inference results.
+    pub chunk_disrespect_assignment: bool,
 }
 
 impl Default for AnalyzerOptions {
@@ -583,6 +589,9 @@ impl Default for AnalyzerOptions {
             use_build_option_cache: true,
             use_translation_cache: true,
             use_pkg_config_cache: true,
+            type_inference: true,
+            chunk_window_size: 2,
+            chunk_disrespect_assignment: false,
         }
     }
 }
@@ -793,7 +802,10 @@ impl Analyzer {
         s.aggregate_input_vars();
 
         // Construct chunks & cut var scopes
-        s.construct_chunks(Some(2), false);
+        s.construct_chunks(
+            Some(s.options.chunk_window_size),
+            s.options.chunk_disrespect_assignment,
+        );
         s.cut_variable_scopes_chunkwise();
 
         s.aggregate_env_vars();

@@ -5,7 +5,10 @@ use bincode::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    analyzer::{pkg_config::get_function_definition_pkg_config, translator::pretranslation::get_function_definition_check_decl},
+    analyzer::{
+        pkg_config::get_function_definition_pkg_config,
+        translator::pretranslation::get_function_definition_check_decl,
+    },
     utils::llm_analysis::{LLMAnalysis, LLMOutput},
 };
 
@@ -47,7 +50,14 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
     let predefinitions = HashMap::from([
         (
             "default_modules",
-            "use std::{fs::{self, OpenOptions}, io::Write, path::{Path, PathBuf}};",
+            r#"
+use std::{
+    fs::{self, OpenOptions},
+    io::Write,
+    path::{Path, PathBuf},
+    collections::HashMap,
+};
+"#,
         ),
         ("module_regex", "use regex;"),
         ("module_pkg_config", "use pkg_config;"),
@@ -350,9 +360,12 @@ Input format:
 
 7. **Output Requirements**
    - Output exactly one minified JSON object:
-     - `"id"`: same as input
-     - `"rust_func_name"`: concise imperative name (no meta words like “translate” or “chunk”)
-     - `"rust_func_body"`: the full Rust function body (no signature, no comments)
+     - "id": same as input
+     - "rust_func_name": concise imperative name (no meta words like “translate” or “chunk”)
+     - "rust_func_body": the full Rust function body.
+        - Do not include the final return expression or the closing return tuple.
+        - Do not include the outermost function braces `{}`.
+        - The output must only contain the internal logic (statements) that precedes the final return.
    - The code must compile when inserted into the skeleton.
    - No placeholders or dummy `if cfg!(...) {}` branches.
 

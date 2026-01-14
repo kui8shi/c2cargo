@@ -398,7 +398,12 @@ impl Analyzer {
                 )
             })
             .join("\n");
-        let translated = self.translate_chunks().await;
+        let (translated, translation_cache_used) = self.translate_chunks().await;
+
+        // Mark if translation cache was used
+        if translation_cache_used {
+            self.record_collector_mut().set_translation_cache_used();
+        }
 
         // Record each chunk translation
         for (chunk_id, (_, meta)) in translated.iter() {
@@ -575,10 +580,15 @@ impl Analyzer {
     }
 
     /// Translate chunks using inlined translation or LLMs
+    /// Returns (translations, cache_used) where cache_used is true if translation cache was hit
     async fn translate_chunks(
         &self,
-    ) -> HashMap<ChunkId, (ChunkTranslationOutput, ChunkTranslationMeta)> {
+    ) -> (
+        HashMap<ChunkId, (ChunkTranslationOutput, ChunkTranslationMeta)>,
+        bool,
+    ) {
         let mut results = HashMap::new();
+        let mut cache_used = false;
         let mut user = use_llm::LLMUser::new();
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
@@ -627,6 +637,7 @@ impl Analyzer {
 
         let llm_translations = if let Some(cached) = self.load_translation_cache() {
             // For cached translations, we don't have the original metadata
+            cache_used = true;
             for (chunk_id, _) in cached.iter() {
                 let chunk_size = self
                     .chunks
@@ -778,7 +789,7 @@ impl Analyzer {
             results.insert(chunk_id, (ChunkTranslationOutput::LLM(llm_output), meta));
         }
 
-        results
+        (results, cache_used)
     }
 
     fn construct_rust_func_definition(

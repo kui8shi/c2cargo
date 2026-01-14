@@ -107,6 +107,7 @@ impl Analyzer {
         if self.options.use_build_option_cache {
             if let Some(cached_features) = self.load_build_option_cache() {
                 println!("Using cached build option analysis results");
+                self.record_collector_mut().set_build_option_cache_used();
                 self.build_option_info
                     .as_mut()
                     .unwrap()

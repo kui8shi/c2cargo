@@ -110,7 +110,10 @@ impl Analyzer {
         &self,
         var_name: &str,
     ) -> Option<&(HashSet<TypeHint>, DataType)> {
-        self.inferred_types.as_ref().unwrap().get(var_name)
+        self.inferred_types
+            .as_ref()
+            .map(|types| types.get(var_name))
+            .flatten()
     }
 
     /// run type inference
@@ -121,13 +124,17 @@ impl Analyzer {
     }
 
     pub(crate) fn get_inferred_type(&self, name: &str) -> DataType {
-        if let Some(inferred) = self
-            .get_type_inference_result(name)
-            .map(|(_, data_type)| data_type.clone())
-        {
-            inferred
-        } else if let Some(known) = has_known_type(name) {
-            known
+        if self.options.type_inference {
+            if let Some(inferred) = self
+                .get_type_inference_result(name)
+                .map(|(_, data_type)| data_type.clone())
+            {
+                inferred
+            } else if let Some(known) = has_known_type(name) {
+                known
+            } else {
+                DataType::Literal
+            }
         } else {
             DataType::Literal
         }
