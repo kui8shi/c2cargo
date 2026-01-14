@@ -16,11 +16,12 @@ use autotools_parser::{
     lexer::Lexer,
     parse::automake::AutomakeParser,
 };
+use itertools::Itertools;
 use regex::{Captures, Regex};
 use slab::Slab;
 
 use crate::utils::enumerate::enumerate_combinations;
-use crate::utils::{is_c_extension, is_h_extension};
+use crate::utils::{is_c_extension, is_h_extension, normalize_path};
 
 use super::Guard;
 
@@ -196,8 +197,7 @@ impl Analyzer {
     }
 
     fn analyze_automake_file(&mut self, path: &Path, mut condition: Vec<AmGuard>) -> AutomakeFile {
-        let path =
-            std::fs::canonicalize(path).unwrap_or_else(|_| panic!("Unable to find {:?}", path));
+        let path = std::fs::canonicalize(path).expect(&format!("Unable to find {:?}", path));
         let project_dir = self.project_info.project_dir.clone();
         let contents = load_automake_file(&path, &project_dir);
         let lexer = Lexer::new(contents.chars());
@@ -782,6 +782,8 @@ impl Analyzer {
                     .map(|automake_file| automake_file.include_paths.iter().map(|p| p.as_path()))
                     .flatten(),
             )
+            .map(|path| normalize_path(path))
+            .unique()
             .collect::<Vec<_>>();
         let (internal_headers, other_headers) = get_included_headers(&c_files, &include_paths);
         let internal_headers_without_generated = internal_headers
@@ -791,6 +793,8 @@ impl Analyzer {
                     .iter()
                     .all(|dir| !will_be_generated.contains(&dir.join(p)))
             })
+            .map(|path| normalize_path(&path))
+            .unique()
             .collect::<Vec<_>>();
         let external_headers = other_headers
             .into_iter()
@@ -826,51 +830,10 @@ impl Analyzer {
     }
 }
 
-// /// Get a unique set of included headers.
-// fn get_included_headers(file_path: &Path, base_dir: &Path) -> HashSet<PathBuf> {
-//     // Execute compiler and capture stdout. -MG allows missing headers.
-//     let output = Command::new("cc")
-//         .args([file_path.to_str().unwrap(), "-MG", "-MM", "-Ibuild"])
-//         .current_dir(base_dir)
-//         .output();
-//
-//     let Ok(out) = output else {
-//         return HashSet::new();
-//     };
-//     if !out.status.success() {
-//         return HashSet::new();
-//     };
-//
-//     let Ok(stdout_str) = std::str::from_utf8(&out.stdout) else {
-//         return HashSet::new();
-//     };
-//
-//     let mut headers = HashSet::new();
-//
-//     for line in stdout_str.lines() {
-//         let clean_line = line.trim_end_matches('\\').trim();
-//
-//         for part in clean_line.split_whitespace() {
-//             if !part.contains(':') && part != file_path {
-//                 let header_file = PathBuf::from(part);
-//                 if base_dir.join(&header_file).exists() {
-//                     headers.insert(header_file);
-//                 } else if let Some(parent) = file_path.parent() {
-//                     if parent.join(&header_file).exists() {
-//                         headers.insert(parent.join(&header_file));
-//                     }
-//                 }
-//             }
-//         }
-//     }
-//
-//     headers
-// }
-
 /// Recursively scans files to find included headers using Regex.
 fn get_included_headers(
     file_paths: &[&Path],
-    include_paths: &[&Path],
+    include_paths: &Vec<PathBuf>,
 ) -> (HashSet<PathBuf>, HashSet<PathBuf>) {
     // Regex pattern to capture include directives.
     // Matches: Start of line -> # -> include -> " or < -> filename -> " or >
@@ -884,13 +847,16 @@ fn get_included_headers(
 
     // Initialize the queue with the entry point files.
     for path in file_paths {
-        if let Some(path) = include_paths.iter().find_map(|dir| {
-            let full = dir.join(&path);
-            full.exists().then_some(full)
-        }) {
-            // We clone into the queue to track traversal.
-            queue.push_back((*path).to_owned());
-            visited.insert((*path).to_owned());
+        let p = normalize_path(path);
+        if p.exists() {
+            if let Some(path) = include_paths.iter().find_map(|dir| {
+                let full = dir.join(&p);
+                full.exists().then_some(full)
+            }) {
+                // We clone into the queue to track traversal.
+                queue.push_back((*path).to_owned());
+                visited.insert((*path).to_owned());
+            }
         }
     }
 

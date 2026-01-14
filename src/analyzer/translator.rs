@@ -11,6 +11,7 @@ use std::time::Duration;
 use crate::{
     analyzer::{
         chunk::ChunkId,
+        conditional_compilation::CCMigrationType,
         pkg_config::get_function_definition_bindgen,
         record::TranslationType,
         translator::{printer::TranslatingPrinter, use_llm::LLMBasedTranslationOutput},
@@ -23,8 +24,8 @@ use crate::{
 use super::{AcWord, Analyzer};
 use autotools_parser::ast::{node::WordFragment, Parameter};
 
-mod printer;
 mod pretranslation;
+mod printer;
 mod use_llm;
 
 #[derive(Debug, Clone)]
@@ -56,7 +57,8 @@ pub(crate) struct TranslationResult {
     env_init: String,
     default_init: String,
     main_function_body: String,
-    am_cond_to_cfg: String,
+    subst_to_cpps: String,
+    src_incl_conds: String,
     recording: String,
     bindgen: String,
     chunk_funcs: Vec<String>,
@@ -432,7 +434,33 @@ impl Analyzer {
                 },
             )
             .join("\n");
-        let am_cond_to_cfg = {
+
+        let subst_to_cpps = {
+            self.conditional_compilation_map
+                .as_ref()
+                .unwrap()
+                .subst_to_cpp_map
+                .iter()
+                .sorted_by_key(|(k, _)| (*k).clone())
+                .map(|(key, policy)| match &policy.mig_type {
+                    CCMigrationType::Cfg => format!(
+                        "{tab}if {} {{\n{tab}{tab}define_cfg({:?}, None);\n{tab}}}",
+                        key,
+                        policy.key.as_ref().unwrap()
+                    ),
+                    CCMigrationType::Env => {
+                        format!(
+                            "{tab}define_env({:?}, &{});",
+                            policy.key.as_ref().unwrap(),
+                            key
+                        )
+                    }
+                    _ => unreachable!(),
+                })
+                .join("\n")
+        };
+
+        let src_incl_conds = {
             let dummy = Default::default();
             let printer = TranslatingPrinter::new(self, &dummy, true);
 
@@ -460,12 +488,11 @@ impl Analyzer {
                         .am_cond_to_guard
                         .get(&cond.am_conditional_name)
                         .unwrap();
-                    let cargo_instruction = format!("\"cargo::rustc-cfg={}\"", cond.cfg_key);
-                    let print_line = format!("println!({});", cargo_instruction);
+                    let define_cfg = format!("define_cfg({:?}, None);", cond.cfg_key);
                     format!(
                         "{tab}if {} {{\n{tab}{tab}{}\n{tab}}}",
                         printer.display_guard(&guard),
-                        print_line
+                        define_cfg
                     )
                 })
                 .join("\n")
@@ -539,7 +566,8 @@ impl Analyzer {
             env_init,
             default_init,
             main_function_body,
-            am_cond_to_cfg,
+            subst_to_cpps,
+            src_incl_conds,
             recording,
             bindgen,
             chunk_funcs,
@@ -861,6 +889,7 @@ impl Analyzer {
 
 // predefinition
 {}
+
 fn main() {{
 {tab}// import environmental variables
 {}
@@ -868,19 +897,24 @@ fn main() {{
 {}
 {tab}// translated fragments
 {}
-{tab}// export cfg
+{tab}// export cfg/env via subst
+{}
+{tab}// export cfg for am conditionals
 {}
 {tab}// bindgen
 {}
 {tab}// record subst vars for evaluation
 {}
 }}
+
+// chunk functions
 {}",
             &predefinition,
             &res.env_init,
             &res.default_init,
             &res.main_function_body,
-            &res.am_cond_to_cfg,
+            &res.subst_to_cpps,
+            &res.src_incl_conds,
             &res.bindgen,
             &res.recording,
             &res.chunk_funcs.join("\n\n")
@@ -900,6 +934,7 @@ fn main() {{
             "check_decl",
             "pkg_config",
         ]) + &get_function_definition_record(record_path)
+            + "\n"
             + &get_function_definition_bindgen()
     }
 }
@@ -908,8 +943,11 @@ fn get_function_definition_record(record_path: &str) -> String {
     format!(
         r#"
 fn record(category: &str, key: &str, value: &str) {{
-  let line = format!("{{}}:{{}}={{}}\n", category, key, value);
   let path = PathBuf::from("{}");
+  if !path.exists() {{
+    write_file(&path, "category,key,value");
+  }}
+  let line = format!("{{}},{{}},\"{{}}\"", category, key, value.trim());
   write_file(&path, &line)
 }}"#,
         record_path

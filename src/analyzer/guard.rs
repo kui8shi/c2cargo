@@ -968,8 +968,8 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                     if self.in_condition && is_match_any {
                         false
                     } else {
-                        // !is_match_any
-                        true
+                        //true
+                        !is_match_any
                     }
                 }
             } else {

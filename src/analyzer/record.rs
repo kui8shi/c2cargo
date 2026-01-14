@@ -242,8 +242,8 @@ impl RecordCollector {
         });
     }
 
-    pub(crate) fn export_record_json(&self, path: &std::path::Path) -> std::io::Result<()> {
-        let json = serde_json::to_string_pretty(&self.record_data)?;
+    pub(crate) fn export_project_info_json(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let json = serde_json::to_string_pretty(&self.record_data.project_info)?;
         std::fs::write(path, json)
     }
 

@@ -319,7 +319,7 @@ fn parse_ac_subst_header(
                 Some(subst_value) => {
                     if detect_value_usage(&symbol_name, source_contents) {
                         results.push(ACSubstVarToCPPSymbol::Subst(subst_value, symbol_name));
-                    } else {
+                    } else if source_contents.iter().any(|src| src.contains(&symbol_name)) {
                         results.push(ACSubstVarToCPPSymbol::Condition(subst_value, symbol_name));
                     }
                 }

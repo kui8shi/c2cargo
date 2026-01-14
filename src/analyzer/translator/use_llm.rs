@@ -53,7 +53,8 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
         ("module_pkg_config", "use pkg_config;"),
         (
             "write_file",
-            r#"fn write_file(path: &Path, content: &str) {
+            r#"
+fn write_file(path: &Path, content: &str) {
   let mut f = OpenOptions::new()
     .create(true)
     .append(true)
@@ -64,7 +65,8 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
         ),
         (
             "define_cfg",
-            r#"fn define_cfg(key: &str, value: Option<&str>) {
+            r#"
+fn define_cfg(key: &str, value: Option<&str>) {
   println!("cargo:rustc-check-cfg=cfg({})", key);
   if let Some(value) = value {
     println!("cargo:rustc-cfg={}={}", key, value);
@@ -81,7 +83,8 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
         ),
         (
             "define_cfg_with_record",
-            r#"fn define_cfg(key: &str, value: Option<&str>) {
+            r#"
+fn define_cfg(key: &str, value: Option<&str>) {
   println!("cargo:rustc-check-cfg=cfg({})", key);
   if let Some(value) = value {
     println!("cargo:rustc-cfg={}={}", key, value);
@@ -94,7 +97,8 @@ pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
         ),
         (
             "define_env_with_record",
-            r#"fn define_env(key: &str, value: &str) {
+            r#"
+fn define_env(key: &str, value: &str) {
   println!("cargo:rustc-env={}={}", key, value);
   record("env", key, value);
 }"#,

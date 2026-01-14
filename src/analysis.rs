@@ -15,8 +15,6 @@ pub(crate) async fn analysis(
     let options = AnalyzerOptions::default();
     // Initialize the lexer and parser
     let mut analyzer = Analyzer::new(&configure_path, Some(options));
-    analyzer.debug_print_chunks();
-    return Ok(());
 
     // Initialize record collector
     let parameters = AnalysisParameters {
@@ -83,7 +81,7 @@ pub(crate) async fn analysis(
 
     analyzer
         .record_collector()
-        .export_record_json(&record_dir.join("record.json"))?;
+        .export_project_info_json(&record_dir.join("project_info.json"))?;
     analyzer
         .record_collector()
         .export_build_options_csv(&record_dir.join("build_options.csv"))?;
@@ -93,7 +91,7 @@ pub(crate) async fn analysis(
 
     println!("Evaluation data exported to: {}", record_dir.display());
 
-    let record_path = record_dir.join("record.txt");
+    let record_path = record_dir.join("record.csv");
 
     let crate_dir = output_dir.join(&project_name);
     std::process::Command::new("cargo")
