@@ -44,8 +44,11 @@ impl Chain {
 
 #[derive(Debug, PartialEq, Eq, Default, Clone, Encode, Decode)]
 pub(crate) struct DividedVariable {
+    /// a map from eval location to division info
     pub eval_locs: HashMap<Location, IdentifierDivision>,
+    /// set of updated location
     pub def_locs: HashSet<Location>,
+    /// set of used location
     pub use_locs: HashSet<Location>,
 }
 
@@ -491,14 +494,14 @@ impl Analyzer {
             match cmd.clone() {
                 MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) if lhs == name => {
                     let ifs = self.current_internal_field_separator(&def_loc);
-                    let vals = self.vsa_inspect_word(&rhs, &def_loc, ifs);
+                    let vals = self.vsa_inspect_word(&rhs, def_loc.order_reset(), ifs);
                     let is_rhs_concrete =
                         vals.is_empty() || vals.iter().all(|v| matches!(v, ValueExpr::Lit(_)));
                     let found_dominant_initialization = is_rhs_concrete
                         && matches!(
                             cmp_guards(
-                                &self.guard_of_location(&def_loc),
-                                &self.guard_of_location(loc)
+                                &self.get_guards(def_loc.node_id),
+                                &self.get_guards(loc.node_id)
                             ),
                             Some(Ordering::Less | Ordering::Equal)
                         );
@@ -517,7 +520,7 @@ impl Analyzer {
                 }) if var == name => {
                     let ifs = self.current_internal_field_separator(&def_loc);
                     for word in words {
-                        let vals = self.vsa_inspect_word(&word, &def_loc, ifs);
+                        let vals = self.vsa_inspect_word(&word, def_loc.order_reset(), ifs);
                         for val in vals {
                             match val {
                                 ValueExpr::Lit(lit) => {
@@ -543,18 +546,20 @@ impl Analyzer {
     pub(crate) fn vsa_inspect_word(
         &self,
         word: &AcWord,
-        loc: &Location,
+        mut loc: Location,
         internal_field_separator: Option<char>,
     ) -> Vec<ValueExpr> {
         let mut values = Vec::new();
         match &word.0 {
-            Word::Single(word) => {
-                values.extend(self.vsa_inspect_word_fragment(word, loc, internal_field_separator))
-            }
+            Word::Single(word) => values.extend(self.vsa_inspect_word_fragment(
+                word,
+                &mut loc,
+                internal_field_separator,
+            )),
             Word::Concat(words) => {
                 let mut current_word = Vec::new();
                 for w in words.iter() {
-                    let v = self.vsa_inspect_word_fragment(w, loc, internal_field_separator);
+                    let v = self.vsa_inspect_word_fragment(w, &mut loc, internal_field_separator);
                     if v.is_empty() {
                         emit_word(&mut current_word, &mut values);
                     } else {
@@ -571,7 +576,7 @@ impl Analyzer {
     fn vsa_inspect_word_fragment(
         &self,
         word: &AcWordFragment,
-        loc: &Location,
+        loc: &mut Location,
         internal_field_separator: Option<char>,
     ) -> Vec<ValueExpr> {
         let mut values = Vec::new();
@@ -616,6 +621,7 @@ impl Analyzer {
                         }
                         WordFragment::Param(Parameter::Var(var)) => {
                             current_word.push(ValueExpr::Var(var.to_owned(), loc.clone()));
+                            loc.order_in_expr += 1;
                         }
                         WordFragment::Escaped(s) if s == "\n" => (),
                         w if internal_field_separator.is_some_and(|ifs| {
@@ -632,6 +638,7 @@ impl Analyzer {
             }
             Shell(WordFragment::Param(Parameter::Var(var))) => {
                 values.push(ValueExpr::Var(var.to_owned(), loc.clone()));
+                loc.order_in_expr += 1;
             }
             Shell(WordFragment::Subst(subst)) => match &**subst {
                 ParameterSubstitution::Command(cmds) => {
@@ -646,7 +653,11 @@ impl Analyzer {
                     values.push(ValueExpr::Shell(
                         shell_strings.join("\n"),
                         uses.keys()
-                            .map(|name| ValueExpr::Var(name.to_owned(), loc.clone()))
+                            .map(|name| {
+                                let expr = ValueExpr::Var(name.to_owned(), loc.clone());
+                                loc.order_in_expr += 1;
+                                expr
+                            })
                             .collect(),
                     ));
                 }
@@ -664,14 +675,14 @@ impl Analyzer {
         values
     }
 
-    fn current_internal_field_separator(&self, loc: &Location) -> Option<char> {
+    pub(crate) fn current_internal_field_separator(&self, loc: &Location) -> Option<char> {
         let mut internal_field_separator = None;
         if let Some(ifs_loc) = self.get_dominant_definition("IFS", loc.node_id) {
             if let MayM4::Shell(ShellCommand::Assignment(_, rhs)) =
                 &self.get_node(ifs_loc.node_id).unwrap().cmd.0
             {
                 if let ValueExpr::Lit(lit) =
-                    self.vsa_inspect_word(rhs, &ifs_loc, None).pop().unwrap()
+                    self.vsa_inspect_word(rhs, ifs_loc.clone(), None).pop().unwrap()
                 {
                     internal_field_separator.replace(lit.chars().next().unwrap());
                 }

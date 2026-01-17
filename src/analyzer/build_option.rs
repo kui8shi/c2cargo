@@ -120,12 +120,14 @@ impl Analyzer {
 
         // conduct llm analysis
         let mut user = use_llm::LLMUser::new();
+        let max_retries = 3;
         let results = user
             .run_llm_analysis(
                 self.build_option_info()
                     .build_options
                     .values()
                     .map(|b| (b, &b.value_candidates)),
+                max_retries,
             )
             .await;
 
@@ -464,7 +466,7 @@ impl Analyzer {
                         .unwrap()
                         .first()
                         .unwrap();
-                    if let Some(guard) = self.guard_of_location(lhs_loc).last() {
+                    if let Some(guard) = self.get_guards(lhs_loc.node_id).last() {
                         // the node has a condition
                         if is_arg_var_guarded(guard, arg_var) {
                             // the condition is related to the argument variable

@@ -35,7 +35,7 @@ pub(crate) struct TranslatingPrinter<'a> {
     /// Contains all stateful information
     analyzer: &'a Analyzer,
     /// Assigned the id of top-most node while formatting a tree of nodes.
-    top_most: Cell<Option<NodeId>>,
+    current_top_most: Cell<Option<NodeId>>,
     /// Current ID of the node to be displayed.
     node_cursor: Cell<Option<NodeId>>,
     /// Current index of the branch to be displayed.
@@ -57,7 +57,7 @@ pub(crate) struct TranslatingPrinter<'a> {
     /// Appeared features
     cargo_features: RefCell<Vec<String>>,
     /// Simple translations available for inlining
-    inlined_translations: &'a HashMap<ChunkId, InlinedTranslationOutput>,
+    inlined_translations: Option<&'a HashMap<ChunkId, InlinedTranslationOutput>>,
     /// Whether we have found a usage of redirection.
     found_redirection: Cell<bool>,
     /// Whether we have found a usage of sed command.
@@ -77,7 +77,7 @@ pub(crate) struct TranslatingPrinter<'a> {
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Printer")
-            .field("forcus", &self.top_most)
+            .field("forcus", &self.current_top_most)
             .finish()
     }
 }
@@ -86,7 +86,7 @@ impl<'a> TranslatingPrinter<'a> {
     /// Construct a new printer with inlined translations for inlining
     pub fn new(
         analyzer: &'a Analyzer,
-        inlined_translations: &'a HashMap<ChunkId, InlinedTranslationOutput>,
+        inlined_translations: Option<&'a HashMap<ChunkId, InlinedTranslationOutput>>,
         full_rust_mode: bool,
     ) -> Self {
         let mut dict_accesses = HashMap::new();
@@ -103,7 +103,7 @@ impl<'a> TranslatingPrinter<'a> {
         // to allow all mutation.
         Self {
             analyzer,
-            top_most: Cell::new(None),
+            current_top_most: Cell::new(None),
             node_cursor: Cell::new(None),
             branch_cursor: Cell::new(None),
             order: Cell::new(0),
@@ -130,11 +130,20 @@ impl<'a> TranslatingPrinter<'a> {
     }
 
     pub fn print_node(&self, node_id: NodeId) -> String {
-        self.display_node(node_id, 0)
+        self.current_top_most.replace(Some(node_id));
+        let ret = self.display_node(node_id, 0);
+        self.current_top_most.replace(None);
+        ret
     }
 
     pub fn record_translated_fragment(&self, frag: String) {
-        self.translated_fragments.borrow_mut().push(frag);
+        if frag.len() < 100 {
+            // won't check too long fragments
+            let mut v = self.translated_fragments.borrow_mut();
+            if !v.contains(&frag) {
+                v.push(frag);
+            }
+        }
     }
 
     pub fn get_translated_fragments(&self) -> Vec<String> {
@@ -203,10 +212,10 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
 
     fn display_node(&self, node_id: NodeId, indent_level: usize) -> String {
         if let Some(node) = self.get_node(node_id) {
-            let is_top = self.top_most.get().is_none();
-            if is_top {
-                self.top_most.replace(Some(node_id));
-            } else if node.info.is_top_node() {
+            let is_top_most = self.current_top_most.get().unwrap() == node_id;
+            if !is_top_most && node.info.is_chunk_top_node() {
+                // "is_chunk_top == false" and here the node says it's top node.
+                // -> Found node beyond chunk boundary
                 let chunk_id = node.info.chunk_id.unwrap();
                 if self.embedded_chunks.borrow().contains_key(&chunk_id) {
                     return "".into();
@@ -214,7 +223,11 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
                     let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
 
                     // Check if we have a inlined translation for this chunk
-                    if let Some(inlined_translation) = self.inlined_translations.get(&chunk_id) {
+                    if let Some(inlined_translation) = self
+                        .inlined_translations
+                        .as_ref()
+                        .and_then(|m| m.get(&chunk_id))
+                    {
                         // Inline the inlined translation directly
                         self.embedded_chunks
                             .borrow_mut()
@@ -223,21 +236,30 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
                         let inlined_code = inlined_translation
                             .inline_rust_code
                             .iter()
-                            .map(|line| format!("{tab}{}", line))
+                            .map(|line| {
+                                format!("{tab}{}", self.enclose_by_rust_tags(line.clone(), false))
+                            })
                             .collect::<Vec<_>>()
                             .join("\n");
-                        return format!("{}", self.enclose_by_rust_tags(inlined_code, true));
+                        return format!("{}", inlined_code);
                     } else {
-                        // Fall back to function call for LLM-translated chunks
+                        // function call for LLM-translated chunks
                         let func_name = super::rust_func_placeholder_name(chunk_id);
                         self.embedded_chunks
                             .borrow_mut()
                             .insert(chunk_id, func_name.clone());
 
-                        let call_site = self
-                            .analyzer
-                            .print_chunk_skeleton_call_site(chunk_id, &func_name);
-                        return format!("{tab}{}", self.enclose_by_rust_tags(call_site, true));
+                        let caller_chunk_id = self
+                            .node_cursor
+                            .get()
+                            .and_then(|nid| self.get_node(nid))
+                            .and_then(|node| node.info.chunk_id);
+                        let call_site = self.analyzer.print_chunk_skeleton_call_site(
+                            caller_chunk_id,
+                            chunk_id,
+                            &func_name,
+                        );
+                        return format!("{tab}{}", self.enclose_by_rust_tags(call_site, false));
                     }
                 }
             }
@@ -252,9 +274,6 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
             self.set_order(saved_order);
             self.branch_cursor.replace(saved_branch_cursor);
             self.node_cursor.replace(saved_node_cursor);
-            if is_top {
-                self.top_most.replace(None);
-            }
             result
         } else {
             String::new()
@@ -320,7 +339,7 @@ impl<'a> TranslatingPrinter<'a> {
     fn display_dictionary_value(&self, val: &DictionaryValue) -> String {
         match val {
             DictionaryValue::Lit(lit) => lit.into(),
-            DictionaryValue::Var(name) => format!("${{{}}}", name),
+            DictionaryValue::Var(name, _) => format!("${{{}}}", name),
             DictionaryValue::Dict(_, loc) => {
                 let (dict_name, access, value_type) = self.dict_accesses.get(loc).unwrap();
                 self.display_dictionary_read(dict_name, access, value_type)
@@ -341,15 +360,53 @@ impl<'a> TranslatingPrinter<'a> {
             .map(|key| key.print())
             .collect::<Vec<_>>();
         let num_keys = keys.len();
-        let printed_keys = match num_keys {
-            1 => keys.first().unwrap().clone(),
-            _ => format!("({})", keys.join(", ")),
-        };
         let operation = match num_keys {
-            1 => format!("{}.get({})", dict_name, printed_keys),
-            _ => format!("{}.get(&{})", dict_name, printed_keys),
+            1 => {
+                let key = keys.first().unwrap();
+                let is_reference = self
+                    .node_cursor
+                    .get()
+                    .and_then(|nid| self.analyzer.get_chunk_id(nid))
+                    .and_then(|cid| self.analyzer.chunk_skeletons.as_ref().unwrap().get(&cid))
+                    .is_some_and(|sk| {
+                        sk.args.contains_key(key)
+                            || sk.pass_through_args.contains_key(key)
+                            || sk.pass_through_maps.contains_key(key)
+                            || sk.bound_in_loop.contains_key(key)
+                    });
+                let printed_keys = if is_reference {
+                    key.clone()
+                } else {
+                    format!("&{}", key)
+                };
+                format!("{}.get({})", dict_name, printed_keys)
+            }
+            _ => {
+                let printed_keys = format!(
+                    "({})",
+                    keys.into_iter()
+                        .map(|key| format!("{}.to_string()", key))
+                        .join(", ")
+                );
+                format!("{}.get(&{})", dict_name, printed_keys)
+            }
         };
         operation
+    }
+
+    /// Translates a DictionaryValue into Rust code for use in value expressions.
+    fn display_dictionary_value_as_rust(&self, val: &DictionaryValue) -> String {
+        match val {
+            DictionaryValue::Lit(lit) => format!("\"{}\".to_string()", lit),
+            DictionaryValue::Var(name, _) => format!("${{{}}}", name),
+            DictionaryValue::Dict(_, loc) => {
+                let (dict_name, access, value_type) = self.dict_accesses.get(loc).unwrap();
+                format!(
+                    "{}.cloned().unwrap_or_default().into_iter()",
+                    self.display_dictionary_read(dict_name, access, value_type)
+                )
+            }
+        }
     }
 
     fn display_dictionary_write(
@@ -357,7 +414,7 @@ impl<'a> TranslatingPrinter<'a> {
         dict_name: &str,
         access: &DictionaryAccess,
         value_type: &DataType,
-        value: &str,
+        value: Option<&str>,
     ) -> String {
         debug_assert_eq!(access.operation, DictionaryOperation::Write);
         let keys = access
@@ -367,31 +424,120 @@ impl<'a> TranslatingPrinter<'a> {
             .collect::<Vec<_>>();
         let num_keys = keys.len();
         let printed_keys = match num_keys {
-            1 => keys.first().unwrap().clone(),
-            _ => format!("({})", keys.join(", ")),
+            1 => format!("{}.to_string()", keys.first().unwrap()),
+            _ => format!(
+                "({})",
+                keys.into_iter()
+                    .map(|key| format!("{}.to_string()", key))
+                    .join(", ")
+            ),
         };
 
         self.record_translated_fragment(dict_name.to_owned());
         self.record_translated_fragment(printed_keys.to_owned());
-        let operation = match value_type {
-            DataType::List(_) => format!("{}.entry({})", dict_name, printed_keys),
-            _ => format!("{}.insert({},", dict_name, printed_keys),
-        };
-        let lhs = self.enclose_by_rust_tags(operation, false);
-        let rhs = match value_type {
+
+        match value_type {
             DataType::List(_) => {
-                let list = format!(
-                    "[{}]",
-                    value
-                        .split_whitespace()
-                        .map(|s| format!("\"{s}\".to_string()"))
-                        .join(", ")
-                );
-                self.enclose_by_rust_tags(list, false)
+                // For List types, use assigned_value to generate proper Rust code
+                if let Some(assigned_values) = &access.assigned_value {
+                    let has_dict_values = assigned_values.iter().any(|v| {
+                        if let DictionaryValue::Dict(_name, loc) = v {
+                            self.dict_accesses.contains_key(loc)
+                        } else {
+                            false
+                        }
+                    });
+
+                    if has_dict_values {
+                        // Pattern B: Appending to existing values using entry().extend()
+                        let mut dict_iters = Vec::new();
+                        let mut non_dict_values = Vec::new();
+
+                        for val in assigned_values {
+                            match val {
+                                DictionaryValue::Dict(_, loc) => {
+                                    let (d_name, d_access, d_type) =
+                                        self.dict_accesses.get(loc).unwrap();
+                                    dict_iters.push(format!(
+                                        "{}.cloned().unwrap_or_default().into_iter()",
+                                        self.display_dictionary_read(d_name, d_access, d_type)
+                                    ));
+                                }
+                                DictionaryValue::Lit(lit) => {
+                                    non_dict_values.push(format!("\"{}\".to_string()", lit));
+                                }
+                                DictionaryValue::Var(name, _) => {
+                                    non_dict_values.push(format!("${{{}}}", name));
+                                }
+                            }
+                        }
+
+                        let chain_parts: Vec<String> = dict_iters
+                            .into_iter()
+                            .chain(
+                                if non_dict_values.is_empty() {
+                                    None
+                                } else {
+                                    Some(format!("[{}]", non_dict_values.join(", ")))
+                                }
+                                .into_iter(),
+                            )
+                            .collect();
+
+                        let extend_expr = chain_parts.join(".chain(")
+                            + &")".repeat(chain_parts.len().saturating_sub(1));
+                        let operation = format!(
+                            "{}.entry({}).or_insert_default().extend({})",
+                            dict_name, printed_keys, extend_expr
+                        );
+                        self.enclose_by_rust_tags(operation, false)
+                    } else {
+                        // Pattern A: Fresh assignment using insert() with vec![]
+                        let values: Vec<String> = assigned_values
+                            .iter()
+                            .map(|v| self.display_dictionary_value_as_rust(v))
+                            .collect();
+                        let operation = format!(
+                            "{}.insert({}, vec![{}])",
+                            dict_name,
+                            printed_keys,
+                            values.join(", ")
+                        );
+                        self.enclose_by_rust_tags(operation, false)
+                    }
+                } else if let Some(val) = value {
+                    // Fallback: use provided value string (for display_assignment case)
+                    let lhs = self.enclose_by_rust_tags(
+                        format!("{}.entry({})", dict_name, printed_keys),
+                        false,
+                    );
+                    format!("{}=\"{}\"", lhs, val)
+                } else {
+                    // No value available
+                    self.enclose_by_rust_tags(
+                        format!("{}.entry({}).or_insert_default()", dict_name, printed_keys),
+                        false,
+                    )
+                }
             }
-            _ => value.to_owned(),
-        };
-        format!("{}=\"{}\"", lhs, rhs)
+            _ => {
+                // Non-list types: use simple insert
+                let lhs = self
+                    .enclose_by_rust_tags(format!("{}.insert({},", dict_name, printed_keys), false);
+                let rhs = value.map(|v| v.to_owned()).unwrap_or_else(|| {
+                    access
+                        .assigned_value
+                        .as_ref()
+                        .map(|vals| {
+                            vals.iter()
+                                .map(|v| self.display_dictionary_value(v))
+                                .join(" ")
+                        })
+                        .unwrap_or_default()
+                });
+                format!("{}=\"{}\"", lhs, rhs)
+            }
+        }
     }
 
     fn display_cfg_atom(&self, atom: &Atom, negated: bool) -> String {
@@ -575,13 +721,13 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
-    fn display_word_as_format_string(&self, word: &AcWord) -> String {
+    fn display_word_as_format_str(&self, word: &AcWord) -> String {
         let (format_string, vars) = self.take_format_string_and_vars(word);
         if vars.is_empty() {
-            format!("\"{format_string}\".to_string()")
+            format!("\"{format_string}\"")
         } else {
             format!(
-                "format!(\"{}\", {})",
+                "&format!(\"{}\", {})",
                 format_string,
                 vars.into_iter().join(", ")
             )
@@ -597,8 +743,13 @@ impl<'a> TranslatingPrinter<'a> {
             .drain(..)
             .collect::<Vec<_>>();
         self.in_format_string.replace(false);
-        let format_string = Self::escape_rust_string(&word);
-        self.record_translated_fragment(format_string.clone());
+        let mut format_string = Self::escape_rust_string(&word);
+        if vars.is_empty() {
+            format_string = format_string.replace("}}", "}").replace("{{", "{");
+        }
+        if !matches!(format_string.as_str(), "" | "0" | "1" | "{}") {
+            self.record_translated_fragment(format_string.clone());
+        }
         (format_string, vars)
     }
 
@@ -662,13 +813,18 @@ impl<'a> TranslatingPrinter<'a> {
                 assert!(vars_in_value.is_empty());
                 None
             }
-            "{}" => Some(format!("&{}", vars_in_value.first().unwrap())),
+            "{}" => {
+                let var = vars_in_value.first().unwrap();
+                let expression =
+                    display_var_as_rust_str(var, &self.analyzer.get_inferred_type(var));
+                Some(expression)
+            }
             _ => Some(format!(
                 "&format!(\"{}\", {})",
                 value_fstr,
                 vars_in_value
                     .iter()
-                    .map(|var| "&".to_owned() + var)
+                    .map(|var| format!("&{}", var))
                     .join(",")
             )),
         };
@@ -952,12 +1108,26 @@ impl<'a> TranslatingPrinter<'a> {
     }
 }
 
+pub(super) fn display_var_as_rust_str(var: &str, data_type: &DataType) -> String {
+    match data_type {
+        DataType::Boolean => format!("if {} {{ \"yes\" }} else {{ \"no\" }}", var),
+        DataType::Integer => format!("&{}.to_string()", var),
+        DataType::List(_) => format!("&{}.join(\" \")", var),
+        DataType::Path => format!("{}.to_str().unwrap()", var),
+        DataType::Literal => format!("&{}", var),
+        _ => unimplemented!(),
+    }
+}
+
 impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
     fn display_shell_word(&self, shell_word: &WordFragment<AcWord>) -> String {
         if self.in_format_string.get() {
             if let WordFragment::Param(Parameter::Var(var)) = shell_word {
                 self.formatted_vars.borrow_mut().push(var.to_owned());
                 return "{}".into();
+            }
+            if let WordFragment::Literal(lit) = shell_word {
+                return lit.replace("{", "{{").replace("}", "}}");
             }
         }
 
@@ -987,7 +1157,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
         if let Some((dict_name, access, value_type)) = self.dict_accesses.get(&loc) {
             format!(
                 "{tab}{}",
-                self.display_dictionary_write(dict_name, access, value_type, &rhs)
+                self.display_dictionary_write(dict_name, access, value_type, Some(&rhs))
             )
         } else {
             format!("{tab}{}=\"{}\"", name, rhs)
@@ -1188,21 +1358,14 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 {
                     match access.operation {
                         DictionaryOperation::Write => {
-                            let rhs = if let Some(vals) = &access.assigned_value {
-                                vals.iter()
-                                    .map(|v| self.display_dictionary_value(v))
-                                    .collect::<String>()
-                            } else {
-                                String::new()
-                            };
                             return self
-                                .display_dictionary_write(dict_name, access, value_type, &rhs);
+                                .display_dictionary_write(dict_name, access, value_type, None);
                         }
                         DictionaryOperation::Read => {
                             let lhs = access.assigned_to.clone().unwrap();
                             let rhs = self.enclose_by_rust_tags(
                                 self.display_dictionary_read(dict_name, access, value_type),
-                                true,
+                                false,
                             );
                             return format!("{tab}{}={}", lhs, rhs);
                         }
@@ -1237,9 +1400,9 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                     let rust_string = {
                         let path = format!("Path::new(\"{}\")", filename);
                         self.record_translated_fragment(path.clone());
-                        let content = self.display_word_as_format_string(heredoc);
+                        let content = self.display_word_as_format_str(heredoc);
                         self.enclose_by_rust_tags(
-                            format!("write_file({}, &{})", path, content),
+                            format!("write_file({}, {})", path, content),
                             false,
                         )
                     };

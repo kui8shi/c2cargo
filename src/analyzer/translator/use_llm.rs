@@ -148,6 +148,9 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
             err.push(format!("Correct Id: '{}'", evidence.id));
         }
         for rust_snippet in evidence.rust_snippets.iter() {
+            if rust_snippet.is_empty(){
+                continue;
+            }
             if !self.rust_func_body.contains(rust_snippet) {
                 err.push(format!(
                     "The translated output must contains a Rust snippet '{}' exactly.",
@@ -228,7 +231,12 @@ pkg-config = "*"
                         if let Some(level) = msg["message"]["level"].as_str() {
                             if level == "error" {
                                 has_errors = true;
-                                if let Some(text) = msg["message"]["message"].as_str() {
+                                // Prefer the full rendered diagnostic for better LLM feedback
+                                if let Some(rendered) = msg["message"]["rendered"].as_str() {
+                                    println!("{}", rendered);
+                                    err.push(format!("Compilation error:\n{}", rendered));
+                                } else if let Some(text) = msg["message"]["message"].as_str() {
+                                    // Fallback to brief message if rendered is unavailable
                                     println!("Error: {}", text);
                                     err.push(format!("Compilation error: {}", text));
                                 }
@@ -262,20 +270,13 @@ pkg-config = "*"
 }
 
 fn detect_no_op_patterns(src: &str, values: &Vec<String>) -> Result<(), Vec<String>> {
-    let sanitize = |s: &str| {
-        s.replace("{}", "")
-            .replace("(", "\\(")
-            .replace(")", "\\)")
-            .replace("[", "\\[")
-            .replace("]", "\\]")
-    };
     let mut err = Vec::new();
     let patterns = [r"let\s+_[A-Za-z0-9_]*\s*=\s*_[A-Za-z0-9_]*".into()]
         .into_iter()
         .chain(
             values
                 .iter()
-                .map(|val| format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", sanitize(val))),
+                .map(|val| format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val))),
         );
     for pat in patterns {
         if let Ok(re) = regex::Regex::new(&pat) {
@@ -344,7 +345,9 @@ Input format:
    - Maintain nesting and order of operations exactly.
 
 3. **Variables**
-   - Map shell variables to local Rust variables (`String`, `bool`, or `Vec<String>` as appropriate).
+   - Map shell variables to appropriate Rust types (`String`, `bool`, `Vec<String>`, `PathBuf`).
+   - Local Flexibility: For variables strictly internal to the function (not arguments or return values), you are free to rename them and retype them (e.g., converting a "yes" string flag to a Rust `bool`, or renaming variables for clarity).
+   - Interface Strictness: Variables that are part of the function arguments or the final return tuple must match the skeleton's definition exactly.
 
 4. **Command Execution**
    - Translate shell commands into `std::process::Command` calls.

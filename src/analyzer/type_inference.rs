@@ -51,9 +51,9 @@ impl DataType {
         match self {
             Either(_, _) => 0,
             Literal => 1,
-            Boolean => 2,
-            Integer => 3,
-            Path => 4,
+            Path => 2,
+            Boolean => 3,
+            Integer => 4,
             Optional(_) => 5,
             List(_) => 6,
         }
@@ -72,7 +72,7 @@ pub enum TypeHint {
     /// or checked its match in case statements or `test` commands
     CanBeBoolLike,
     /// the var can apper at the second argument of for statements
-    AssignedInFor,
+    Iterated,
     /// the var can apper both lhs & rhs in an assignment
     AppendedSelf,
     /// the var can be appended non-numeric & non-boolean literals
@@ -88,7 +88,9 @@ pub enum TypeHint {
     /// or, appear in redirection
     UsedAsPath,
     /// used in expr command
-    UsedAsExpr,
+    UsedInExpr,
+    /// used in test command with options such as '-ge', or '-lt'
+    SizeComparison,
 }
 
 use TypeHint::*;
@@ -100,16 +102,13 @@ pub(super) struct TypeInferrer<'a> {
     /// Map of variable types inferred to be types other than string type.
     types: HashMap<String, DataType>,
     type_hints: HashMap<String, HashSet<TypeHint>>,
-    type_relations: HashMap<String, String>,
+    type_relations: HashSet<(String, String)>,
     assigned: HashMap<String, HashSet<String>>,
     cursor: Option<NodeId>,
 }
 
 impl Analyzer {
-    pub(crate) fn get_type_inference_result(
-        &self,
-        var_name: &str,
-    ) -> Option<&(HashSet<TypeHint>, DataType)> {
+    pub(crate) fn get_type_inference_result(&self, var_name: &str) -> Option<&DataType> {
         self.inferred_types
             .as_ref()
             .map(|types| types.get(var_name))
@@ -127,11 +126,9 @@ impl Analyzer {
         if self.options.type_inference {
             if let Some(inferred) = self
                 .get_type_inference_result(name)
-                .map(|(_, data_type)| data_type.clone())
+                .map(|data_type| data_type.clone())
             {
                 inferred
-            } else if let Some(known) = has_known_type(name) {
-                known
             } else {
                 DataType::Literal
             }
@@ -140,13 +137,24 @@ impl Analyzer {
         }
     }
 
+    pub(crate) fn get_inferred_type_for_scope(
+        &self,
+        name: &str,
+        scope: &super::chunk::Scope,
+    ) -> DataType {
+        if let Some(ty) = &scope.inferred_type {
+            return ty.clone();
+        }
+        self.get_inferred_type(name)
+    }
+
     fn convert_guards_for_numeric_boolean(&mut self) {
         let bool_vars = self
             .inferred_types
             .as_ref()
             .unwrap()
             .iter()
-            .filter(|(_, (_, ty))| ty == &DataType::Boolean)
+            .filter(|(_, ty)| *ty == &DataType::Boolean)
             .map(|(var_name, _)| var_name.as_str())
             .collect::<HashSet<_>>();
         for (_, block) in self.blocks.iter_mut() {
@@ -161,15 +169,13 @@ impl Analyzer {
 
 impl<'a> TypeInferrer<'a> {
     /// run type inference
-    pub fn run_type_inference(
-        analyzer: &'a Analyzer,
-    ) -> HashMap<String, (HashSet<TypeHint>, DataType)> {
+    pub fn run_type_inference(analyzer: &'a Analyzer) -> HashMap<String, DataType> {
         // we assume variable enumeration is already completed.
         let mut s = Self {
             analyzer,
-            types: HashMap::new(),
+            types: known_types(),
             type_hints: HashMap::new(),
-            type_relations: HashMap::new(),
+            type_relations: HashSet::new(),
             assigned: HashMap::new(),
             cursor: None,
         };
@@ -181,34 +187,12 @@ impl<'a> TypeInferrer<'a> {
             s.infer_type(name);
         }
 
-        for (from, to) in s.type_relations.clone() {
-            if s.types
-                .get(&to)
-                .is_none_or(|data_type| *data_type == DataType::Literal)
-            {
-                if let Some(from_type) = s.types.get(&from).cloned() {
-                    s.types.insert(to.to_owned(), from_type);
-                }
-            }
-        }
+        s.propagate_types();
 
-        let mut ret = HashMap::new();
-        for name in s.types.keys() {
-            ret.insert(
-                name.to_owned(),
-                (
-                    s.type_hints.get(name).cloned().unwrap_or_default(),
-                    s.types[name].clone(),
-                ),
-            );
-        }
-        ret
+        s.types
     }
 
     fn infer_type(&mut self, name: &str) -> DataType {
-        if let Some(ty) = has_known_type(name) {
-            return ty;
-        }
         use DataType::*;
         if let Some(t) = self.types.get(name) {
             return t.clone();
@@ -255,14 +239,12 @@ impl<'a> TypeInferrer<'a> {
         if hints.contains(&UsedAsPath) {
             inferred = Path;
         }
-        if hints.contains(&UsedAsExpr) {
+        if hints.contains(&UsedInExpr) || hints.contains(&SizeComparison) {
             inferred = Integer;
         }
-        // if hints.contains(&CanBeEmpty) {
-        //     if !matches!(inferred, List(_)) {
-        //         inferred = Optional(Box::new(inferred))
-        //     }
-        // }
+        if let Some(ty) = has_known_type(name) {
+            inferred = ty;
+        }
         self.types.insert(name.to_owned(), inferred.clone());
         inferred
     }
@@ -300,9 +282,60 @@ impl<'a> TypeInferrer<'a> {
         }
     }
 
-    fn propagate_type(&mut self, from: &str, to: &str) {
+    fn record_type_relation(&mut self, from: &str, to: &str) {
         if from != to {
-            self.type_relations.insert(from.to_owned(), to.to_owned());
+            self.type_relations.insert((from.to_owned(), to.to_owned()));
+        }
+    }
+
+    fn propagate_types(&mut self) {
+        let (prop_map_dest, prop_map_src) = self.type_relations.iter().fold(
+            (HashMap::new(), HashMap::new()),
+            |mut acc, (from, to)| {
+                acc.0
+                    .entry(to.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(from.clone());
+                acc.1
+                    .entry(from.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(to.clone());
+                acc
+            },
+        );
+        for (to, from_set) in prop_map_dest {
+            if self
+                .types
+                .get(&to)
+                .is_none_or(|data_type| *data_type == DataType::Literal)
+            {
+                let from_types = from_set
+                    .iter()
+                    .map(|from| self.types.get(from.as_str()))
+                    .flatten()
+                    .collect::<HashSet<_>>();
+                if from_types.len() == 1 {
+                    let data_type = from_types.into_iter().next().unwrap();
+                    self.types.insert(to.to_owned(), data_type.clone());
+                }
+            }
+        }
+        for (from, to_set) in prop_map_src {
+            if self
+                .types
+                .get(&from)
+                .is_none_or(|data_type| *data_type == DataType::Literal)
+            {
+                let to_types = to_set
+                    .iter()
+                    .map(|to| self.types.get(to.as_str()))
+                    .flatten()
+                    .collect::<HashSet<_>>();
+                if to_types.len() == 1 {
+                    let data_type = to_types.into_iter().next().unwrap();
+                    self.types.insert(from.to_owned(), data_type.clone());
+                }
+            }
         }
     }
 }
@@ -342,7 +375,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
             }
         }
 
-        self.add_type_hint(var, AssignedInFor);
+        self.add_type_hint(var, Iterated);
         self.walk_for(var, words, body);
     }
 
@@ -354,7 +387,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                         self.check_literal(var, lit);
                     }
                     if let Some(pat_var) = as_shell(pattern).and_then(as_var) {
-                        self.propagate_type(pat_var, var);
+                        self.record_type_relation(pat_var, var);
                     }
                 }
             }
@@ -378,7 +411,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                 if matches!(lit, "expr") {
                     for arg in &cmd_words[1..] {
                         if let Some(name) = as_shell(arg).and_then(as_var) {
-                            self.add_type_hint(name, UsedAsExpr);
+                            self.add_type_hint(name, UsedInExpr);
                         }
                     }
                 }
@@ -405,10 +438,10 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                 }
                 Ge(lhs, rhs) | Gt(lhs, rhs) | Le(lhs, rhs) | Lt(lhs, rhs) => {
                     if let Some(var) = as_shell(lhs).and_then(as_var) {
-                        self.add_type_hint(var, CanBeNum);
+                        self.add_type_hint(var, SizeComparison);
                     }
                     if let Some(var) = as_shell(rhs).and_then(as_var) {
-                        self.add_type_hint(var, CanBeNum);
+                        self.add_type_hint(var, SizeComparison);
                     }
                 }
                 Empty(w) | NonEmpty(w) => {
@@ -443,7 +476,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                 }
                 WordFragment::Literal(lit) => self.check_literal(name, lit),
                 WordFragment::Param(Parameter::Var(var)) => {
-                    self.propagate_type(var, name);
+                    self.record_type_relation(var, name);
                 }
                 _ => (),
             }
@@ -528,44 +561,50 @@ fn convert_guard_numeric_boolean(guard: &Guard, bool_vars: &HashSet<&str>) -> Gu
 
 lazy_static::lazy_static! {
     /// Predefined m4/autoconf macros
-    static ref KNOWN_TYPES: HashMap<&'static str, DataType> = known_types();
+    static ref KNOWN_TYPES: HashMap<String, DataType> = known_types();
 }
 
-fn known_types() -> HashMap<&'static str, DataType> {
+fn known_types() -> HashMap<String, DataType> {
     HashMap::from([
-        ("LIBS", DataType::List(Box::new(DataType::Literal))),
-        ("LDFLAGS", DataType::List(Box::new(DataType::Literal))),
-        ("CPPFLAGS", DataType::List(Box::new(DataType::Literal))),
-        ("CFLAGS", DataType::List(Box::new(DataType::Literal))),
-        ("enable_shared", DataType::Boolean),
-        ("prefix", DataType::Path),
-        ("exec_prefix", DataType::Path),
-        ("srcdir", DataType::Path),
-        ("bindir", DataType::Path),
-        ("sbindir", DataType::Path),
-        ("libexecdir", DataType::Path),
-        ("datarootdir", DataType::Path),
-        ("datadir", DataType::Path),
-        ("sysconfdir", DataType::Path),
-        ("sharedstatdir", DataType::Path),
-        ("localstatedir", DataType::Path),
-        ("localstatedir", DataType::Path),
-        ("runstatedir", DataType::Path),
-        ("includedir", DataType::Path),
-        ("oldincludedir", DataType::Path),
-        ("docdir", DataType::Path),
-        ("infodir", DataType::Path),
-        ("htmldir", DataType::Path),
-        ("dvidir", DataType::Path),
-        ("pdfdir", DataType::Path),
-        ("psdir", DataType::Path),
-        ("libdir", DataType::Path),
-        ("localedir", DataType::Path),
-        ("mandir", DataType::Path),
-        ("cross_compiling", DataType::Boolean),
-        ("top_srcdir", DataType::Path),
-        ("abs_top_srcdir", DataType::Path),
-        ("EXEEXT", DataType::Literal),
+        ("LIBS".into(), DataType::List(Box::new(DataType::Literal))),
+        (
+            "LDFLAGS".into(),
+            DataType::List(Box::new(DataType::Literal)),
+        ),
+        (
+            "CPPFLAGS".into(),
+            DataType::List(Box::new(DataType::Literal)),
+        ),
+        ("CFLAGS".into(), DataType::List(Box::new(DataType::Literal))),
+        ("enable_shared".into(), DataType::Boolean),
+        ("prefix".into(), DataType::Path),
+        ("exec_prefix".into(), DataType::Path),
+        ("srcdir".into(), DataType::Path),
+        ("bindir".into(), DataType::Path),
+        ("sbindir".into(), DataType::Path),
+        ("libexecdir".into(), DataType::Path),
+        ("datarootdir".into(), DataType::Path),
+        ("datadir".into(), DataType::Path),
+        ("sysconfdir".into(), DataType::Path),
+        ("sharedstatdir".into(), DataType::Path),
+        ("localstatedir".into(), DataType::Path),
+        ("localstatedir".into(), DataType::Path),
+        ("runstatedir".into(), DataType::Path),
+        ("includedir".into(), DataType::Path),
+        ("oldincludedir".into(), DataType::Path),
+        ("docdir".into(), DataType::Path),
+        ("infodir".into(), DataType::Path),
+        ("htmldir".into(), DataType::Path),
+        ("dvidir".into(), DataType::Path),
+        ("pdfdir".into(), DataType::Path),
+        ("psdir".into(), DataType::Path),
+        ("libdir".into(), DataType::Path),
+        ("localedir".into(), DataType::Path),
+        ("mandir".into(), DataType::Path),
+        ("cross_compiling".into(), DataType::Boolean),
+        ("top_srcdir".into(), DataType::Path),
+        ("abs_top_srcdir".into(), DataType::Path),
+        ("EXEEXT".into(), DataType::Literal),
     ])
 }
 

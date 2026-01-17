@@ -36,9 +36,10 @@ pub(crate) trait LLMAnalysis {
     async fn run_llm_analysis<'a, I: Iterator<Item = (&'a Self::Input, &'a Self::Evidence)>>(
         &'a mut self,
         inputs: I,
+        max_retries: usize
     ) -> Vec<LLMResultWithMeta<Self::Output>> {
         futures::stream::iter(
-            inputs.map(|(input, evidence)| self.make_api_request_with_retry(input, evidence)),
+            inputs.map(|(input, evidence)| self.make_api_request_with_retry(input, evidence, max_retries)),
         )
         .buffer_unordered(10)
         .then(|result| async move {
@@ -46,7 +47,8 @@ pub(crate) trait LLMAnalysis {
                 Ok(analysis) => Some(analysis),
                 Err(e) => {
                     eprintln!("Failed to run LLM analysis: {}", e);
-                    std::process::exit(1);
+                    // std::process::exit(1);
+                    None
                 }
             }
         })
@@ -99,8 +101,8 @@ pub(crate) trait LLMAnalysis {
         &self,
         input: &Self::Input,
         evidence: &Self::Evidence,
+        max_retries: usize,
     ) -> Result<LLMResultWithMeta<Self::Output>, String> {
-        const MAX_RETRIES: usize = 3;
         const RETRY_DELAY_MS: u64 = 5000;
 
         let api_key = std::env::var("OPENAI_API_KEY").unwrap_or("sk-TESTKEY".into());
@@ -113,7 +115,7 @@ pub(crate) trait LLMAnalysis {
         let start_time = Instant::now();
         let mut total_cost: f64 = 0.0;
 
-        for attempt in 0..MAX_RETRIES {
+        for attempt in 0..max_retries {
             let llm = LLMBuilder::new()
                 .backend(LLMBackend::OpenAI)
                 .api_key(api_key.clone())
@@ -159,14 +161,14 @@ pub(crate) trait LLMAnalysis {
                                     );
                                     last_errors = Some(errs);
                                     last_raw_json = Some(text);
-                                    if attempt < MAX_RETRIES - 1 {
+                                    if attempt < max_retries - 1 {
                                         // eprintln!("Validation failed; retrying in {}ms...", RETRY_DELAY_MS);
                                         sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
                                         continue;
                                     } else {
                                         return Err(format!(
                                             "Validation failed after {} attempts:\n{}",
-                                            MAX_RETRIES,
+                                            max_retries,
                                             last_errors.map(|v| v.join("\n")).unwrap_or_default()
                                         ));
                                     }
@@ -176,14 +178,14 @@ pub(crate) trait LLMAnalysis {
                         Err(e) => {
                             last_errors = Some(vec![format!("JSON parse error: {}", e)]);
                             last_raw_json = Some(text);
-                            if attempt < MAX_RETRIES - 1 {
+                            if attempt < max_retries - 1 {
                                 // eprintln!("JSON parse error; retrying in {}ms...", RETRY_DELAY_MS);
                                 sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
                                 continue;
                             } else {
                                 return Err(format!(
                                     "Failed to parse JSON after {} attempts: {}",
-                                    MAX_RETRIES, e
+                                    max_retries, e
                                 ));
                             }
                         }

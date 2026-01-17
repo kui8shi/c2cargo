@@ -82,6 +82,7 @@ impl<'a> MacroFinder<'a> {
                                     // FIXME: this brace's block id is strage
                                     info: Default::default(),
                                 });
+                                s.analyzer.get_node_mut(new_id).unwrap().info.node_id = new_id;
                                 s.analyzer.top_ids.insert(order, new_id);
                                 called
                                     .entry(name.to_owned())
@@ -448,7 +449,7 @@ impl Analyzer {
                 // due to the limitation of side effects description parsed in autoconf-parser,
                 // we have to take pairs of paths from the macro argument.
                 for word in macro_call.get_arg_as_array(0).unwrap() {
-                    let value_exprs = self.vsa_inspect_word(&word, &loc, Some(':'));
+                    let value_exprs = self.vsa_inspect_word(&word, loc.order_reset(), Some(':'));
                     if value_exprs.len() != 2 {
                         // exactly two value expressions (:paths) in an element required;
                         continue;

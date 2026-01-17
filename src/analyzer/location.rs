@@ -13,6 +13,17 @@ pub(crate) struct Location {
     pub line: usize,
 }
 
+impl Location {
+    pub fn order_reset(&self) -> Self {
+        Self {
+            node_id: self.node_id,
+            exec_id: self.exec_id,
+            order_in_expr: 0,
+            line: self.line,
+        }
+    }
+}
+
 impl PartialOrd for Location {
     fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
         Some((self.exec_id, self.order_in_expr).cmp(&(other.exec_id, other.order_in_expr)))

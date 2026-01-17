@@ -127,7 +127,7 @@ impl<'a> Flattener<'a> {
                     .insert(branch_idx, new_block_id);
                 for &node_id in nodes {
                     self.analyzer
-                        .link_body_to_parent(node_id, parent_id, new_block_id);
+                        .link_child_to_parent(node_id, parent_id, new_block_id);
                 }
             }
         }
@@ -230,13 +230,13 @@ impl<'a> Flattener<'a> {
             ..Default::default()
         });
         self.analyzer
-            .link_body_to_parent(new_node_id, parent, new_block_id);
+            .link_child_to_parent(new_node_id, parent, new_block_id);
 
         // update original children & their block
         self.get_block_mut(children_block_id).parent = new_node_id;
         for &child in children {
             self.analyzer
-                .link_body_to_parent(child, new_node_id, children_block_id);
+                .link_child_to_parent(child, new_node_id, children_block_id);
         }
 
         // update parent

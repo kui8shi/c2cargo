@@ -14,7 +14,10 @@ use crate::{
         conditional_compilation::CCMigrationType,
         pkg_config::get_function_definition_bindgen,
         record::TranslationType,
-        translator::{printer::TranslatingPrinter, use_llm::LLMBasedTranslationOutput},
+        translator::{
+            printer::TranslatingPrinter,
+            use_llm::{LLMBasedTranslationOutput, LLMUser},
+        },
         type_inference::DataType,
         MayM4, ShellCommand,
     },
@@ -50,6 +53,20 @@ struct ChunkTranslationMeta {
     llm_cost: Option<f64>,
     duration: Duration,
     retry_count: usize,
+}
+
+impl ChunkTranslationMeta {
+    fn empty(chunk_size: usize, retry_count: usize) -> Self {
+        Self {
+            chunk_size,
+            translation_type: TranslationType::LLMAssisted,
+            success: false,
+            failure_reason: None,
+            llm_cost: None,
+            duration: Duration::ZERO,
+            retry_count,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -121,16 +138,18 @@ impl Analyzer {
                 let rust_assignment = self.translate_inlined_assignment(var_name, word)?;
                 let may_binding_rust_assignment = if let Some(mutability) = skeleton
                     .return_to_bind
-                    .iter()
-                    .find_map(|(mutability, name, _)| (name == var_name).then_some(mutability))
+                    .get(var_name)
+                    .map(|(is_mut, _)| is_mut)
                 {
                     format!(
                         "let {}{}",
                         if *mutability { "mut " } else { "" },
                         rust_assignment
                     )
-                } else {
+                } else if skeleton.return_to_overwrite.is_some() {
                     rust_assignment
+                } else {
+                    "".to_owned()
                 };
                 rust_lines.push(may_binding_rust_assignment);
             } else {
@@ -301,13 +320,18 @@ impl Analyzer {
             println!("footer: {}", self.print_chunk_skeleton_body_footer(i));
             println!(
                 "callsite: {}",
-                self.print_chunk_skeleton_call_site(i, &format!("func{}", i))
+                self.print_chunk_skeleton_call_site(None, i, &format!("func{}", i))
             );
-            let dummy = HashMap::new();
-            let printer = TranslatingPrinter::new(&self, &dummy, false);
+            println!("=====body=====");
+            let printer = TranslatingPrinter::new(&self, None, false);
             for &id in chunk.nodes.iter() {
                 println!("{}", &printer.print_node(id));
             }
+            println!(
+                "\n[required_rust_fragments]:\n{}",
+                printer.get_translated_fragments().join("\n")
+            );
+            println!("==============");
         }
     }
 
@@ -368,7 +392,6 @@ impl Analyzer {
             .as_ref()
             .unwrap()
             .iter()
-            .filter(|(var_name, _)| !self.env_vars.as_ref().unwrap().contains(var_name.as_str()))
             .filter(|(_, scopes)| {
                 scopes
                     .first()
@@ -376,6 +399,7 @@ impl Analyzer {
             })
             .map(|(var_name, _)| var_name)
             .chain(unused_subst_vars)
+            .filter(|var_name| !self.env_vars.as_ref().unwrap().contains(var_name.as_str()))
             .collect::<HashSet<_>>()
             .into_iter()
             .sorted()
@@ -397,6 +421,13 @@ impl Analyzer {
                     data_type.print()
                 )
             })
+            .chain(self.dicts.as_ref().unwrap().iter().map(|dict| {
+                let dict_type_str = self.print_dictionary_type(&dict.name);
+                format!(
+                    "{tab}let mut {}: {} = Default::default();",
+                    dict.name, dict_type_str
+                )
+            }))
             .join("\n");
         let (translated, translation_cache_used) = self.translate_chunks().await;
 
@@ -425,12 +456,21 @@ impl Analyzer {
             .filter(|(_, chunk)| chunk.parent.is_none())
             .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
             .map(
-                |(chunk_id, _)| match &translated.get(&chunk_id).unwrap().0 {
-                    ChunkTranslationOutput::Inlined(res) => {
+                |(chunk_id, _)| match translated.get(&chunk_id).unwrap().0.as_ref() {
+                    Some(ChunkTranslationOutput::Inlined(res)) => {
                         format!("{tab}{}", res.inline_rust_code.join(&format!("\n{tab}")))
                     }
-                    ChunkTranslationOutput::LLM(_) => {
+                    Some(ChunkTranslationOutput::LLM(output)) => {
                         let call_site = self.print_chunk_skeleton_call_site(
+                            None,
+                            chunk_id,
+                            output.rust_func_name.as_str(),
+                        );
+                        format!("{tab}{call_site}")
+                    }
+                    None => {
+                        let call_site = self.print_chunk_skeleton_call_site(
+                            None,
                             chunk_id,
                             &rust_func_placeholder_name(chunk_id),
                         );
@@ -447,17 +487,19 @@ impl Analyzer {
                 .subst_to_cpp_map
                 .iter()
                 .sorted_by_key(|(k, _)| (*k).clone())
-                .map(|(key, policy)| match &policy.mig_type {
+                .map(|(var, policy)| match &policy.mig_type {
                     CCMigrationType::Cfg => format!(
                         "{tab}if {} {{\n{tab}{tab}define_cfg({:?}, None);\n{tab}}}",
-                        key,
+                        var,
                         policy.key.as_ref().unwrap()
                     ),
                     CCMigrationType::Env => {
+                        let expression =
+                            printer::display_var_as_rust_str(var, &self.get_inferred_type(var));
                         format!(
-                            "{tab}define_env({:?}, &{});",
+                            "{tab}define_env({:?}, {});",
                             policy.key.as_ref().unwrap(),
-                            key
+                            expression
                         )
                     }
                     _ => unreachable!(),
@@ -466,8 +508,7 @@ impl Analyzer {
         };
 
         let src_incl_conds = {
-            let dummy = Default::default();
-            let printer = TranslatingPrinter::new(self, &dummy, true);
+            let printer = TranslatingPrinter::new(self, None, true);
 
             // Deduplicate by cfg_key
             let mut src_incl_conds: std::collections::HashMap<String, _> =
@@ -554,19 +595,23 @@ impl Analyzer {
             .iter()
             .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
             .filter_map(
-                |(chunk_id, _)| match &translated.get(&chunk_id).unwrap().0 {
-                    ChunkTranslationOutput::Inlined(_) => None,
-                    ChunkTranslationOutput::LLM(res) => Some(res),
+                |(chunk_id, _)| match translated.get(&chunk_id).unwrap().0.as_ref() {
+                    Some(ChunkTranslationOutput::Inlined(_)) => None,
+                    Some(ChunkTranslationOutput::LLM(output)) => {
+                        Some(self.construct_rust_func_definition(
+                            output.id,
+                            &output.rust_func_name,
+                            &output.rust_func_body,
+                        ))
+                    }
+                    None => Some(self.construct_dummy_rust_func_definition(
+                        chunk_id,
+                        &rust_func_placeholder_name(chunk_id),
+                    )),
                 },
             )
-            .map(|res| {
-                self.construct_rust_func_definition(
-                    res.id,
-                    &rust_func_placeholder_name(res.id),
-                    &res.rust_func_body,
-                )
-            })
             .collect();
+
         TranslationResult {
             env_init,
             default_init,
@@ -584,17 +629,17 @@ impl Analyzer {
     async fn translate_chunks(
         &self,
     ) -> (
-        HashMap<ChunkId, (ChunkTranslationOutput, ChunkTranslationMeta)>,
+        HashMap<ChunkId, (Option<ChunkTranslationOutput>, ChunkTranslationMeta)>,
         bool,
     ) {
         let mut results = HashMap::new();
         let mut cache_used = false;
-        let mut user = use_llm::LLMUser::new();
+        let mut user = LLMUser::new();
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
 
         // Collect rule-based translations for inlining during LLM processing
-        let inlined_translations: HashMap<ChunkId, InlinedTranslationOutput> = self
+        let mut inlined_translations: HashMap<ChunkId, InlinedTranslationOutput> = self
             .chunks
             .iter()
             .filter_map(|(chunk_id, _)| {
@@ -626,13 +671,15 @@ impl Analyzer {
             results.insert(
                 *chunk_id,
                 (
-                    ChunkTranslationOutput::Inlined(inlined_translation.clone()),
+                    Some(ChunkTranslationOutput::Inlined(inlined_translation.clone())),
                     meta,
                 ),
             );
         }
 
+        let max_retries = 5;
         // Track LLM metadata separately since cache may not have it
+        let mut llm_chunk_ids: Vec<ChunkId> = Vec::new();
         let mut llm_metadata: HashMap<ChunkId, ChunkTranslationMeta> = HashMap::new();
 
         let llm_translations = if let Some(cached) = self.load_translation_cache() {
@@ -665,14 +712,15 @@ impl Analyzer {
                     .expect("Failed to remove a directory");
             }
             // Process all chunks: inlined ones go directly to results, complex ones go to LLM
-            for (chunk_id, _) in self.chunks.iter() {
+            for chunk in self.get_topologically_sorted_chunks() {
+                let chunk_id = chunk.chunk_id;
                 if inlined_translations.contains_key(&chunk_id) {
                     // inlined chunk
                     continue;
                 }
 
                 // Conduct LLM analysis with inlined translations available for inlining
-                let printer = TranslatingPrinter::new(self, &inlined_translations, false);
+                let printer = TranslatingPrinter::new(self, Some(&inlined_translations), false);
                 let script = self
                     .chunks
                     .get(chunk_id)
@@ -684,6 +732,13 @@ impl Analyzer {
 
                 if script.trim().is_empty() {
                     // empty chunk
+                    inlined_translations.insert(
+                        chunk_id,
+                        InlinedTranslationOutput {
+                            id: chunk_id,
+                            inline_rust_code: Vec::new(),
+                        },
+                    );
                     continue;
                 }
 
@@ -717,41 +772,7 @@ impl Analyzer {
                     .iter()
                     .filter(|(_, placeholder)| *placeholder != "inlined")
                     .map(|(dep_chunk_id, placeholder)| {
-                        // Get skeleton to access return variables
-                        let sk = self.get_chunk_skeleton(*dep_chunk_id).unwrap();
-
-                        // Collect all declarations: declared + return_to_bind + return_to_overwrite
-                        let declarations: Vec<String> = sk
-                            .declared
-                            .iter()
-                            .chain(sk.return_to_bind.iter())
-                            .map(|(is_mut, name, ty)| {
-                                let mutability = if *is_mut { "mut " } else { "" };
-                                format!(
-                                    "let {}{}: {} = Default::default();",
-                                    mutability,
-                                    name,
-                                    ty.print()
-                                )
-                            })
-                            .chain(sk.return_to_overwrite.iter().map(|(name, ty)| {
-                                format!("let {}: {} = Default::default();", name, ty.print())
-                            }))
-                            .collect();
-
-                        format!(
-                            "fn {}{} {{\n  {}\n}}",
-                            placeholder,
-                            self.print_chunk_skeleton_signature(*dep_chunk_id),
-                            declarations
-                                .into_iter()
-                                .chain(std::iter::once(
-                                    self.print_chunk_skeleton_body_footer(*dep_chunk_id)
-                                ))
-                                .filter(|s| !s.is_empty())
-                                .collect::<Vec<_>>()
-                                .join("\n  ")
-                        )
+                        self.construct_dummy_rust_func_definition(*dep_chunk_id, &placeholder)
                     })
                     .collect::<Vec<_>>()
                     .join("\n\n");
@@ -772,68 +793,91 @@ impl Analyzer {
                     depending_func_defs,
                 };
                 inputs.push((input, evidence));
+                llm_chunk_ids.push(chunk_id);
             }
 
-            let llm_results = user
-                .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)))
-                .await;
-
-            // Process results and collect metadata
             let mut res = HashMap::new();
-            for result in llm_results {
-                let chunk_id = result.output.id;
-                let chunk_size = self
-                    .chunks
-                    .get(chunk_id)
-                    .map(|c| c.nodes.len())
-                    .unwrap_or(0);
-                llm_metadata.insert(
-                    chunk_id,
-                    ChunkTranslationMeta {
-                        chunk_size,
-                        translation_type: TranslationType::LLMAssisted,
-                        success: true,
-                        failure_reason: None,
-                        llm_cost: result.cost,
-                        duration: result.duration,
-                        retry_count: result.retry_count,
-                    },
-                );
-                res.insert(chunk_id, result.output);
-            }
+            if self.options.use_llm {
+                let llm_results = user
+                    .run_llm_analysis(inputs.iter().map(|(i, e)| (i, e)), max_retries)
+                    .await;
 
-            // Handle LLM function name dependencies
-            for chunk_id in res.keys().cloned().collect::<Vec<_>>() {
-                for (id, placeholder) in depending_funcs.get(&chunk_id).unwrap() {
-                    if let Some(new_name) = res.get(id).map(|o| o.rust_func_name.clone()) {
-                        let out = res.get_mut(&chunk_id).unwrap();
-                        out.rust_func_body = out.rust_func_body.replace(placeholder, &new_name);
+                // Process results and collect metadata
+                for result in llm_results {
+                    let chunk_id = result.output.id;
+                    let chunk_size = self
+                        .chunks
+                        .get(chunk_id)
+                        .map(|c| c.nodes.len())
+                        .unwrap_or(0);
+                    llm_metadata.insert(
+                        chunk_id,
+                        ChunkTranslationMeta {
+                            chunk_size,
+                            translation_type: TranslationType::LLMAssisted,
+                            success: true,
+                            failure_reason: None,
+                            llm_cost: result.cost,
+                            duration: result.duration,
+                            retry_count: result.retry_count,
+                        },
+                    );
+                    res.insert(chunk_id, result.output);
+                }
+
+                if self.options.rename_rust_functions {
+                    // Handle LLM function name dependencies
+                    let collided_func_names: HashMap<ChunkId, String> = {
+                        let mut func_names = HashSet::new();
+                        let mut fallback_names = HashMap::new();
+                        for (chunk_id, output) in res.iter() {
+                            if func_names.contains(&output.rust_func_name) {
+                                fallback_names
+                                    .insert(*chunk_id, rust_func_placeholder_name(*chunk_id));
+                            } else {
+                                func_names.insert(output.rust_func_name.clone());
+                            }
+                        }
+                        fallback_names
+                    };
+                    for (chunk_id, fallback_name) in collided_func_names {
+                        res.get_mut(&chunk_id).unwrap().rust_func_name = fallback_name;
+                    }
+                    for chunk_id in res.keys().cloned().collect::<Vec<_>>() {
+                        for (id, placeholder) in depending_funcs.get(&chunk_id).unwrap() {
+                            if let Some(new_name) = res.get(id).map(|o| o.rust_func_name.clone()) {
+                                let out = res.get_mut(&chunk_id).unwrap();
+                                out.rust_func_body =
+                                    out.rust_func_body.replace(placeholder, &new_name);
+                            }
+                        }
+                    }
+                } else {
+                    for chunk_id in res.keys().cloned().collect::<Vec<_>>() {
+                        res.get_mut(&chunk_id).unwrap().rust_func_name =
+                            rust_func_placeholder_name(chunk_id);
                     }
                 }
+                self.save_translation_cache(&res);
             }
-            self.save_translation_cache(&res);
             res
         };
 
         // Convert LLM results to ChunkTranslationResult and merge with inlined results
-        for (chunk_id, llm_output) in llm_translations {
-            let meta = llm_metadata.remove(&chunk_id).unwrap_or_else(|| {
-                let chunk_size = self
-                    .chunks
-                    .get(chunk_id)
-                    .map(|c| c.nodes.len())
-                    .unwrap_or(0);
-                ChunkTranslationMeta {
-                    chunk_size,
-                    translation_type: TranslationType::LLMAssisted,
-                    success: true,
-                    failure_reason: None,
-                    llm_cost: None,
-                    duration: Duration::ZERO,
-                    retry_count: 0,
-                }
-            });
-            results.insert(chunk_id, (ChunkTranslationOutput::LLM(llm_output), meta));
+        for chunk_id in llm_chunk_ids {
+            let chunk_size = self
+                .chunks
+                .get(chunk_id)
+                .map(|c| c.nodes.len())
+                .unwrap_or(0);
+            let output = llm_translations
+                .get(&chunk_id)
+                .cloned()
+                .map(ChunkTranslationOutput::LLM);
+            let meta = llm_metadata
+                .remove(&chunk_id)
+                .unwrap_or_else(|| ChunkTranslationMeta::empty(chunk_size, max_retries));
+            results.insert(chunk_id, (output, meta));
         }
 
         (results, cache_used)
@@ -859,6 +903,44 @@ impl Analyzer {
                 .join("\n  "),
         );
         func_def
+    }
+
+    fn construct_dummy_rust_func_definition(&self, chunk_id: ChunkId, func_name: &str) -> String {
+        // Get skeleton to access return variables
+        let sk = self.get_chunk_skeleton(chunk_id).unwrap();
+
+        // Collect all declarations: declared + return_to_bind + return_to_overwrite
+        let declarations: Vec<String> =
+            sk.declared
+                .iter()
+                .chain(sk.return_to_bind.iter())
+                .map(|(name, (is_mut, ty))| {
+                    let mutability = if *is_mut { "mut " } else { "" };
+                    format!(
+                        "let {}{}: {} = Default::default();",
+                        mutability,
+                        name,
+                        ty.print()
+                    )
+                })
+                .chain(sk.return_to_overwrite.iter().map(|(name, ty)| {
+                    format!("let {}: {} = Default::default();", name, ty.print())
+                }))
+                .collect();
+
+        format!(
+            "fn {}{} {{\n  {}\n}}",
+            func_name,
+            self.print_chunk_skeleton_signature(chunk_id),
+            declarations
+                .into_iter()
+                .chain(std::iter::once(
+                    self.print_chunk_skeleton_body_footer(chunk_id)
+                ))
+                .filter(|s| !s.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        )
     }
 }
 

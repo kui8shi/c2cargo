@@ -221,7 +221,6 @@ dependencies = [
  "owned_chars",
  "pkg-config",
  "regex",
- "rust-format",
  "serde",
  "serde_json",
  "slab",
@@ -1478,12 +1477,6 @@ dependencies = [
  "wasm-streams",
  "web-sys",
 ]
-
-[[package]]
-name = "rust-format"
-version = "0.3.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "60e7c00b6c3bf5e38a880eec01d7e829d12ca682079f8238a464def3c4b31627"
 
 [[package]]
 name = "rustix"

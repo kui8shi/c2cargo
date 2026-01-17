@@ -291,7 +291,7 @@ impl<'a> GuardAnalyzer<'a> {
         // record parent-child relation ships
         for &id in node_ids {
             assert!(!self.get_node(parent).unwrap().range.is_empty());
-            self.analyzer.link_body_to_parent(id, parent, new_block_id);
+            self.analyzer.link_child_to_parent(id, parent, new_block_id);
 
             if self.get_node(id).unwrap().range.is_empty() {
                 // propagate ranges information if child doesn't know its range.

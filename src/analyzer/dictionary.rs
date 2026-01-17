@@ -8,7 +8,7 @@ use super::{
     type_inference::DataType,
     value_set_analysis::IdentifierDivision,
     variable::{Identifier, ValueExpr},
-    Analyzer,
+    Analyzer, MayM4, ShellCommand,
 };
 
 /// Represents the operation on the dictionary types
@@ -29,8 +29,8 @@ impl DictionaryKey {
     pub(crate) fn print(&self) -> String {
         use DictionaryKey::*;
         match self {
-            Lit(lit) => format!("\"{}\".to_string()", lit),
-            Var(var) => format!("{}.to_string()", var),
+            Lit(lit) => format!("\"{}\"", lit),
+            Var(var) => format!("{}", var),
         }
     }
 }
@@ -39,7 +39,7 @@ impl DictionaryKey {
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub(crate) enum DictionaryValue {
     Lit(String),
-    Var(String),
+    Var(String, Location),
     Dict(String, Location),
 }
 
@@ -138,26 +138,39 @@ fn strip_underscore(s: &str) -> String {
     s.split("_").filter(|s| !s.is_empty()).join("_")
 }
 
-fn make_dictionary_value(value_expr: &ValueExpr, eval_loc: &Location) -> Vec<DictionaryValue> {
+fn make_dictionary_value(value_expr: &ValueExpr, loc: &Location) -> Option<Vec<DictionaryValue>> {
     match value_expr {
-        ValueExpr::Lit(lit) => vec![DictionaryValue::Lit(lit.clone())],
-        ValueExpr::Var(var, _) => vec![DictionaryValue::Var(var.clone())],
-        ValueExpr::Concat(value_exprs) => value_exprs
-            .iter()
-            .flat_map(|v| make_dictionary_value(v, eval_loc))
-            .collect(),
+        ValueExpr::Lit(lit) => Some(vec![DictionaryValue::Lit(lit.clone())]),
+        ValueExpr::Var(var, var_loc) => {
+            Some(vec![DictionaryValue::Var(var.clone(), var_loc.clone())])
+        }
+        ValueExpr::Concat(value_exprs) => {
+            let mut dict_values: Vec<DictionaryValue> = Vec::new();
+            for ve in value_exprs.iter() {
+                if let Some(values) = make_dictionary_value(ve, loc) {
+                    dict_values.extend(values);
+                } else {
+                    return None;
+                }
+            }
+            // FIXME: incorrect i think. we need to handle the concatenation correctly
+            Some(dict_values)
+        }
         v @ ValueExpr::DynName(_) => {
             let ident: Option<Identifier> = v.into();
-            let mut loc = eval_loc.clone();
+            let mut loc = loc.clone();
             // FIXME: incorrect.
             loc.order_in_expr = loc.order_in_expr.saturating_sub(1);
-            vec![DictionaryValue::Dict(
+            Some(vec![DictionaryValue::Dict(
                 // will be replaced with the dictionary name later
                 encode_identifier(&ident.unwrap()).0,
                 loc.clone(),
-            )]
+            )])
         }
-        _ => todo!("Shell commands in eval statements are unsupported"),
+        _ => {
+            // todo!("Shell commands in eval statements are unsupported: {:?}, {:?}", value_expr, eval_loc),
+            None
+        }
     }
 }
 
@@ -222,7 +235,10 @@ fn search_dictionary_from_eval_assignment_lhs(
         let keys = vars.into_iter().map(DictionaryKey::Var).collect();
         let op = DictionaryOperation::Write;
         let names = vec![make_dictionary_variable_name(&dict_id)];
-        let assigned_value = rhs.as_ref().map(|rhs| make_dictionary_value(rhs, eval_loc));
+        let assigned_value = rhs
+            .as_ref()
+            .map(|rhs| make_dictionary_value(rhs, eval_loc))
+            .flatten();
 
         Some((dict_id, keys, op, names, None, assigned_value))
     } else {
@@ -317,6 +333,20 @@ impl Analyzer {
         // infer dictionary value types
         self.infer_dictionary_value_types(&mut recipes);
 
+        // Build raw_name -> dict_name mapping for resolving Var references
+        let raw_name_to_dict: HashMap<String, String> = recipes
+            .iter()
+            .flat_map(|(dict_id, recipe)| {
+                let dict_name = &names[dict_id];
+                recipe.accesses.iter().filter_map(|(_, access)| {
+                    access
+                        .raw_name
+                        .as_ref()
+                        .map(|raw| (raw.clone(), dict_name.clone()))
+                })
+            })
+            .collect();
+
         // make dictionary instances
         recipes
             .into_values()
@@ -335,6 +365,7 @@ impl Analyzer {
                                 assigned_to: v.assigned_to,
                                 assigned_value: v.assigned_value.map(|vals| {
                                     // replace dict_id with confirmed dictionary name
+                                    // and convert Var to Dict when matching raw_name
                                     vals.into_iter()
                                         .map(|v| match v {
                                             DictionaryValue::Dict(id, loc) => {
@@ -342,6 +373,15 @@ impl Analyzer {
                                                     names[&id.into()].clone(),
                                                     loc,
                                                 )
+                                            }
+                                            DictionaryValue::Var(name, loc) => {
+                                                // Check if this var is actually a dictionary
+                                                if let Some(dict_name) = raw_name_to_dict.get(&name)
+                                                {
+                                                    DictionaryValue::Dict(dict_name.clone(), loc)
+                                                } else {
+                                                    DictionaryValue::Var(name, loc)
+                                                }
                                             }
                                             v => v,
                                         })
@@ -450,6 +490,7 @@ impl Analyzer {
             };
 
             for def_loc in &divided.def_locs {
+                let assigned_value = self.extract_assigned_value_from_def_loc(def_loc);
                 let accesses = &mut recipes.get_mut(&dict_id).unwrap().accesses;
                 accesses.insert(
                     def_loc.clone(),
@@ -458,7 +499,7 @@ impl Analyzer {
                         keys: Some(dict_keys.clone()),
                         raw_name: Some(full_name.to_owned()),
                         assigned_to: None,
-                        assigned_value: None,
+                        assigned_value,
                     },
                 );
             }
@@ -559,13 +600,13 @@ impl Analyzer {
 
     fn infer_dictionary_value_type(&self, access: &DictionaryAccessRecipe) -> DataType {
         if let Some(raw_name) = &access.raw_name {
-            if let Some((_, ty)) = self.get_type_inference_result(raw_name) {
+            if let Some(ty) = self.get_type_inference_result(raw_name) {
                 return ty.clone();
             }
         }
 
         if let Some(assigned_to) = &access.assigned_to {
-            if let Some((_, ty)) = self.get_type_inference_result(assigned_to) {
+            if let Some(ty) = self.get_type_inference_result(assigned_to) {
                 return ty.clone();
             }
         }
@@ -586,6 +627,37 @@ impl Analyzer {
         };
         let value_type = dict.value_type.print();
         format!("HashMap<{}, {}>", key_type, value_type)
+    }
+
+    /// Extracts assigned values from a regular (non-eval) assignment location.
+    /// Returns `Some(Vec<DictionaryValue>)` if the location is an assignment,
+    /// otherwise returns `None`.
+    fn extract_assigned_value_from_def_loc(
+        &self,
+        def_loc: &Location,
+    ) -> Option<Vec<DictionaryValue>> {
+        let nid = def_loc.node_id;
+        let cmd = &self.get_node(nid)?.cmd.0;
+        match cmd {
+            MayM4::Shell(ShellCommand::Assignment(_lhs, rhs)) => {
+                let ifs = self.current_internal_field_separator(def_loc);
+                let value_exprs = self.vsa_inspect_word(rhs, def_loc.order_reset(), ifs);
+                let mut dict_values: Vec<DictionaryValue> = Vec::new();
+                for ve in value_exprs.iter() {
+                    if let Some(values) = make_dictionary_value(ve, def_loc) {
+                        dict_values.extend(values);
+                    } else {
+                        return None;
+                    }
+                }
+                if dict_values.is_empty() {
+                    None
+                } else {
+                    Some(dict_values)
+                }
+            }
+            _ => None,
+        }
     }
 }
 

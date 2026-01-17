@@ -21,7 +21,7 @@ use autotools_parser::{
     parse::autoconf::NodeParser,
 };
 use build_option::BuildOptionInfo;
-use chunk::{Chunk, ChunkId, FunctionSkelton, Scope};
+use chunk::{Chunk, ChunkId, FunctionSkeleton, Scope};
 use dictionary::DictionaryInstance;
 use guard::{Block, BlockId, Guard, GuardAnalyzer};
 use itertools::Itertools;
@@ -511,6 +511,8 @@ pub(crate) struct NodeInfo {
     pub top_id: Option<NodeId>,
     /// ID of the chunk this node belongs to
     pub chunk_id: Option<ChunkId>,
+    /// whether the node is directly hang from the chunk (:not nested node)
+    pub is_chunk_top: Option<bool>,
     /// Exec ID representing execution order of the node.
     pub exec_id: ExecId,
     /// Exec ID at the exit of the node
@@ -537,7 +539,7 @@ pub(crate) struct NodeInfo {
     pub pre_body_nodes: Vec<NodeId>,
     /// Variables defined by this command
     pub definitions: VariableMap,
-    /// Variables bounded by this command (items are duplicated with `definitions`)
+    /// Variables bound by this command (items are duplicated with `definitions`)
     pub bounds: VariableMap,
     /// Variables defined by all children of this command
     pub propagated_definitions: VariableMap,
@@ -557,6 +559,14 @@ impl NodeInfo {
     pub fn is_child_node(&self) -> bool {
         self.parent.is_some()
     }
+
+    pub fn is_flattened_node(&self) -> bool {
+        self.is_top_node() && self.parent.is_some()
+    }
+
+    pub fn is_chunk_top_node(&self) -> bool {
+        self.is_chunk_top.unwrap_or_default()
+    }
 }
 
 /// Configuration options for the analyzer
@@ -571,6 +581,8 @@ pub struct AnalyzerOptions {
     /// Whether to use cached pkg-config analysis results.
     /// When enabled, system package manager results are cached to disk and reused.
     pub use_pkg_config_cache: bool,
+    /// Whether to use LLMs for enhanced analayses or translation.
+    pub use_llm: bool,
     /// Threshold for flattening large command structures.
     /// Commands with more than this many nodes will be flattened.
     pub flatten_threshold: usize,
@@ -580,6 +592,8 @@ pub struct AnalyzerOptions {
     pub chunk_window_size: usize,
     /// Whether to use type inference results.
     pub chunk_disrespect_assignment: bool,
+    /// Whether to rename translated functions according to the LLM outpts.
+    pub rename_rust_functions: bool,
 }
 
 impl Default for AnalyzerOptions {
@@ -589,9 +603,11 @@ impl Default for AnalyzerOptions {
             use_build_option_cache: true,
             use_translation_cache: true,
             use_pkg_config_cache: true,
+            use_llm: true,
             type_inference: true,
             chunk_window_size: 2,
             chunk_disrespect_assignment: false,
+            rename_rust_functions: false,
         }
     }
 }
@@ -639,8 +655,7 @@ pub struct Analyzer {
     var_indirect_usages: Option<VariableMap>,
     /// Set of variables which are used in eval assignments
     eval_assigns: Option<HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>>>,
-    /// dynamically divided identifiers
-    /// The value of entry is a map from eval location to division info
+    /// dynamically divided identifiers (seeds for eval driven dictionaries)
     divided_vars: Option<HashMap<String, DividedVariable>>,
     /// all m4 macro calls
     macro_calls: Option<HashMap<String, Vec<(NodeId, M4Macro)>>>,
@@ -661,9 +676,9 @@ pub struct Analyzer {
     /// Scopes of variables
     var_scopes: Option<HashMap<String, Vec<Scope>>>,
     /// Signatures of chunks as a function
-    chunk_skeletons: Option<HashMap<ChunkId, FunctionSkelton>>,
+    chunk_skeletons: Option<HashMap<ChunkId, FunctionSkeleton>>,
     /// Inferred Types
-    inferred_types: Option<HashMap<String, (HashSet<TypeHint>, DataType)>>,
+    inferred_types: Option<HashMap<String, DataType>>,
     /// Dictionary Instances
     dicts: Option<Vec<DictionaryInstance>>,
     /// Analysis result of Automake files.
@@ -688,14 +703,6 @@ pub(crate) struct ProjectMetadata {
 
 #[allow(dead_code)]
 impl Analyzer {
-    /// Reorganize nodes to flatten deeply nested command blocks
-    /// Note that once we call it, the structure of nodes will change irreversibly,
-    /// which will affect behaviors of many analysis paths.
-    pub fn flatten(&mut self) {
-        Flattener::flatten(self, self.options.flatten_threshold);
-        self.has_flattened_nodes = true;
-    }
-
     /// Analyze commands and build the dependency graph
     pub fn new(path: &Path, options: Option<AnalyzerOptions>) -> Self {
         let contents = if path.file_name().is_some_and(|os_str| {
@@ -806,6 +813,7 @@ impl Analyzer {
             Some(s.options.chunk_window_size),
             s.options.chunk_disrespect_assignment,
         );
+
         s.cut_variable_scopes_chunkwise();
 
         s.aggregate_env_vars();
@@ -815,12 +823,24 @@ impl Analyzer {
         s
     }
 
-    /// Get guard conditions of given variable location
-    fn guard_of_location(&self, location: &Location) -> Vec<Guard> {
-        if let Some(block_id) = self.get_node(location.node_id).unwrap().info.block {
+    /// Reorganize nodes to flatten deeply nested command blocks
+    /// Note that once we call it, the structure of nodes will change irreversibly,
+    /// which will affect behaviors of many analysis paths.
+    fn flatten(&mut self) {
+        Flattener::flatten(self, self.options.flatten_threshold);
+        self.has_flattened_nodes = true;
+    }
+
+    fn verify_relationships_between_node_and_node_id(&self) -> bool {
+        self.pool.nodes.iter().all(|(nid, n)| nid == n.info.node_id)
+    }
+
+    /// Get guard conditions of given node id
+    fn get_guards(&self, node_id: NodeId) -> Vec<Guard> {
+        if let Some(block_id) = self.get_node(node_id).unwrap().info.block {
             self.blocks[block_id].guards.clone()
         } else if let Some(block_id) = self
-            .get_parent(location.node_id)
+            .get_parent(node_id)
             .and_then(|parent| self.get_node(parent).unwrap().info.block)
         {
             self.blocks[block_id].guards.clone()
@@ -972,8 +992,8 @@ impl Analyzer {
                     .filter(|def_loc| def_loc <= &use_loc)
                     .filter(|def_loc| {
                         guard::cmp_guards(
-                            &self.guard_of_location(def_loc),
-                            &self.guard_of_location(use_loc),
+                            &self.get_guards(def_loc.node_id),
+                            &self.get_guards(use_loc.node_id),
                         )
                         .is_some_and(|ord| matches!(ord, Ordering::Less | Ordering::Equal))
                     })
@@ -1073,13 +1093,9 @@ impl Analyzer {
         self.get_node(node_id).unwrap().info.parent
     }
 
-    fn link_body_to_parent(&mut self, node_id: NodeId, parent: NodeId, block: BlockId) {
-        self.get_node_mut(node_id).unwrap().info.parent = Some(parent);
-        self.get_node_mut(node_id).unwrap().info.block = Some(block);
-    }
-
-    fn link_pre_body_to_parent(&mut self, node_id: NodeId, parent: NodeId) {
-        self.get_node_mut(node_id).unwrap().info.parent = Some(parent);
+    fn link_child_to_parent(&mut self, child: NodeId, parent: NodeId, block: BlockId) {
+        self.get_node_mut(child).unwrap().info.parent = Some(parent);
+        self.get_node_mut(child).unwrap().info.block = Some(block);
     }
 
     pub fn get_children(&self, node_id: NodeId) -> Option<Vec<NodeId>> {
@@ -1342,7 +1358,7 @@ impl Analyzer {
             .info
             .pre_body_nodes
             .push(pre_body_node_id);
-        self.link_pre_body_to_parent(pre_body_node_id, parent);
+        self.get_node_mut(pre_body_node_id).unwrap().info.parent = Some(parent);
     }
 
     fn collect_descendant_nodes_per_node(
