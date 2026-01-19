@@ -485,7 +485,8 @@ impl Analyzer {
             } else {
                 let keys = keys_for_evals.next().unwrap().clone();
                 keys.into_iter()
-                    .map(|v| DictionaryKey::Lit(strip_underscore(v)))
+                    .map(|v| DictionaryKey::Lit(v.to_owned())) // we could not use `strip_underscore`
+                    // here since we can't control run-time values of variables.
                     .collect::<Vec<_>>()
             };
 
@@ -573,7 +574,7 @@ impl Analyzer {
         }
         vals_without_omission
             .into_iter()
-            .map(|v| DictionaryKey::Lit(strip_underscore(v)))
+            .map(|v| DictionaryKey::Lit(v.to_owned()))
             .collect::<Vec<_>>()
     }
 

@@ -1,3 +1,5 @@
+use crate::analyzer::as_single;
+
 use super::{M4Argument, M4Macro};
 use itertools::Itertools;
 use std::collections::{HashMap, HashSet};
@@ -384,7 +386,8 @@ impl<'a> GuardAnalyzer<'a> {
         }
 
         match &w1.0 {
-            Word::Empty => as_shell(w2)
+            Word::Empty => as_single(w2)
+                .and_then(as_shell)
                 .and_then(as_var)
                 .map(|var| Guard::confirmed(Atom::Var(var.to_owned(), VarCond::Empty))),
             Word::Single(MayM4::Shell(w1)) => {
@@ -418,7 +421,7 @@ impl<'a> GuardAnalyzer<'a> {
                         }
                         _ => {}
                     }
-                } else if let Some(w2) = as_shell(w2) {
+                } else if let Some(w2) = as_single(w2).and_then(as_shell) {
                     if let WordFragment::DoubleQuoted(frags) = w1 {
                         if frags.len() >= 2 {
                             let w1_first = &frags[0];
@@ -458,7 +461,7 @@ impl<'a> GuardAnalyzer<'a> {
                 None
             }
             Word::Concat(concat) if concat.len() == 2 => {
-                if let Some(w2) = as_shell(w2) {
+                if let Some(w2) = as_single(w2).and_then(as_shell) {
                     if let Some(frags) = concat
                         .iter()
                         .map(|w| match w {
@@ -492,8 +495,8 @@ impl<'a> GuardAnalyzer<'a> {
         direct_op: fn(VoL) -> VarCond,
         swapped_op: fn(VoL) -> VarCond,
     ) -> Option<Guard> {
-        let s1 = as_shell(w1);
-        let s2 = as_shell(w2);
+        let s1 = as_single(w1).and_then(as_shell);
+        let s2 = as_single(w2).and_then(as_shell);
 
         // Case 1: Variable [OP] Value (e.g., $x >= 10)
         if let (Some(v1), Some(v2)) = (s1.and_then(as_var), s2.and_then(as_vol)) {
@@ -516,7 +519,7 @@ impl<'a> GuardAnalyzer<'a> {
             match &node.cmd.0 {
                 Shell(Cmd(words)) if words.len() == 1 => {
                     let first_word = words.first().unwrap();
-                    if let Some(command) = &as_shell(first_word) {
+                    if let Some(command) = &as_single(first_word).and_then(as_shell) {
                         match command {
                             WordFragment::Literal(name) => match name.as_str() {
                                 "true" => return Some(true),
@@ -652,7 +655,7 @@ impl<'a> GuardAnalyzer<'a> {
                 Operator::Empty(w) => {
                     // visit words just for some recording
                     self.visit_word(w);
-                    if let Some(name) = as_shell(w).and_then(as_var) {
+                    if let Some(name) = as_single(w).and_then(as_shell).and_then(as_var) {
                         Guard::confirmed(Atom::Var(name.to_owned(), VarCond::Empty))
                     } else {
                         panic!("unsupported syntax");
@@ -662,7 +665,7 @@ impl<'a> GuardAnalyzer<'a> {
                     // visit words just for some recording
                     self.visit_word(w);
 
-                    if let Some(name) = as_shell(w).and_then(as_var) {
+                    if let Some(name) = as_single(w).and_then(as_shell).and_then(as_var) {
                         Guard::negated(Atom::Var(name.to_owned(), VarCond::Empty))
                     } else {
                         panic!("unsupported syntax");
@@ -687,7 +690,7 @@ impl<'a> GuardAnalyzer<'a> {
     }
 
     fn pattern_to_guard(&self, word: &AcWord, pattern: &AcWord) -> Option<Guard> {
-        if let Some(word) = as_shell(word) {
+        if let Some(word) = as_single(word).and_then(as_shell) {
             let word = if let &WordFragment::DoubleQuoted(frags) = &word {
                 if frags.len() == 1 {
                     frags.first().unwrap()
@@ -927,7 +930,7 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
     fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
         let saved_stack = self.guard_stack.clone();
         let mut is_platform_branch = false;
-        if let Some(w) = as_shell(word) {
+        if let Some(w) = as_single(word).and_then(as_shell) {
             let node_id = self.cursor.unwrap();
             if let WordFragment::Subst(subst) = w {
                 if let ParameterSubstitution::Command(cmds) = subst.as_ref() {

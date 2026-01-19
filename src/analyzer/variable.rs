@@ -3,7 +3,9 @@ use std::{
     hash::Hash,
 };
 
+use autotools_parser::m4_macro::M4Argument;
 use bincode::{Decode, Encode};
+use regex::Regex;
 
 use super::{
     location::Location, AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, ExecId, M4Macro,
@@ -409,6 +411,15 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
                     if var.is_defined() {
                         self.record_variable_definition(&var.name);
                     }
+                }
+            }
+        }
+        for arg in m4_macro.args.iter() {
+            if let M4Argument::Program(prog) = arg {
+                let var_re = Regex::new(r#"\$\{?(?<var>[a-zA-Z0-9_]+)\}?"#).unwrap();
+                for cap in var_re.captures_iter(prog) {
+                    let appeared_shell_var = cap.name("var").unwrap().as_str();
+                    self.record_variable_usage(appeared_shell_var);
                 }
             }
         }

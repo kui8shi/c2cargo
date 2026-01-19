@@ -70,8 +70,16 @@ type VariableMap = HashMap<String, Vec<Location>>;
 type NodeDependencyMap = HashMap<NodeId, HashSet<String>>;
 type Node = autotools_parser::ast::node::Node<AcCommand, NodeInfo>;
 
-fn as_shell(word: &AcWord) -> Option<&WordFragment<AcWord>> {
-    if let Word::Single(MayM4::Shell(shell_word)) = &word.0 {
+fn as_single(word: &AcWord) -> Option<&AcWordFragment> {
+    if let Word::Single(ac_word) = &word.0 {
+        Some(ac_word)
+    } else {
+        None
+    }
+}
+
+fn as_shell(word: &AcWordFragment) -> Option<&WordFragment<AcWord>> {
+    if let MayM4::Shell(shell_word) = &word {
         Some(shell_word)
     } else {
         None
@@ -820,6 +828,7 @@ impl Analyzer {
 
         s.construct_chunk_skeletons();
 
+        dbg!(&s.inferred_types);
         s
     }
 
@@ -1417,7 +1426,7 @@ impl Analyzer {
     pub(crate) fn collect_variables(&self, node_id: NodeId) -> (VariableMap, VariableMap) {
         let mut defines = HashMap::new();
         let mut uses = HashMap::new();
-        for id in self.collect_descendant_nodes_per_node(node_id, true, false) {
+        for id in self.collect_descendant_nodes_per_node(node_id, true, true) {
             if let Some(node) = self.get_node(id) {
                 let new_defines = node
                     .info

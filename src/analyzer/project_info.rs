@@ -6,7 +6,7 @@ use std::{
 use regex::{Captures, Regex};
 
 use super::{automake::WithGuard, Analyzer};
-use crate::utils::enumerate::enumerate_combinations;
+use crate::{analyzer::as_single, utils::enumerate::enumerate_combinations};
 
 #[derive(Debug, Default)]
 pub(crate) struct ProjectInfo {
@@ -123,7 +123,9 @@ impl Analyzer {
                     };
 
                     if let Some(word) = target_word {
-                        if let Some(literal) = as_shell(word).and_then(as_literal) {
+                        if let Some(literal) =
+                            as_single(word).and_then(as_shell).and_then(as_literal)
+                        {
                             if !literal.starts_with("/") {
                                 redirected_files.insert(literal.into());
                             }
@@ -149,11 +151,18 @@ impl Analyzer {
         // Iterate over all nodes looking for rm commands
         for (node_id, node) in self.pool.nodes.iter() {
             if let MayM4::Shell(ShellCommand::Cmd(words)) = &node.cmd.0 {
-                if let Some(literal) = words.first().and_then(as_shell).and_then(as_literal) {
+                if let Some(literal) = words
+                    .first()
+                    .and_then(as_single)
+                    .and_then(as_shell)
+                    .and_then(as_literal)
+                {
                     if literal == "rm" {
                         // Process rm arguments
                         for arg_word in words.iter().skip(1) {
-                            if let Some(literal) = as_shell(arg_word).and_then(as_literal) {
+                            if let Some(literal) =
+                                as_single(arg_word).and_then(as_shell).and_then(as_literal)
+                            {
                                 // Skip flags like -f, -rf, etc.
                                 if !literal.starts_with('-') {
                                     removed_files

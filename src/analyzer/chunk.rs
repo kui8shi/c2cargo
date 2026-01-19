@@ -5,12 +5,20 @@ use super::{
     ShellCommand,
 };
 use itertools::Itertools;
+use slab::Slab;
 use std::{
     collections::{HashMap, HashSet},
     ops::Not,
 };
 
 pub(crate) type ChunkId = usize;
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ChunkTree {
+    id: ChunkId,
+    parent: Option<ChunkId>,
+    children: Vec<ChunkTree>,
+}
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Scope {
@@ -28,6 +36,8 @@ pub(crate) struct Scope {
     pub overwriters: Vec<ChunkId>,
     /// IDs of the chunks that read the variable
     pub readers: Vec<ChunkId>,
+    /// Record relationships between chunks to appear
+    pub post_order: Vec<ChunkId>,
     /// Inferred type for this specific scope.
     /// Set after scope splitting for variables with multiple scopes.
     pub inferred_type: Option<DataType>,
@@ -689,14 +699,12 @@ impl Analyzer {
     }
 
     fn add_chunkwise_scope(&mut self, var: &str, mut scope: Scope) {
-        // if !self.input_vars.as_ref().unwrap().contains(var) && scope.has_no_writers() {
-        //     return;
-        // }
         scope.writers.sort_by_key(|cid| self.chunks[*cid].range.0);
         scope
             .overwriters
             .sort_by_key(|cid| self.chunks[*cid].range.0);
         scope.readers.sort_by_key(|cid| self.chunks[*cid].range.0);
+        scope.post_order = self.calculate_chunk_post_order(&scope);
         self.var_scopes
             .as_mut()
             .unwrap()
@@ -705,6 +713,74 @@ impl Analyzer {
             .push(scope);
     }
 
+    fn calculate_chunk_post_order(&self, scope: &Scope) -> Vec<ChunkId> {
+        // Identify all relevant nodes (scope IDs + all their ancestors).
+        let mut relevant_nodes = HashSet::new();
+        let initial_cids = scope
+            .owner
+            .iter()
+            .chain(scope.writers.iter())
+            .chain(scope.overwriters.iter())
+            .chain(scope.readers.iter())
+            .chain(scope.bound_by.iter());
+
+        for &cid in initial_cids {
+            let mut curr = Some(cid);
+            while let Some(id) = curr {
+                // If we insert a node that was already present, we know its ancestors
+                // are also already present, so we can stop climbing.
+                if !relevant_nodes.insert(id) {
+                    break;
+                }
+                curr = self.chunks[id].parent;
+            }
+        }
+
+        if relevant_nodes.is_empty() {
+            return Vec::new();
+        }
+
+        // Find the roots of the forest to start traversal.
+        // Since we climbed to the very top, these are nodes in our set with no parent.
+        let mut roots: Vec<ChunkId> = relevant_nodes
+            .iter()
+            .filter(|&&id| self.chunks[id].parent.is_none())
+            .cloned()
+            .collect();
+
+        // Sort roots by range start to ensure processing order matches file order.
+        roots.sort_by_key(|&id| self.chunks[id].range.0);
+
+        // Perform DFS restricted to the relevant_nodes set.
+        let mut result = Vec::with_capacity(relevant_nodes.len());
+
+        // We use a recursive helper that utilizes the existing `chunk.children` structure.
+        fn dfs(
+            current_id: ChunkId,
+            chunks: &Slab<Chunk>,
+            relevant_mask: &HashSet<ChunkId>,
+            result: &mut Vec<ChunkId>,
+        ) {
+            let chunk = &chunks[current_id];
+
+            // Visit children first (Post-Order)
+            for &child_id in &chunk.children {
+                // Only traverse into children that are part of our relevant set.
+                if relevant_mask.contains(&child_id) {
+                    dfs(child_id, chunks, relevant_mask, result);
+                }
+            }
+
+            // Visit self
+            result.push(current_id);
+        }
+
+        for root in roots {
+            dfs(root, &self.chunks, &relevant_nodes, &mut result);
+        }
+
+        result
+    }
     fn get_parental_chunk_sequence(&self, chunk_id: ChunkId) -> Vec<ChunkId> {
         let mut ret = Vec::new();
         let mut current = chunk_id;
@@ -725,7 +801,10 @@ impl Analyzer {
         for (var, scopes) in self.var_scopes.as_ref().unwrap().iter() {
             for scope in scopes {
                 if let Some(cid) = scope.owner.as_ref() {
-                    let is_mut = !scope.writers.is_empty() || !scope.overwriters.is_empty();
+                    let pos = scope.post_order.iter().position(|id| id == cid).unwrap();
+                    let is_mut = scope.post_order[pos..]
+                        .iter()
+                        .any(|id| scope.writers.contains(id) || scope.overwriters.contains(id));
                     let ty = self.get_inferred_type_for_scope(var, scope);
                     chunk_skeletons
                         .get_mut(cid)
@@ -735,7 +814,10 @@ impl Analyzer {
                         .and_modify(|(existing_mut, _)| *existing_mut = *existing_mut || is_mut)
                         .or_insert((is_mut, ty));
                 } else if let Some(cid) = scope.bound_by.as_ref() {
-                    let is_mut = !scope.writers.is_empty() || !scope.overwriters.is_empty();
+                    let pos = scope.post_order.iter().position(|id| id == cid).unwrap();
+                    let is_mut = scope.post_order[pos..]
+                        .iter()
+                        .any(|id| scope.writers.contains(id) || scope.overwriters.contains(id));
                     let ty = self.get_inferred_type_for_scope(var, scope);
                     chunk_skeletons
                         .get_mut(cid)
@@ -745,7 +827,10 @@ impl Analyzer {
                         .and_modify(|(existing_mut, _)| *existing_mut = *existing_mut || is_mut)
                         .or_insert((is_mut, ty));
                 } else if let Some(cid) = scope.parent.as_ref() {
-                    let is_mut = !scope.writers.is_empty() || !scope.overwriters.is_empty();
+                    let pos = scope.post_order.iter().position(|id| id == cid).unwrap();
+                    let is_mut = scope.post_order[pos..]
+                        .iter()
+                        .any(|id| scope.writers.contains(id) || scope.overwriters.contains(id));
                     let ty = self.get_inferred_type_for_scope(var, scope);
                     chunk_skeletons
                         .get_mut(cid)
@@ -836,7 +921,7 @@ impl Analyzer {
             // propagate variables from child to parent
             while let Some(child_cid) = post_order.pop() {
                 if let Some(parent_cid) = self.chunks.get(child_cid).unwrap().parent {
-                    let parent_scope_vars = self
+                    let vars_within_parent_scope = self
                         .var_scopes
                         .as_ref()
                         .unwrap()
@@ -855,52 +940,77 @@ impl Analyzer {
                         .collect::<HashSet<_>>();
                     let sk = chunk_skeletons.get(&child_cid).unwrap();
                     let parent = chunk_skeletons.get(&parent_cid).unwrap();
-                    // check inlet: collect args that need to pass through
-                    let pass_through_args: Vec<_> = sk
+                    // check new propagation: collect args that need to pass through
+                    let args_propagation: Vec<_> = sk
                         .args
                         .iter()
                         .chain(sk.pass_through_args.iter())
                         .filter(|(name, _)| {
-                            !parent.args.contains_key(*name)
-                                && !parent.pass_through_args.contains_key(*name)
-                                && !parent_scope_vars.contains(*name)
-                                && !parent.return_to_bind.contains_key(*name)
+                            !parent.return_to_bind.contains_key(*name)
+                                && !vars_within_parent_scope.contains(*name)
                         })
-                        .map(|(name, (is_mut, ty))| (name.clone(), (*is_mut, ty.clone())))
+                        .map(|(name, (is_mut, ty))| {
+                            if parent.args.contains_key(name) {
+                                // propagate mutability to the arg
+                                (name.clone(), Some(*is_mut), None, ty.clone())
+                            } else {
+                                // propagate mutability to the pass through arg
+                                (name.clone(), None, Some(*is_mut), ty.clone())
+                            }
+                        })
                         .collect();
-                    let pass_through_maps: Vec<_> = sk
+                    let maps_propagation: Vec<_> = sk
                         .maps
                         .iter()
                         .chain(sk.pass_through_maps.iter())
-                        .filter(|(name, _)| {
-                            !parent.maps.contains_key(*name)
-                                && !parent.pass_through_maps.contains_key(*name)
+                        .map(|(name, is_mut)| {
+                            if parent.maps.contains_key(name) {
+                                // propagate mutability to the map
+                                (name.clone(), Some(*is_mut), None)
+                            } else {
+                                // propagate mutability to the pass through map
+                                (name.clone(), None, Some(*is_mut))
+                            }
                         })
-                        .map(|(name, is_mut)| (name.clone(), *is_mut))
                         .collect();
-                    let pass_through_returns: Vec<_> = sk
+                    let return_propagation: Vec<_> = sk
                         .return_to_bind
                         .iter()
-                        .filter(|(name, _)| !parent_scope_vars.contains(*name))
+                        .filter(|(name, _)| !vars_within_parent_scope.contains(*name))
                         .map(|(name, (is_mut, ty))| (name.clone(), (*is_mut, ty.clone())))
                         .collect();
                     // update the parent with mutability OR-ing
                     let parent = chunk_skeletons.get_mut(&parent_cid).unwrap();
-                    for (name, (is_mut, ty)) in pass_through_args {
-                        parent
-                            .pass_through_args
-                            .entry(name)
-                            .and_modify(|(existing_mut, _)| *existing_mut = *existing_mut || is_mut)
-                            .or_insert((is_mut, ty));
+                    for (name, is_arg_mut, is_pass_through_arg_mut, ty) in args_propagation {
+                        if let Some(is_mut) = is_arg_mut {
+                            parent.args.entry(name).and_modify(|(existing_mut, _)| {
+                                *existing_mut = *existing_mut || is_mut
+                            });
+                        } else if let Some(is_mut) = is_pass_through_arg_mut {
+                            parent
+                                .pass_through_args
+                                .entry(name)
+                                .and_modify(|(existing_mut, _)| {
+                                    *existing_mut = *existing_mut || is_mut
+                                })
+                                .or_insert((is_mut, ty));
+                        }
                     }
-                    for (name, is_mut) in pass_through_maps {
-                        parent
-                            .pass_through_maps
-                            .entry(name)
-                            .and_modify(|existing_mut| *existing_mut = *existing_mut || is_mut)
-                            .or_insert(is_mut);
+                    for (name, is_map_mut, is_pass_through_map_mut) in maps_propagation {
+                        if let Some(is_mut) = is_map_mut {
+                            parent
+                                .maps
+                                .entry(name)
+                                .and_modify(|existing_mut| *existing_mut = *existing_mut || is_mut);
+                        } else if let Some(is_mut) = is_pass_through_map_mut {
+                            parent
+                                .pass_through_maps
+                                .entry(name)
+                                .and_modify(|existing_mut| *existing_mut = *existing_mut || is_mut)
+                                .or_insert(is_mut);
+                        }
                     }
-                    for (name, (is_mut, ty)) in pass_through_returns {
+                    for (name, (is_mut, ty)) in return_propagation {
                         parent
                             .return_to_bind
                             .entry(name)

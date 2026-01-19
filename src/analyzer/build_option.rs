@@ -9,7 +9,8 @@ use super::{
     guard::{Atom, Guard, VarCond, VoL},
     Analyzer, M4Macro, NodeId,
 };
-use crate::utils::llm_analysis::{LLMAnalysis, LLMResultWithMeta};
+use crate::analyzer::as_single;
+use crate::utils::llm_analysis::LLMAnalysis;
 use crate::{
     analyzer::build_option::use_llm::BuildOptionLLMAnalysisResult, utils::glob::glob_enumerate,
 };
@@ -346,7 +347,7 @@ impl Analyzer {
                 // Check if this assignment is for our target variable
                 if info.arg_var_to_option_name.contains_key(lhs.as_str()) {
                     // Check if the right-hand side is the literal "no"
-                    if let Some(shell_word) = as_shell(rhs) {
+                    if let Some(shell_word) = as_single(rhs).and_then(as_shell) {
                         if let Some(literal) = as_literal(shell_word) {
                             if literal == "no" {
                                 nodes_to_remove.push(node_id);
@@ -384,7 +385,7 @@ impl Analyzer {
                 // Check if this assignment is for our target variable
                 if let Some(option_name) = info.arg_var_to_option_name.get(arg_var) {
                     // Check if the right-hand side is the literal "yes"
-                    if let Some(shell_word) = as_shell(rhs) {
+                    if let Some(shell_word) = as_single(rhs).and_then(as_shell) {
                         if let Some(literal) = as_literal(shell_word) {
                             if literal == "yes" {
                                 nodes_to_remove.push(node_id);

@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::analyzer::{
-    as_literal, as_shell, as_var,
+    as_literal, as_shell, as_single, as_var,
     guard::{Atom, VarCond, VoL},
     Guard,
 };
@@ -173,7 +173,7 @@ impl<'a> TypeInferrer<'a> {
         // we assume variable enumeration is already completed.
         let mut s = Self {
             analyzer,
-            types: known_types(),
+            types: KNOWN_TYPES.clone(),
             type_hints: HashMap::new(),
             type_relations: HashSet::new(),
             assigned: HashMap::new(),
@@ -380,13 +380,13 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
     }
 
     fn visit_case(&mut self, word: &AcWord, arms: &[PatternBodyPair<AcWord>]) {
-        if let Some(var) = as_shell(word).and_then(as_var) {
+        if let Some(var) = as_single(word).and_then(as_shell).and_then(as_var) {
             for arm in arms {
                 for pattern in &arm.patterns {
-                    if let Some(lit) = as_shell(pattern).and_then(as_literal) {
+                    if let Some(lit) = as_single(pattern).and_then(as_shell).and_then(as_literal) {
                         self.check_literal(var, lit);
                     }
-                    if let Some(pat_var) = as_shell(pattern).and_then(as_var) {
+                    if let Some(pat_var) = as_single(pattern).and_then(as_shell).and_then(as_var) {
                         self.record_type_relation(pat_var, var);
                     }
                 }
@@ -396,21 +396,21 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
     }
 
     fn visit_command(&mut self, cmd_words: &[AcWord]) {
-        if let Some(exec) = cmd_words.first().and_then(as_shell) {
+        if let Some(exec) = cmd_words.first().and_then(as_single).and_then(as_shell) {
             if let Some(name) = as_var(exec) {
                 self.add_type_hint(name, UsedAsCommand);
             }
             if let Some(lit) = as_literal(exec) {
                 if matches!(lit, "rm" | "cat") {
                     for arg in &cmd_words[1..] {
-                        if let Some(name) = as_shell(arg).and_then(as_var) {
+                        if let Some(name) = as_single(arg).and_then(as_shell).and_then(as_var) {
                             self.add_type_hint(name, UsedAsPath);
                         }
                     }
                 }
                 if matches!(lit, "expr") {
                     for arg in &cmd_words[1..] {
-                        if let Some(name) = as_shell(arg).and_then(as_var) {
+                        if let Some(name) = as_single(arg).and_then(as_shell).and_then(as_var) {
                             self.add_type_hint(name, UsedInExpr);
                         }
                     }
@@ -425,32 +425,32 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
         if let Condition::Cond(op) = cond {
             match op {
                 Eq(lhs, rhs) | Neq(lhs, rhs) => {
-                    if let Some(lit) = as_shell(rhs).and_then(as_literal) {
-                        if let Some(var) = as_shell(lhs).and_then(as_var) {
+                    if let Some(lit) = as_single(rhs).and_then(as_shell).and_then(as_literal) {
+                        if let Some(var) = as_single(lhs).and_then(as_shell).and_then(as_var) {
                             self.check_literal(var, lit);
                         }
                     }
-                    if let Some(lit) = as_shell(lhs).and_then(as_literal) {
-                        if let Some(var) = as_shell(rhs).and_then(as_var) {
+                    if let Some(lit) = as_single(lhs).and_then(as_shell).and_then(as_literal) {
+                        if let Some(var) = as_single(rhs).and_then(as_shell).and_then(as_var) {
                             self.check_literal(var, lit);
                         }
                     }
                 }
                 Ge(lhs, rhs) | Gt(lhs, rhs) | Le(lhs, rhs) | Lt(lhs, rhs) => {
-                    if let Some(var) = as_shell(lhs).and_then(as_var) {
+                    if let Some(var) = as_single(lhs).and_then(as_shell).and_then(as_var) {
                         self.add_type_hint(var, SizeComparison);
                     }
-                    if let Some(var) = as_shell(rhs).and_then(as_var) {
+                    if let Some(var) = as_single(rhs).and_then(as_shell).and_then(as_var) {
                         self.add_type_hint(var, SizeComparison);
                     }
                 }
                 Empty(w) | NonEmpty(w) => {
-                    if let Some(var) = as_shell(w).and_then(as_var) {
+                    if let Some(var) = as_single(w).and_then(as_shell).and_then(as_var) {
                         self.add_type_hint(var, CanBeEmpty);
                     }
                 }
                 Dir(w) | File(w) | NoExists(w) => {
-                    if let Some(var) = as_shell(w).and_then(as_var) {
+                    if let Some(var) = as_single(w).and_then(as_shell).and_then(as_var) {
                         self.add_type_hint(var, UsedAsPath);
                     }
                 }
@@ -496,7 +496,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                 | Heredoc(_, w)
                 | DupRead(_, w)
                 | DupWrite(_, w) => {
-                    if let Some(var) = as_shell(w).and_then(as_var) {
+                    if let Some(var) = as_single(w).and_then(as_shell).and_then(as_var) {
                         self.add_type_hint(var, UsedAsPath);
                     }
                 }
@@ -566,6 +566,9 @@ lazy_static::lazy_static! {
 
 fn known_types() -> HashMap<String, DataType> {
     HashMap::from([
+        // For CC, i know there is a case like 'CC="gcc -pipe"' but why
+        // not put the flags to CFLAGS? things should be simplified AMAP
+        ("CC".into(), DataType::Literal),
         ("LIBS".into(), DataType::List(Box::new(DataType::Literal))),
         (
             "LDFLAGS".into(),

@@ -16,7 +16,7 @@ use crate::{
         record::TranslationType,
         translator::{
             printer::TranslatingPrinter,
-            use_llm::{LLMBasedTranslationOutput, LLMUser},
+            use_llm::{LLMBasedTranslationOutput, LLMUser, LLMValidationFunc},
         },
         type_inference::DataType,
         MayM4, ShellCommand,
@@ -355,10 +355,11 @@ impl Analyzer {
                         "option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()",
                         &name
                     ),
-                    DataType::Literal | DataType::Either(_, _) => format!(
-                        "option_env!(\"{}\").unwrap_or_default().to_owned()",
-                        &name
-                    ),
+                    DataType::Literal | DataType::Either(_, _) =>  if let Some(val) = has_known_value(name) {
+                        format!("option_env!(\"{}\").unwrap_or(\"{}\").to_owned()", name, val)
+                    } else {
+                        format!("option_env!(\"{}\").unwrap_or_default().to_owned()", name)
+                    },
                     DataType::Path => format!("option_env!(\"{}\").unwrap_or(\"\").into()", &name),
                     _ => todo!(),
                 };
@@ -638,6 +639,16 @@ impl Analyzer {
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
 
+        // Patterns to sanitize in LLM output if not found in the original script
+        // Format: (escaped_pattern, replacement)
+        let sanitize_patterns: &[(&str, &str)] = &[
+            ("\\n", "\n"),
+            ("\\t", "\t"),
+            ("\\\\", "\\"),
+        ];
+        // Track which patterns to sanitize for each chunk
+        let mut chunk_sanitize_patterns: HashMap<ChunkId, Vec<(&str, &str)>> = HashMap::new();
+
         // Collect rule-based translations for inlining during LLM processing
         let mut inlined_translations: HashMap<ChunkId, InlinedTranslationOutput> = self
             .chunks
@@ -730,6 +741,14 @@ impl Analyzer {
                     .map(|nid| printer.print_node(*nid).to_string())
                     .join("\n");
 
+                // Collect patterns to sanitize (those not found in the original script)
+                let patterns_to_sanitize: Vec<(&str, &str)> = sanitize_patterns
+                    .iter()
+                    .filter(|(pattern, _)| !script.contains(pattern))
+                    .copied()
+                    .collect();
+                chunk_sanitize_patterns.insert(chunk_id, patterns_to_sanitize);
+
                 if script.trim().is_empty() {
                     // empty chunk
                     inlined_translations.insert(
@@ -783,9 +802,33 @@ impl Analyzer {
                     skeleton.clone(),
                     &required_funcs,
                 );
+                let extra_validation_funcs = if let Some(threshold) =
+                    printer.get_max_num_consecutive_slashes()
+                {
+                    vec![Box::new(move |content: &str| -> Option<String> {
+                        let mut consecutive_count = 0;
+                        for c in content.chars() {
+                            if c == '\\' {
+                                consecutive_count += 1;
+                                if consecutive_count > threshold {
+                                    return Some(format!(
+                                            "Detected excessive usage of slash characters: '{}', which must be invalid.",
+                                            std::iter::repeat('\\').take(threshold).collect::<String>()
+                                        ));
+                                }
+                            } else {
+                                consecutive_count = 0;
+                            }
+                        }
+                        None
+                    }) as LLMValidationFunc]
+                } else {
+                    Default::default()
+                };
                 let evidence = LLMBasedTranslationEvidence {
                     id: chunk_id,
                     rust_snippets: printer.get_translated_fragments(),
+                    extra_validation_funcs,
                     predefinition: use_llm::get_predefinition(&required_funcs),
                     features: printer.get_cargo_features(),
                     header,
@@ -822,7 +865,14 @@ impl Analyzer {
                             retry_count: result.retry_count,
                         },
                     );
-                    res.insert(chunk_id, result.output);
+                    // Sanitize patterns not found in the original script
+                    let mut output = result.output;
+                    if let Some(patterns) = chunk_sanitize_patterns.get(&chunk_id) {
+                        for (pattern, replacement) in patterns {
+                            output.rust_func_body = output.rust_func_body.replace(pattern, replacement);
+                        }
+                    }
+                    res.insert(chunk_id, output);
                 }
 
                 if self.options.rename_rust_functions {
@@ -1069,9 +1119,12 @@ fn main() {{
             "write_file",
             "define_cfg_with_record",
             "define_env_with_record",
+            "sanitize_rust_name",
             "check_header",
             "check_library",
             "check_decl",
+            "check_compile",
+            "check_link",
             "pkg_config",
         ]) + &get_function_definition_record(record_path)
             + "\n"
@@ -1107,4 +1160,20 @@ fn get_bindgen_callsite<S: std::fmt::Display>(tab: &str, cflags_var_names: &[S])
             .map(|var_name| format!("&{}", var_name))
             .join(", ")
     )
+}
+
+lazy_static::lazy_static! {
+    /// Predefined m4/autoconf macros
+    static ref KNOWN_VALUES: HashMap<String, String> = known_values();
+}
+
+fn known_values() -> HashMap<String, String> {
+    HashMap::from([
+        ("CC".into(), "cc".into()),
+        ("AWK".into(), "awk".into())
+    ])
+}
+
+fn has_known_value(name: &str) -> Option<String> {
+    KNOWN_VALUES.get(name).cloned()
 }

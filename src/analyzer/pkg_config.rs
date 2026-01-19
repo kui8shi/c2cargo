@@ -14,7 +14,7 @@ use autotools_parser::ast::{minimal::WordFragment, node::NodeId, Parameter};
 use itertools::Itertools;
 
 use crate::{
-    analyzer::{as_literal, as_shell, guard::VoL, Analyzer},
+    analyzer::{as_literal, as_shell, as_single, guard::VoL, Analyzer},
     utils::is_h_extension,
 };
 
@@ -643,12 +643,17 @@ impl Analyzer {
 
                     let mut packages = Vec::new();
                     while let Some(w) = words.next() {
-                        if let Some(package_name) =
-                            as_shell(&w).and_then(as_literal).map(|s| s.to_owned())
+                        if let Some(package_name) = as_single(&w)
+                            .and_then(as_shell)
+                            .and_then(as_literal)
+                            .map(|s| s.to_owned())
                         {
                             let mut peekable = words.clone().peekable();
-                            let peeked_literal =
-                                peekable.peek().and_then(as_shell).and_then(as_literal);
+                            let peeked_literal = peekable
+                                .peek()
+                                .and_then(as_single)
+                                .and_then(as_shell)
+                                .and_then(as_literal);
                             let has_minimum_version = peeked_literal.is_some_and(|lit| lit == ">=");
                             let has_unsupported_version_requirement = peeked_literal
                                 .is_some_and(|lit| matches!(lit, "=" | ">" | "<" | "<="));
@@ -657,6 +662,7 @@ impl Analyzer {
                                 let at_least_version = words
                                     .next()
                                     .as_ref()
+                                    .and_then(as_single)
                                     .and_then(as_shell)
                                     .map(|w| match w {
                                         WordFragment::Literal(lit) => VoL::Lit(lit.into()),

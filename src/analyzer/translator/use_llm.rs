@@ -13,7 +13,8 @@ use crate::{
 };
 
 use super::pretranslation::{
-    get_function_definition_check_header, get_function_definition_check_library,
+    get_function_definition_check_compile, get_function_definition_check_header,
+    get_function_definition_check_library, get_function_definition_check_link,
 };
 
 use itertools::Itertools;
@@ -79,7 +80,7 @@ fn write_file(path: &Path, content: &str) {
 fn define_cfg(key: &str, value: Option<&str>) {
   println!("cargo:rustc-check-cfg=cfg({})", key);
   if let Some(value) = value {
-    println!("cargo:rustc-cfg={}={}", key, value);
+    println!("cargo:rustc-cfg={}=\"{}\"", key, value);
   } else {
     println!("cargo:rustc-cfg={}", key);
   }
@@ -88,16 +89,17 @@ fn define_cfg(key: &str, value: Option<&str>) {
         (
             "define_env",
             r#"fn define_env(key: &str, value: &str) {
-  println!("cargo:rustc-env={}={}", key, value);
+  println!("cargo:rustc-env={}=\"{}\"", key, value);
 }"#,
         ),
         (
             "define_cfg_with_record",
             r#"
 fn define_cfg(key: &str, value: Option<&str>) {
+  let key = &sanitize_rust_name(key);
   println!("cargo:rustc-check-cfg=cfg({})", key);
   if let Some(value) = value {
-    println!("cargo:rustc-cfg={}={}", key, value);
+    println!("cargo:rustc-cfg={}=\"{}\"", key, value);
     record("cfg", key, value);
   } else {
     println!("cargo:rustc-cfg={}", key);
@@ -109,13 +111,32 @@ fn define_cfg(key: &str, value: Option<&str>) {
             "define_env_with_record",
             r#"
 fn define_env(key: &str, value: &str) {
-  println!("cargo:rustc-env={}={}", key, value);
+  let key = &sanitize_rust_name(key);
+  println!("cargo:rustc-env={}=\"{}\"", key, value);
   record("env", key, value);
 }"#,
+        ),
+        (
+            "sanitize_rust_name",
+            r#"
+fn sanitize_rust_name(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+"#,
         ),
         ("check_header", get_function_definition_check_header()),
         ("check_library", get_function_definition_check_library()),
         ("check_decl", get_function_definition_check_decl()),
+        ("check_compile", get_function_definition_check_compile()),
+        ("check_link", get_function_definition_check_link()),
         ("pkg_config", get_function_definition_pkg_config()),
     ]);
     std::iter::once("default_modules")
@@ -124,10 +145,12 @@ fn define_env(key: &str, value: &str) {
         .join("\n")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(super) type LLMValidationFunc = Box<dyn Fn(&str) -> Option<String> + Sync>;
+
 pub(super) struct LLMBasedTranslationEvidence {
     pub id: usize,
     pub rust_snippets: Vec<String>,
+    pub extra_validation_funcs: Vec<LLMValidationFunc>,
     pub predefinition: String,
     pub features: Vec<String>,
     pub header: String,
@@ -148,7 +171,7 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
             err.push(format!("Correct Id: '{}'", evidence.id));
         }
         for rust_snippet in evidence.rust_snippets.iter() {
-            if rust_snippet.is_empty(){
+            if rust_snippet.is_empty() {
                 continue;
             }
             if !self.rust_func_body.contains(rust_snippet) {
@@ -156,6 +179,11 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
                     "The translated output must contains a Rust snippet '{}' exactly.",
                     rust_snippet
                 ));
+            }
+        }
+        for func in &evidence.extra_validation_funcs {
+            if let Some(err_msg) = func(&self.rust_func_body) {
+                err.push(err_msg);
             }
         }
         // no-op check
@@ -348,6 +376,7 @@ Input format:
    - Map shell variables to appropriate Rust types (`String`, `bool`, `Vec<String>`, `PathBuf`).
    - Local Flexibility: For variables strictly internal to the function (not arguments or return values), you are free to rename them and retype them (e.g., converting a "yes" string flag to a Rust `bool`, or renaming variables for clarity).
    - Interface Strictness: Variables that are part of the function arguments or the final return tuple must match the skeleton's definition exactly.
+   - Use `Option<T>` freely: Shell patterns like `${var:+set}`, `${var:-default}`, and `${var:?error}` indicate awareness of the "undefined" state (distinct from an empty string). Translate these using `Option<String>` or `Option<T>` appropriately. An undefined variable is `None`, while an empty string is `Some(String::new())`.
 
 4. **Command Execution**
    - Translate shell commands into `std::process::Command` calls.
@@ -357,7 +386,7 @@ Input format:
 5. **Filesystem Effects**
    - Map file writes/appends to calls of `write_file`.
    - Handle `cat >`, `echo >>`, and file deletions accurately (`write_file`, `remove_file` etc.).
-   - Handle `sed [input-file]`, and file readings accurately (`read_to_string`, etc.).
+   - For file reading with uncertain or possibly non-UTF8 contents, prefer `std::fs::read(&path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())` over `read_to_string()` to avoid unnecessary panic on encoding errors.
    - Preserve temporary file lifecycle (`conftest.*` creation and cleanup).
 
 6. **Embedded Rust Snippets**

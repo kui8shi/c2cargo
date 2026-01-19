@@ -36,11 +36,11 @@ pub(crate) trait LLMAnalysis {
     async fn run_llm_analysis<'a, I: Iterator<Item = (&'a Self::Input, &'a Self::Evidence)>>(
         &'a mut self,
         inputs: I,
-        max_retries: usize
+        max_retries: usize,
     ) -> Vec<LLMResultWithMeta<Self::Output>> {
-        futures::stream::iter(
-            inputs.map(|(input, evidence)| self.make_api_request_with_retry(input, evidence, max_retries)),
-        )
+        futures::stream::iter(inputs.map(|(input, evidence)| {
+            self.make_api_request_with_retry(input, evidence, max_retries)
+        }))
         .buffer_unordered(10)
         .then(|result| async move {
             match result {

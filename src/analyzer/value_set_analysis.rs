@@ -681,8 +681,10 @@ impl Analyzer {
             if let MayM4::Shell(ShellCommand::Assignment(_, rhs)) =
                 &self.get_node(ifs_loc.node_id).unwrap().cmd.0
             {
-                if let ValueExpr::Lit(lit) =
-                    self.vsa_inspect_word(rhs, ifs_loc.clone(), None).pop().unwrap()
+                if let ValueExpr::Lit(lit) = self
+                    .vsa_inspect_word(rhs, ifs_loc.clone(), None)
+                    .pop()
+                    .unwrap()
                 {
                     internal_field_separator.replace(lit.chars().next().unwrap());
                 }

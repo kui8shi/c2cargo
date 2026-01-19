@@ -9,7 +9,7 @@ use autotools_parser::{
 };
 use regex::Regex;
 
-use crate::analyzer::{as_literal, as_shell};
+use crate::analyzer::{as_literal, as_shell, as_single};
 
 use super::{Analyzer, AstVisitor, M4Macro, Node, NodeId, ShellCommand};
 
@@ -375,7 +375,7 @@ impl Analyzer {
             {
                 let key = match macro_call.args.first() {
                     Some(M4Argument::Word(word)) => {
-                        if let Some(lit) = as_shell(word).and_then(as_literal) {
+                        if let Some(lit) = as_single(word).and_then(as_shell).and_then(as_literal) {
                             lit.to_owned()
                         } else {
                             continue;

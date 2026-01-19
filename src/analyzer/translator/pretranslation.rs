@@ -1,12 +1,12 @@
 pub(super) fn get_function_definition_check_header() -> &'static str {
     r#"
-fn check_header(header: &str, prelude: &str, cppflags: &Vec<String>) -> bool {
+fn check_header(cc: &str, header: &str, prelude: &str, cppflags: &[String]) -> bool {
     let test_prog = format!(
         "{}\n#include <{}>\nint main() {{ return 0; }}",
         prelude, header
     );
 
-    let mut cmd = std::process::Command::new("cc");
+    let mut cmd = std::process::Command::new(cc);
     cmd.args(&["-E", "-x", "c", "-"]);
     for flag in cppflags {
         cmd.arg(flag);
@@ -16,6 +16,7 @@ fn check_header(header: &str, prelude: &str, cppflags: &Vec<String>) -> bool {
         .stderr(std::process::Stdio::null());
     let mut child = cmd.spawn().expect("failed to spawn cc for header check");
     {
+        use std::io::Write;
         let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
         stdin
             .write_all(test_prog.as_bytes())
@@ -29,10 +30,11 @@ fn check_header(header: &str, prelude: &str, cppflags: &Vec<String>) -> bool {
 pub(super) fn get_function_definition_check_library() -> &'static str {
     r#"
 fn check_library(
+    cc: &str,
     function_name: &str,
     search_libs: &[&str],
     other_libs: &[&str],
-    ldflags: &Vec<String>,
+    ldflags: &[String],
     try_std: bool,
 ) -> Result<Option<String>, ()> {
     let test_prog = format!(
@@ -41,7 +43,7 @@ fn check_library(
     );
 
     let try_link = |libs: &[&str]| -> bool {
-        let mut cmd = std::process::Command::new("cc");
+        let mut cmd = std::process::Command::new(cc);
         cmd.args(&["-x", "c", "-", "-o", "/dev/null"]);
         for lib in libs {
             cmd.arg(format!("-l{}", lib));
@@ -57,6 +59,7 @@ fn check_library(
             .stderr(std::process::Stdio::null());
         let mut child = cmd.spawn().expect("failed to spawn cc for link test");
         {
+            use std::io::Write;
             let mut stdin = child
                 .stdin
                 .take()
@@ -87,18 +90,18 @@ fn check_library(
 
 pub(super) fn get_function_definition_check_decl() -> &'static str {
     r#"
-fn check_decl(symbol: &str, prelude: &str, cppflags: &Vec<String>) -> bool {
+fn check_decl(cc: &str, symbol: &str, prelude: &str, cppflags: &[String]) -> bool {
     let test_prog = format!(
-        "{0}\nint main() {{ 
+        "{0}\nint main() {{
             #ifndef {1}
-              (void) {1}; 
+              (void) {1};
             #endif
-            return 0; 
+            return 0;
         }}",
         prelude, symbol
     );
 
-    let mut cmd = std::process::Command::new("cc");
+    let mut cmd = std::process::Command::new(cc);
     cmd.args(&["-c", "-x", "c", "-", "-o", "/dev/null"]);
     for flag in cppflags {
         cmd.arg(flag);
@@ -115,6 +118,63 @@ fn check_decl(symbol: &str, prelude: &str, cppflags: &Vec<String>) -> bool {
             .expect("failed to write to stdin");
     }
     let status = child.wait().expect("failed to wait on cc declaration check");
+    status.success()
+}"#
+}
+
+pub(super) fn get_function_definition_check_compile() -> &'static str {
+    r#"
+fn check_compile(cc: &str, cflags: &[String], cppflags: &[String], code: &str) -> bool {
+    let mut cmd = std::process::Command::new(cc);
+    cmd.args(&["-c", "-x", "c", "-", "-o", "/dev/null"]);
+    for flag in cflags {
+        cmd.arg(flag);
+    }
+    for flag in cppflags {
+        cmd.arg(flag);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().expect("failed to spawn cc for compile check");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("failed to open stdin");
+        stdin
+            .write_all(code.as_bytes())
+            .expect("failed to write to stdin");
+    }
+    let status = child.wait().expect("failed to wait on cc compile check");
+    status.success()
+}"#
+}
+
+pub(super) fn get_function_definition_check_link() -> &'static str {
+    r#"
+fn check_link(cc: &str, cflags: &[String], ldflags: &[String], libs: &[String], code: &str) -> bool {
+    let mut cmd = std::process::Command::new(cc);
+    cmd.args(&["-x", "c", "-", "-o", "/dev/null"]);
+    for flag in cflags {
+        cmd.arg(flag);
+    }
+    for flag in ldflags {
+        cmd.arg(flag);
+    }
+    for lib in libs {
+        cmd.arg(lib);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = cmd.spawn().expect("failed to spawn cc for link check");
+    {
+        use std::io::Write;
+        let mut stdin = child.stdin.take().expect("failed to open stdin");
+        stdin
+            .write_all(code.as_bytes())
+            .expect("failed to write to stdin");
+    }
+    let status = child.wait().expect("failed to wait on cc link check");
     status.success()
 }"#
 }

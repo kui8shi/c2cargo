@@ -26,6 +26,8 @@ pub(crate) async fn analysis(
 
     // Initialize the lexer and parser with options
     let mut analyzer = Analyzer::new(&configure_path, Some(opts));
+    analyzer.debug_print_chunks();
+    return Ok(());
     analyzer.init_record_collector(parameters);
     analyzer.record_collector_mut().start_timing();
 

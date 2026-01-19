@@ -1,3 +1,5 @@
+use crate::analyzer::as_single;
+
 use super::{
     as_literal, as_shell, AcCommand, AcWord, Analyzer, AstVisitor, Block, BlockId, GuardBodyPair,
     Node, NodeId, NodeInfo, PatternBodyPair, ShellCommand,
@@ -36,7 +38,7 @@ impl<'a> Flattener<'a> {
         let node = self.get_node(node_id).unwrap();
         if let super::MayM4::Shell(ShellCommand::Cmd(words)) = &node.cmd.0 {
             if let Some(first_word) = words.first() {
-                if let Some(shell_word) = as_shell(first_word) {
+                if let Some(shell_word) = as_single(first_word).and_then(as_shell) {
                     if let Some(literal) = as_literal(shell_word) {
                         return literal == "break" || literal == "continue";
                     }

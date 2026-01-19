@@ -5,7 +5,7 @@ use std::{
 
 use super::InlinedTranslationOutput;
 use crate::analyzer::{
-    as_literal, as_shell,
+    as_literal, as_shell, as_single,
     build_option::FeatureState,
     chunk::ChunkId,
     conditional_compilation::CCMigrationType,
@@ -21,12 +21,12 @@ use autotools_parser::{
     ast::{
         minimal::Word,
         node::{
-            AcCommand, AcWord, Condition, DisplayM4, DisplayNode, GuardBodyPair, M4Macro, Node,
-            NodeId, NodePool, PatternBodyPair, WordFragment,
+            AcCommand, AcWord, AcWordFragment, Condition, DisplayM4, DisplayNode, GuardBodyPair,
+            M4Macro, Node, NodeId, NodePool, PatternBodyPair, WordFragment,
         },
         Arithmetic, MayM4, Parameter, Redirect,
     },
-    m4_macro::{M4Argument, VarUsage},
+    m4_macro::{self, M4Argument, VarUsage},
 };
 
 use itertools::Itertools;
@@ -48,6 +48,8 @@ pub(crate) struct TranslatingPrinter<'a> {
     dict_accesses: HashMap<Location, (String, DictionaryAccess, DataType)>,
     /// Fragments that are translated while printing.
     translated_fragments: RefCell<Vec<String>>,
+    /// Max number of consecutive slashes apeared in translated fragments.
+    max_num_consecutive_slashes: Cell<Option<usize>>,
     /// Whether parameters are to be displayed in the style of rust's format string
     in_format_string: Cell<bool>,
     /// When `in_format_string` is set to true, we record appeared variables here.
@@ -72,6 +74,10 @@ pub(crate) struct TranslatingPrinter<'a> {
     found_check_library: Cell<bool>,
     /// Whether we have found a usage of AC_CHECK_DECL/AC_CHECK_DECLS
     found_check_decl: Cell<bool>,
+    /// Whether we have found a usage of AC_COMPILE_IFELSE/AC_TRY_COMPILE
+    found_check_compile: Cell<bool>,
+    /// Whether we have found a usage of AC_LINK_IFELSE/AC_TRY_LINK
+    found_check_link: Cell<bool>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -110,6 +116,7 @@ impl<'a> TranslatingPrinter<'a> {
             full_rust_mode,
             dict_accesses,
             translated_fragments: RefCell::new(Vec::new()),
+            max_num_consecutive_slashes: Cell::new(None),
             in_format_string: Cell::new(false),
             formatted_vars: RefCell::new(Vec::new()),
             embedded_chunks: RefCell::new(HashMap::new()),
@@ -122,6 +129,8 @@ impl<'a> TranslatingPrinter<'a> {
             found_check_header: Cell::new(false),
             found_check_library: Cell::new(false),
             found_check_decl: Cell::new(false),
+            found_check_compile: Cell::new(false),
+            found_check_link: Cell::new(false),
         }
     }
 
@@ -148,6 +157,10 @@ impl<'a> TranslatingPrinter<'a> {
 
     pub fn get_translated_fragments(&self) -> Vec<String> {
         self.translated_fragments.borrow().clone()
+    }
+
+    pub fn get_max_num_consecutive_slashes(&self) -> Option<usize> {
+        self.max_num_consecutive_slashes.get()
     }
 
     pub fn get_cargo_features(&self) -> Vec<String> {
@@ -194,6 +207,12 @@ impl<'a> TranslatingPrinter<'a> {
         }
         if self.found_check_decl.get() {
             ret.push("check_decl");
+        }
+        if self.found_check_compile.get() {
+            ret.push("check_compile");
+        }
+        if self.found_check_link.get() {
+            ret.push("check_link");
         }
         ret
     }
@@ -284,7 +303,13 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
         use autotools_parser::ast::minimal::Word::*;
         use autotools_parser::ast::minimal::WordFragment::{DoubleQuoted, Literal};
         match &word.0 {
-            Empty => "".to_string(),
+            Empty => {
+                if should_quote {
+                    "\"\"".to_string()
+                } else {
+                    String::new()
+                }
+            }
             Concat(frags) => frags
                 .iter()
                 .map(|w| self.display_may_m4_word(w))
@@ -721,13 +746,18 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
-    fn display_word_as_format_str(&self, word: &AcWord) -> String {
+    fn display_word_as_format_str(&self, word: &AcWord, raw_str: bool) -> String {
         let (format_string, vars) = self.take_format_string_and_vars(word);
+        let (quote_open, quote_close) = if raw_str {
+            ("r#\"", "\"#")
+        } else {
+            ("\"", "\"")
+        };
         if vars.is_empty() {
-            format!("\"{format_string}\"")
+            format!("{quote_open}{format_string}{quote_close}")
         } else {
             format!(
-                "&format!(\"{}\", {})",
+                "&format!({quote_open}{}{quote_close}, {})",
                 format_string,
                 vars.into_iter().join(", ")
             )
@@ -747,6 +777,7 @@ impl<'a> TranslatingPrinter<'a> {
         if vars.is_empty() {
             format_string = format_string.replace("}}", "}").replace("{{", "{");
         }
+        self.count_num_consecutive_slashes(&format_string);
         if !matches!(format_string.as_str(), "" | "0" | "1" | "{}") {
             self.record_translated_fragment(format_string.clone());
         }
@@ -766,6 +797,23 @@ impl<'a> TranslatingPrinter<'a> {
                 c => c.to_string(),
             })
             .collect()
+    }
+
+    fn count_num_consecutive_slashes(&self, s: &str) {
+        let mut count = 0;
+        for c in s.chars() {
+            if c == '\\' {
+                count += 1;
+            } else {
+                count = 0;
+            }
+        }
+        if let Some(old) = self.max_num_consecutive_slashes.get() {
+            count = old.max(count);
+        }
+        if count > 0 {
+            self.max_num_consecutive_slashes.replace(Some(count));
+        }
     }
 
     pub(super) fn display_ac_define(&self, key: &str, value: &str) -> String {
@@ -904,7 +952,7 @@ impl<'a> TranslatingPrinter<'a> {
         let mut ret = hint;
         for header in headers {
             let check_header = self.enclose_by_rust_tags(
-                format!("check_header(\"{}\", {:?}, &CPPFLAGS)", header, includes),
+                format!("check_header(&CC, \"{}\", {:?}, &CPPFLAGS)", header, includes),
                 false,
             );
             let action_if_found = action_if_found
@@ -945,7 +993,7 @@ impl<'a> TranslatingPrinter<'a> {
 
         let mut ret = String::new();
         let func_call = format!(
-            "check_library(\"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
+            "check_library(&CC, \"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
             func, libs, other_libs, try_std
         );
         self.record_translated_fragment(func_call.clone());
@@ -1007,7 +1055,7 @@ impl<'a> TranslatingPrinter<'a> {
         let mut ret = hint;
         for symbol in symbols {
             let check_decl = self.enclose_by_rust_tags(
-                format!("check_decl(\"{}\", {:?}, &CPPFLAGS)", symbol, includes),
+                format!("check_decl(&CC, \"{}\", {:?}, &CPPFLAGS)", symbol, includes),
                 false,
             );
             let action_if_found = action_if_found
@@ -1028,6 +1076,121 @@ impl<'a> TranslatingPrinter<'a> {
             ));
         }
         ret
+    }
+
+    /// Format a program string for use in check_compile/check_link calls.
+    /// Handles shell variable substitution by generating format!() when needed.
+    fn format_program_code(&self, prog: &str) -> String {
+        // Regex to match $VAR or ${VAR} patterns
+        let re = regex::Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
+
+        let mut vars = Vec::new();
+        let format_str = re.replace_all(prog, |caps: &regex::Captures| {
+            let var_name = caps.get(1).unwrap().as_str();
+            vars.push(var_name.to_string());
+            "{}" // format! placeholder
+        });
+
+        if vars.is_empty() {
+            // No shell variables: use simple string literal
+            format!("{:?}", prog)
+        } else {
+            // Has shell variables: use format!() macro
+            // Escape for Rust string, then escape braces except placeholders
+            let escaped = Self::escape_rust_string(&format_str);
+            // Escape { and } to {{ and }} except for our {} placeholders
+            let mut result = String::new();
+            let mut chars = escaped.chars().peekable();
+            while let Some(c) = chars.next() {
+                match c {
+                    '{' => {
+                        if chars.peek() == Some(&'}') {
+                            // This is a {} placeholder, keep it
+                            result.push('{');
+                            result.push('}');
+                            chars.next();
+                        } else {
+                            // Escape lone {
+                            result.push_str("{{");
+                        }
+                    }
+                    '}' => {
+                        // Escape lone }
+                        result.push_str("}}");
+                    }
+                    _ => result.push(c),
+                }
+            }
+            format!("&format!(\"{}\", {})", result, vars.join(", "))
+        }
+    }
+
+    fn display_ac_compile_check(
+        &self,
+        indent_level: usize,
+        code: &str,
+        action_if_true: Option<&Vec<NodeId>>,
+        action_if_false: Option<&Vec<NodeId>>,
+    ) -> String {
+        self.found_check_compile.replace(true);
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+
+        let code_expr = self.format_program_code(code);
+        let check_compile = self.enclose_by_rust_tags(
+            format!("check_compile(&CC, &CFLAGS, &CPPFLAGS, {})", code_expr),
+            false,
+        );
+        let action_if_true = action_if_true
+            .map(|cmds| self.display_body(cmds, indent_level + 1))
+            .unwrap_or_default();
+        let action_if_false = action_if_false
+            .map(|cmds| self.display_body(cmds, indent_level + 1))
+            .unwrap_or_default();
+
+        format!(
+            "{tab}if {} {{\n{}{tab}}}{}",
+            check_compile,
+            action_if_true,
+            if action_if_false.is_empty() {
+                Default::default()
+            } else {
+                format!(" else {{\n{action_if_false}{tab}}}")
+            },
+        )
+    }
+
+    fn display_ac_link_check(
+        &self,
+        indent_level: usize,
+        code: &str,
+        action_if_true: Option<&Vec<NodeId>>,
+        action_if_false: Option<&Vec<NodeId>>,
+    ) -> String {
+        self.found_check_link.replace(true);
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+
+        let code_expr = self.format_program_code(code);
+        let check_link = self.enclose_by_rust_tags(
+            format!("check_link(&CC, &CFLAGS, &LDFLAGS, &LIBS, {})", code_expr),
+            false,
+        );
+        let action_if_true = action_if_true
+            .map(|cmds| self.display_body(cmds, indent_level + 1))
+            .unwrap_or_default();
+        let action_if_false = action_if_false
+            .map(|cmds| self.display_body(cmds, indent_level + 1))
+            .unwrap_or_default();
+
+        format!(
+            "{tab}if {} {{\n{}{tab}}}{}",
+            check_link,
+            action_if_true,
+            if action_if_false.is_empty() {
+                Default::default()
+            } else {
+                format!(" else {{\n{action_if_false}{tab}}}")
+            },
+        )
     }
 
     fn display_pkg_check_modules(&self, node_id: NodeId, indent_level: usize) -> String {
@@ -1372,7 +1535,8 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                     }
                 }
             }
-            if as_shell(first)
+            if as_single(first)
+                .and_then(as_shell)
                 .and_then(as_literal)
                 .is_some_and(|cmd| cmd == "sed")
             {
@@ -1400,7 +1564,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                     let rust_string = {
                         let path = format!("Path::new(\"{}\")", filename);
                         self.record_translated_fragment(path.clone());
-                        let content = self.display_word_as_format_str(heredoc);
+                        let content = self.display_word_as_format_str(heredoc, false);
                         self.enclose_by_rust_tags(
                             format!("write_file({}, {})", path, content),
                             false,
@@ -1495,6 +1659,30 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     "{tab}# Check {description}\n{}",
                     self.display_body(&body, indent_level)
                 )
+            }
+            "AC_CONFIG_LINKS" => {
+                // FIXME: the second and third args are rarely used but we ignored them anyway
+                let links: Vec<(String, String)> = if let Some(tags) =
+                    m4_macro.effects.as_ref().and_then(|eff| eff.tags.as_ref())
+                {
+                    tags.iter()
+                        .filter_map(|(dst, src_opt)| {
+                            src_opt.as_ref().map(|src| (dst.to_owned(), src.to_owned()))
+                        })
+                        .collect()
+                } else {
+                    let tags = m4_macro.get_arg_as_array(0).unwrap();
+                    tags.iter()
+                        .flat_map(|tag| split_tag_word(tag))
+                        .map(|(dst, src)| {
+                            (self.display_word(&dst, true), self.display_word(&src, true))
+                        })
+                        .collect()
+                };
+                links
+                    .into_iter()
+                    .map(|(dst, src)| format!("{tab}ln -s {src} {dst}"))
+                    .join("\n")
             }
             "AC_DEFINE" => {
                 let key = match m4_macro.args.get(0).unwrap() {
@@ -1657,6 +1845,58 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 )
             }
             "PKG_CHECK_MODULES" => self.display_pkg_check_modules(node_id, indent_level),
+            "AC_COMPILE_IFELSE" => {
+                // AC_COMPILE_IFELSE([input], [action-if-true], [action-if-false])
+                let code = m4_macro.get_arg_as_program(0).unwrap_or_default();
+                let action_if_true = m4_macro.get_arg_as_cmd(1);
+                let action_if_false = m4_macro.get_arg_as_cmd(2);
+                self.display_ac_compile_check(
+                    indent_level,
+                    &code,
+                    action_if_true.as_ref(),
+                    action_if_false.as_ref(),
+                )
+            }
+            "AC_TRY_COMPILE" => {
+                // AC_TRY_COMPILE([includes], [function-body], [action-if-true], [action-if-false])
+                let includes = m4_macro.get_arg_as_program(0).unwrap_or_default();
+                let body = m4_macro.get_arg_as_program(1).unwrap_or_default();
+                let code = format!("{}\nint main() {{ {} return 0; }}", includes, body);
+                let action_if_true = m4_macro.get_arg_as_cmd(2);
+                let action_if_false = m4_macro.get_arg_as_cmd(3);
+                self.display_ac_compile_check(
+                    indent_level,
+                    &code,
+                    action_if_true.as_ref(),
+                    action_if_false.as_ref(),
+                )
+            }
+            "AC_LINK_IFELSE" => {
+                // AC_LINK_IFELSE([input], [action-if-true], [action-if-false])
+                let code = m4_macro.get_arg_as_program(0).unwrap_or_default();
+                let action_if_true = m4_macro.get_arg_as_cmd(1);
+                let action_if_false = m4_macro.get_arg_as_cmd(2);
+                self.display_ac_link_check(
+                    indent_level,
+                    &code,
+                    action_if_true.as_ref(),
+                    action_if_false.as_ref(),
+                )
+            }
+            "AC_TRY_LINK" => {
+                // AC_TRY_LINK([includes], [function-body], [action-if-true], [action-if-false])
+                let includes = m4_macro.get_arg_as_program(0).unwrap_or_default();
+                let body = m4_macro.get_arg_as_program(1).unwrap_or_default();
+                let code = format!("{}\nint main() {{ {} return 0; }}", includes, body);
+                let action_if_true = m4_macro.get_arg_as_cmd(2);
+                let action_if_false = m4_macro.get_arg_as_cmd(3);
+                self.display_ac_link_check(
+                    indent_level,
+                    &code,
+                    action_if_true.as_ref(),
+                    action_if_false.as_ref(),
+                )
+            }
             _ => {
                 // Add hint comment for LLM guidance when CPP symbols need define_cfg/define_env
                 let macro_output = self.m4_macro_to_string(m4_macro, indent_level);
@@ -1692,6 +1932,27 @@ fn should_atom_replaced(atom: &Atom) -> bool {
     }
 }
 
+fn split_tag_word(tag: &AcWord) -> Option<(AcWord, AcWord)> {
+    if let Word::Concat(words) = &tag.0 {
+        if let Some(colon_pos) = words.iter().position(|w| {
+            as_shell(w)
+                .map(|frag| frag == &WordFragment::Colon)
+                .unwrap_or_default()
+        }) {
+            let first = Word::Concat(words[..colon_pos].iter().cloned().collect()).into();
+            let after_words = words[colon_pos+1..].iter().cloned().collect::<Vec<_>>();
+            let second = if after_words.is_empty() {
+                Word::Empty
+            } else {
+                Word::Concat(after_words)
+            }
+            .into();
+            return Some((first, second));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1700,6 +1961,18 @@ mod tests {
     fn test_escape_rust_string() {
         // Test basic strings
         assert_eq!(TranslatingPrinter::escape_rust_string("hello"), "hello");
+
+        // Test control characters that need escaping
+        assert_eq!(
+            TranslatingPrinter::escape_rust_string(r#"{ '\001', '\002', '\003' }"#),
+            r#"{ '\\001', '\\002', '\\003' }"#
+        );
+
+        // Test quote and escaped characters that need escaping
+        assert_eq!(
+            TranslatingPrinter::escape_rust_string(r#"printf ("%d %f\n", foo, bar);"#),
+            r#"printf (\"%d %f\\n\", foo, bar);"#
+        );
 
         // Test special characters that need escaping
         assert_eq!(
