@@ -13,8 +13,9 @@ use crate::{
 };
 
 use super::pretranslation::{
-    get_function_definition_check_compile, get_function_definition_check_header,
-    get_function_definition_check_library, get_function_definition_check_link,
+    get_function_definition_check_compile, get_function_definition_check_func,
+    get_function_definition_check_header, get_function_definition_check_library,
+    get_function_definition_check_link,
 };
 
 use itertools::Itertools;
@@ -45,6 +46,15 @@ pub(super) struct LLMBasedTranslationOutput {
     pub id: usize,
     pub rust_func_body: String,
     pub rust_func_name: String,
+}
+
+impl LLMBasedTranslationOutput {
+    /// Restore heredoc placeholders in the function body with their original content.
+    pub fn restore_placeholders(&mut self, mappings: &[(String, String)]) {
+        for (placeholder_fmt, original_fmt) in mappings {
+            self.rust_func_body = self.rust_func_body.replace(placeholder_fmt, original_fmt);
+        }
+    }
 }
 
 pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
@@ -123,7 +133,7 @@ fn sanitize_rust_name(s: &str) -> String {
     s.chars()
         .map(|c| {
             if c.is_ascii_alphanumeric() || c == '_' {
-                c.to_ascii_uppercase()
+                c
             } else {
                 '_'
             }
@@ -135,6 +145,7 @@ fn sanitize_rust_name(s: &str) -> String {
         ("check_header", get_function_definition_check_header()),
         ("check_library", get_function_definition_check_library()),
         ("check_decl", get_function_definition_check_decl()),
+        ("check_func", get_function_definition_check_func()),
         ("check_compile", get_function_definition_check_compile()),
         ("check_link", get_function_definition_check_link()),
         ("pkg_config", get_function_definition_pkg_config()),
@@ -149,13 +160,16 @@ pub(super) type LLMValidationFunc = Box<dyn Fn(&str) -> Option<String> + Sync>;
 
 pub(super) struct LLMBasedTranslationEvidence {
     pub id: usize,
-    pub rust_snippets: Vec<String>,
+    pub snippets: Vec<String>,
     pub extra_validation_funcs: Vec<LLMValidationFunc>,
     pub predefinition: String,
     pub features: Vec<String>,
-    pub header: String,
-    pub footer: String,
+    pub signature: String,
+    pub body_header: String,
+    pub body_footer: String,
     pub depending_func_defs: String,
+    /// Heredoc placeholders: (placeholder_format, original_format)
+    pub heredoc_placeholders: Vec<(String, String)>,
 }
 
 pub(super) fn get_rust_check_dir() -> &'static Path {
@@ -165,19 +179,19 @@ pub(super) fn get_rust_check_dir() -> &'static Path {
 impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
     /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
-    fn validate(&self, evidence: &LLMBasedTranslationEvidence) -> Result<(), Vec<String>> {
+    fn validate(&mut self, evidence: &LLMBasedTranslationEvidence) -> Result<(), Vec<String>> {
         let mut err = Vec::new();
         if self.id != evidence.id {
             err.push(format!("Correct Id: '{}'", evidence.id));
         }
-        for rust_snippet in evidence.rust_snippets.iter() {
-            if rust_snippet.is_empty() {
+        for snippet in evidence.snippets.iter() {
+            if snippet.is_empty() {
                 continue;
             }
-            if !self.rust_func_body.contains(rust_snippet) {
+            if !self.rust_func_body.contains(snippet) {
                 err.push(format!(
-                    "The translated output must contains a Rust snippet '{}' exactly.",
-                    rust_snippet
+                    "The translated output must contains a snippet '{}' exactly.",
+                    snippet
                 ));
             }
         }
@@ -187,22 +201,48 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
             }
         }
         // no-op check
-        match detect_no_op_patterns(&self.rust_func_body, &evidence.rust_snippets) {
+        match detect_no_op_patterns(&self.rust_func_body, &evidence.snippets) {
             Ok(_) => (),
             Err(e) => err.extend(e),
         }
+
+        // Restore heredoc placeholders before compile check
+        // This ensures the actual content is validated during compilation
+        self.restore_placeholders(&evidence.heredoc_placeholders);
+
         // compile check
         {
-            let rust_func = format!(
-                "{}\nfn main() {{}}\n{}\nfn {}{}{}{}",
+            let llm_translation = {
+                let mut s = self.rust_func_body.trim();
+
+                // stirip header if translation output includes it
+                let header_snippet = evidence.body_footer.trim();
+                if s.starts_with(header_snippet) {
+                    s = s.strip_prefix(header_snippet).unwrap();
+                }
+
+                // stirip footer if translation output includes it
+                let footer_snippet = evidence.body_footer.trim();
+                if s.ends_with(footer_snippet) {
+                    s = s.strip_suffix(&footer_snippet).unwrap();
+                }
+
+                s
+            };
+            let preamble = format!(
+                "{}\nfn main() {{}}\n{}\n",
                 evidence.predefinition,
                 evidence.depending_func_defs,
-                self.rust_func_name,
-                evidence.header,
-                self.rust_func_body,
-                evidence.footer
             );
-            println!("{}", &rust_func);
+            let rust_func = format!(
+                "fn {}{} {{{}\n{}\n{}}}",
+                self.rust_func_name,
+                evidence.signature,
+                evidence.body_header,
+                llm_translation,
+                evidence.body_footer
+            );
+            println!("{rust_func}");
             let check_dir = get_rust_check_dir();
             let src_dir = check_dir.join("src");
 
@@ -236,7 +276,7 @@ pkg-config = "*"
 
             // Write the code to validate
             let main_rs_path = src_dir.join("main.rs");
-            std::fs::write(&main_rs_path, rust_func).expect("writing main.rs");
+            std::fs::write(&main_rs_path, preamble + &rust_func).expect("writing main.rs");
 
             // Run cargo check with JSON output
             let output = std::process::Command::new("cargo")
@@ -261,11 +301,9 @@ pkg-config = "*"
                                 has_errors = true;
                                 // Prefer the full rendered diagnostic for better LLM feedback
                                 if let Some(rendered) = msg["message"]["rendered"].as_str() {
-                                    println!("{}", rendered);
                                     err.push(format!("Compilation error:\n{}", rendered));
                                 } else if let Some(text) = msg["message"]["message"].as_str() {
                                     // Fallback to brief message if rendered is unavailable
-                                    println!("Error: {}", text);
                                     err.push(format!("Compilation error: {}", text));
                                 }
                             }
@@ -279,7 +317,6 @@ pkg-config = "*"
                 for line in stderr.lines() {
                     if line.contains("error") {
                         has_errors = true;
-                        println!("{}", line.trim());
                         err.push(format!("Compilation error: {}", line.trim()));
                     }
                 }
@@ -299,12 +336,19 @@ pkg-config = "*"
 
 fn detect_no_op_patterns(src: &str, values: &Vec<String>) -> Result<(), Vec<String>> {
     let mut err = Vec::new();
-    let patterns = [r"let\s+_[A-Za-z0-9_]*\s*=\s*_[A-Za-z0-9_]*".into()]
+    let patterns = [r#"let\s+_[A-Za-z0-9_]*\s*=\s*_[A-Za-z0-9_]*"#]
+        .map(|pat| pat.to_owned())
         .into_iter()
         .chain(
             values
                 .iter()
-                .map(|val| format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val))),
+                .map(|val| {
+                    [
+                        format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val)),
+                        format!(r#"format!("{{}}", {})"#, regex::escape(val)),
+                    ]
+                })
+                .flatten(),
         );
     for pat in patterns {
         if let Ok(re) = regex::Regex::new(&pat) {

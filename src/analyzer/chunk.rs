@@ -1049,6 +1049,19 @@ impl Analyzer {
         self.chunk_skeletons.as_ref().unwrap().get(&id)
     }
 
+    /// Check if a variable is internal to a chunk (not an argument or return value)
+    pub(crate) fn is_var_internal_for_chunk(&self, chunk_id: ChunkId, var_name: &str) -> bool {
+        let Some(sk) = self.get_chunk_skeleton(chunk_id) else {
+            return false;
+        };
+        // Not an argument
+        !sk.args.contains_key(var_name)
+            && !sk.pass_through_args.contains_key(var_name)
+            // Not a return value
+            && !sk.return_to_bind.contains_key(var_name)
+            && sk.return_to_overwrite.as_ref().map(|(name, _)| name.as_str()) != Some(var_name)
+    }
+
     pub(crate) fn print_chunk_skeleton_signature(&self, id: ChunkId) -> String {
         let sk = self.chunk_skeletons.as_ref().unwrap().get(&id).unwrap();
         let print_mut = |is_mut: bool| -> &'static str {

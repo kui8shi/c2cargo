@@ -1,7 +1,11 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, HashSet},
 };
+
+/// Placeholder format for heredoc content.
+/// The format is "__HEREDOC_<index>__" followed by " {}" for each variable.
+const HEREDOC_PLACEHOLDER_PREFIX: &str = "__HEREDOC_";
 
 use super::InlinedTranslationOutput;
 use crate::analyzer::{
@@ -21,12 +25,12 @@ use autotools_parser::{
     ast::{
         minimal::Word,
         node::{
-            AcCommand, AcWord, AcWordFragment, Condition, DisplayM4, DisplayNode, GuardBodyPair,
-            M4Macro, Node, NodeId, NodePool, PatternBodyPair, WordFragment,
+            AcCommand, AcWord, Condition, DisplayM4, DisplayNode, GuardBodyPair, M4Macro, Node,
+            NodeId, NodePool, ParameterSubstitution, PatternBodyPair, WordFragment,
         },
         Arithmetic, MayM4, Parameter, Redirect,
     },
-    m4_macro::{self, M4Argument, VarUsage},
+    m4_macro::{M4Argument, VarUsage},
 };
 
 use itertools::Itertools;
@@ -47,13 +51,17 @@ pub(crate) struct TranslatingPrinter<'a> {
     /// Nodes that should be translated as dictionary accesses.
     dict_accesses: HashMap<Location, (String, DictionaryAccess, DataType)>,
     /// Fragments that are translated while printing.
-    translated_fragments: RefCell<Vec<String>>,
+    required_snippets: RefCell<Vec<String>>,
     /// Max number of consecutive slashes apeared in translated fragments.
     max_num_consecutive_slashes: Cell<Option<usize>>,
     /// Whether parameters are to be displayed in the style of rust's format string
     in_format_string: Cell<bool>,
     /// When `in_format_string` is set to true, we record appeared variables here.
     formatted_vars: RefCell<Vec<String>>,
+    /// Whether are we printing an assignment.
+    in_literal_assignment: Cell<bool>,
+    /// When `in_literal_assignment` is set to true, we record appeared literals here.
+    assigned_literals: RefCell<Vec<String>>,
     /// Appeared chunks when embedding
     embedded_chunks: RefCell<HashMap<ChunkId, String>>,
     /// Appeared features
@@ -74,10 +82,16 @@ pub(crate) struct TranslatingPrinter<'a> {
     found_check_library: Cell<bool>,
     /// Whether we have found a usage of AC_CHECK_DECL/AC_CHECK_DECLS
     found_check_decl: Cell<bool>,
+    /// Whether we have found a usage of AC_CHECK_FUNC/AC_CHECK_FUNCS
+    found_check_func: Cell<bool>,
     /// Whether we have found a usage of AC_COMPILE_IFELSE/AC_TRY_COMPILE
     found_check_compile: Cell<bool>,
     /// Whether we have found a usage of AC_LINK_IFELSE/AC_TRY_LINK
     found_check_link: Cell<bool>,
+    /// Heredoc placeholders: (placeholder_format, original_format)
+    heredoc_placeholders: RefCell<Vec<(String, String)>>,
+    /// Counter for generating unique heredoc placeholder IDs
+    heredoc_counter: Cell<usize>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -115,10 +129,12 @@ impl<'a> TranslatingPrinter<'a> {
             order: Cell::new(0),
             full_rust_mode,
             dict_accesses,
-            translated_fragments: RefCell::new(Vec::new()),
+            required_snippets: RefCell::new(Vec::new()),
             max_num_consecutive_slashes: Cell::new(None),
             in_format_string: Cell::new(false),
             formatted_vars: RefCell::new(Vec::new()),
+            in_literal_assignment: Cell::new(false),
+            assigned_literals: RefCell::new(Vec::new()),
             embedded_chunks: RefCell::new(HashMap::new()),
             cargo_features: RefCell::new(Vec::new()),
             inlined_translations,
@@ -129,8 +145,11 @@ impl<'a> TranslatingPrinter<'a> {
             found_check_header: Cell::new(false),
             found_check_library: Cell::new(false),
             found_check_decl: Cell::new(false),
+            found_check_func: Cell::new(false),
             found_check_compile: Cell::new(false),
             found_check_link: Cell::new(false),
+            heredoc_placeholders: RefCell::new(Vec::new()),
+            heredoc_counter: Cell::new(0),
         }
     }
 
@@ -145,18 +164,16 @@ impl<'a> TranslatingPrinter<'a> {
         ret
     }
 
-    pub fn record_translated_fragment(&self, frag: String) {
-        if frag.len() < 100 {
-            // won't check too long fragments
-            let mut v = self.translated_fragments.borrow_mut();
-            if !v.contains(&frag) {
-                v.push(frag);
-            }
+    pub fn require_snippet(&self, frag: String) {
+        // won't check too long fragments
+        let mut v = self.required_snippets.borrow_mut();
+        if !v.contains(&frag) {
+            v.push(frag);
         }
     }
 
-    pub fn get_translated_fragments(&self) -> Vec<String> {
-        self.translated_fragments.borrow().clone()
+    pub fn get_required_snippets(&self) -> Vec<String> {
+        self.required_snippets.borrow().clone()
     }
 
     pub fn get_max_num_consecutive_slashes(&self) -> Option<usize> {
@@ -164,17 +181,43 @@ impl<'a> TranslatingPrinter<'a> {
     }
 
     pub fn get_cargo_features(&self) -> Vec<String> {
-        self.cargo_features.borrow().clone()
+        self.cargo_features
+            .borrow()
+            .clone()
+            .into_iter()
+            .dedup()
+            .collect()
     }
 
-    fn enclose_by_rust_tags(&self, fragment: String, record: bool) -> String {
+    /// Create a heredoc placeholder and store the mapping.
+    /// Returns the placeholder format string (e.g., "__HEREDOC_0__" or "__HEREDOC_0__ {} {}").
+    fn create_heredoc_placeholder(&self, original_format: String, num_vars: usize) -> String {
+        let index = self.heredoc_counter.get();
+        self.heredoc_counter.set(index + 1);
+        let placeholder_suffix = " {}".repeat(num_vars);
+        let placeholder_format = format!(
+            "{}{}__{}",
+            HEREDOC_PLACEHOLDER_PREFIX, index, placeholder_suffix
+        );
+        self.heredoc_placeholders
+            .borrow_mut()
+            .push((placeholder_format.clone(), original_format));
+        placeholder_format
+    }
+
+    /// Get the collected heredoc placeholders: (placeholder_format, original_format)
+    pub fn get_heredoc_placeholders(&self) -> Vec<(String, String)> {
+        self.heredoc_placeholders.borrow().clone()
+    }
+
+    fn enclose_by_rust_tags(&self, fragment: String, require: bool) -> String {
         if self.full_rust_mode {
             // early return
             return fragment;
         }
 
-        if record {
-            self.record_translated_fragment(fragment.clone());
+        if require {
+            self.require_snippet(fragment.clone());
         }
         format!("<rust>{}</rust>", fragment)
     }
@@ -208,6 +251,9 @@ impl<'a> TranslatingPrinter<'a> {
         if self.found_check_decl.get() {
             ret.push("check_decl");
         }
+        if self.found_check_func.get() {
+            ret.push("check_func");
+        }
         if self.found_check_compile.get() {
             ret.push("check_compile");
         }
@@ -219,6 +265,13 @@ impl<'a> TranslatingPrinter<'a> {
 
     pub fn get_embedded_chunks(&self) -> HashMap<ChunkId, String> {
         self.embedded_chunks.borrow().clone()
+    }
+
+    /// Get the chunk ID for the current node cursor position
+    fn get_current_chunk_id(&self) -> Option<ChunkId> {
+        self.node_cursor
+            .get()
+            .and_then(|node_id| self.analyzer.get_chunk_id(node_id))
     }
 
     pub fn get_tab_width() -> usize {
@@ -389,9 +442,7 @@ impl<'a> TranslatingPrinter<'a> {
             1 => {
                 let key = keys.first().unwrap();
                 let is_reference = self
-                    .node_cursor
-                    .get()
-                    .and_then(|nid| self.analyzer.get_chunk_id(nid))
+                    .get_current_chunk_id()
                     .and_then(|cid| self.analyzer.chunk_skeletons.as_ref().unwrap().get(&cid))
                     .is_some_and(|sk| {
                         sk.args.contains_key(key)
@@ -458,8 +509,8 @@ impl<'a> TranslatingPrinter<'a> {
             ),
         };
 
-        self.record_translated_fragment(dict_name.to_owned());
-        self.record_translated_fragment(printed_keys.to_owned());
+        self.require_snippet(dict_name.to_owned());
+        self.require_snippet(printed_keys.to_owned());
 
         match value_type {
             DataType::List(_) => {
@@ -512,7 +563,7 @@ impl<'a> TranslatingPrinter<'a> {
                         let extend_expr = chain_parts.join(".chain(")
                             + &")".repeat(chain_parts.len().saturating_sub(1));
                         let operation = format!(
-                            "{}.entry({}).or_insert_default().extend({})",
+                            "{}.entry({}).or_default().extend({})",
                             dict_name, printed_keys, extend_expr
                         );
                         self.enclose_by_rust_tags(operation, false)
@@ -540,7 +591,7 @@ impl<'a> TranslatingPrinter<'a> {
                 } else {
                     // No value available
                     self.enclose_by_rust_tags(
-                        format!("{}.entry({}).or_insert_default()", dict_name, printed_keys),
+                        format!("{}.entry({}).or_default()", dict_name, printed_keys),
                         false,
                     )
                 }
@@ -565,7 +616,7 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
-    fn display_cfg_atom(&self, atom: &Atom, negated: bool) -> String {
+    fn display_atom_as_cfg(&self, atom: &Atom, negated: bool) -> String {
         use Atom::*;
         let as_feature = |feature: &str| {
             self.cargo_features.borrow_mut().push(feature.into());
@@ -665,6 +716,27 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
+    fn display_atom_as_optional(&self, atom: &Atom, negated: bool) -> String {
+        use Atom::*;
+        match atom {
+            Var(name, var_cond) => {
+                let is_set = match var_cond {
+                    VarCond::Set => negated ^ true,
+                    VarCond::False => negated ^ false,
+                    _ => unreachable!(),
+                };
+                if is_set {
+                    format!("{}.is_some()", name)
+                } else {
+                    format!("{}.is_none()", name)
+                }
+            }
+            _ => {
+                unreachable!()
+            }
+        }
+    }
+
     fn display_var_atom(&self, atom: &Atom, negated: bool) -> String {
         use Atom::*;
         let may_negate = |str: String, negated: bool| {
@@ -695,12 +767,26 @@ impl<'a> TranslatingPrinter<'a> {
     }
 
     pub(super) fn display_guard(&self, guard: &Guard) -> String {
+        if is_guard_dead(guard) {
+            return "false".into();
+        }
         match guard {
             Guard::N(negated, atom) => {
-                if should_atom_replaced(atom) {
-                    let cfg_atom_str = self.display_cfg_atom(atom, *negated);
+                if should_atom_replaced_with_cfg(atom) {
+                    let cfg_atom_str = self.display_atom_as_cfg(atom, *negated);
                     let cfg_str = format!("cfg!({})", cfg_atom_str);
                     self.enclose_by_rust_tags(cfg_str, true)
+                } else if should_atom_replaced_with_optional(atom) {
+                    let optional_str = self.display_atom_as_optional(atom, *negated);
+                    // Record if the variable is internal to the chunk (not an argument or return value)
+                    let should_record = if let Atom::Var(name, _) = atom {
+                        self.get_current_chunk_id()
+                            .map(|chunk_id| self.analyzer.is_var_internal_for_chunk(chunk_id, name))
+                            .unwrap_or(false)
+                    } else {
+                        false
+                    };
+                    self.enclose_by_rust_tags(optional_str, should_record)
                 } else if self.full_rust_mode {
                     self.display_var_atom(atom, *negated)
                 } else {
@@ -746,24 +832,6 @@ impl<'a> TranslatingPrinter<'a> {
         }
     }
 
-    fn display_word_as_format_str(&self, word: &AcWord, raw_str: bool) -> String {
-        let (format_string, vars) = self.take_format_string_and_vars(word);
-        let (quote_open, quote_close) = if raw_str {
-            ("r#\"", "\"#")
-        } else {
-            ("\"", "\"")
-        };
-        if vars.is_empty() {
-            format!("{quote_open}{format_string}{quote_close}")
-        } else {
-            format!(
-                "&format!({quote_open}{}{quote_close}, {})",
-                format_string,
-                vars.into_iter().join(", ")
-            )
-        }
-    }
-
     fn take_format_string_and_vars(&self, word: &AcWord) -> (String, Vec<String>) {
         self.in_format_string.replace(true);
         let word = self.display_word(word, false);
@@ -778,9 +846,6 @@ impl<'a> TranslatingPrinter<'a> {
             format_string = format_string.replace("}}", "}").replace("{{", "{");
         }
         self.count_num_consecutive_slashes(&format_string);
-        if !matches!(format_string.as_str(), "" | "0" | "1" | "{}") {
-            self.record_translated_fragment(format_string.clone());
-        }
         (format_string, vars)
     }
 
@@ -789,11 +854,10 @@ impl<'a> TranslatingPrinter<'a> {
             .map(|c| match c {
                 '"' => "\\\"".to_string(),
                 '\\' => "\\\\".to_string(),
-                '\n' => "\\n".to_string(),
                 '\r' => "\\r".to_string(),
                 '\t' => "\\t".to_string(),
                 '\0' => "\\0".to_string(),
-                c if c.is_control() => format!("\\u{{{:04x}}}", c as u32),
+                c if c != '\n' && c.is_control() => format!("\\u{{{:04x}}}", c as u32),
                 c => c.to_string(),
             })
             .collect()
@@ -845,7 +909,7 @@ impl<'a> TranslatingPrinter<'a> {
             self.found_define.replace(true);
             format!("define_cfg({:?}, {:?})", key, value)
         };
-        self.record_translated_fragment(define_call.clone());
+        self.require_snippet(define_call.clone());
         define_call
     }
 
@@ -891,7 +955,7 @@ impl<'a> TranslatingPrinter<'a> {
             };
             self.found_define.replace(true);
             let define_call = format!("define_cfg({}, {})", format_key, format_value);
-            self.record_translated_fragment(define_call.clone());
+            self.require_snippet(define_call.clone());
             define_call
         } else {
             let define_call = if let Some(cpp_migration_policy) = self
@@ -925,7 +989,7 @@ impl<'a> TranslatingPrinter<'a> {
                 self.found_define.replace(true);
                 format!("define_cfg({:?}, {})", key_fstr, format_value)
             };
-            self.record_translated_fragment(define_call.clone());
+            self.require_snippet(define_call.clone());
             define_call
         }
     }
@@ -952,7 +1016,10 @@ impl<'a> TranslatingPrinter<'a> {
         let mut ret = hint;
         for header in headers {
             let check_header = self.enclose_by_rust_tags(
-                format!("check_header(&CC, \"{}\", {:?}, &CPPFLAGS)", header, includes),
+                format!(
+                    "check_header(cc, \"{}\", {:?}, &CPPFLAGS)",
+                    header, includes
+                ),
                 false,
             );
             let action_if_found = action_if_found
@@ -993,10 +1060,10 @@ impl<'a> TranslatingPrinter<'a> {
 
         let mut ret = String::new();
         let func_call = format!(
-            "check_library(&CC, \"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
+            "check_library(cc, \"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
             func, libs, other_libs, try_std
         );
-        self.record_translated_fragment(func_call.clone());
+        self.require_snippet(func_call.clone());
         let check_library =
             self.enclose_by_rust_tags(format!("let Ok(opt) = {}", func_call), false);
         let append_libs = self.enclose_by_rust_tags("opt.map(|lib| LIBS.push(l))".into(), false);
@@ -1043,7 +1110,6 @@ impl<'a> TranslatingPrinter<'a> {
     ) -> String {
         self.found_check_decl.replace(true);
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
-        let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
         let hint = if defines.is_empty() {
             Default::default()
         } else {
@@ -1055,7 +1121,7 @@ impl<'a> TranslatingPrinter<'a> {
         let mut ret = hint;
         for symbol in symbols {
             let check_decl = self.enclose_by_rust_tags(
-                format!("check_decl(&CC, \"{}\", {:?}, &CPPFLAGS)", symbol, includes),
+                format!("check_decl(cc, \"{}\", {:?}, &CPPFLAGS)", symbol, includes),
                 false,
             );
             let action_if_found = action_if_found
@@ -1072,6 +1138,49 @@ impl<'a> TranslatingPrinter<'a> {
                     Default::default()
                 } else {
                     format!(" else {{\n{action_if_not_found}{tab}}}")
+                },
+            ));
+        }
+        ret
+    }
+
+    fn display_ac_check_funcs(
+        &self,
+        indent_level: usize,
+        functions: &[String],
+        action_if_found: Option<&Vec<NodeId>>,
+        action_if_not_found: Option<&Vec<NodeId>>,
+        defines: &[String],
+    ) -> String {
+        self.found_check_func.replace(true);
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        let hint = if defines.is_empty() {
+            Default::default()
+        } else {
+            format!(
+                "{tab}# NOTE: You MUST insert: {} somewhere below\n",
+                defines.join(", ")
+            )
+        };
+        let mut ret = hint;
+        for function in functions {
+            let check_func = self
+                .enclose_by_rust_tags(format!("check_func(cc, \"{}\", &LDFLAGS)", function), false);
+            let action_if_found = action_if_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+            let action_if_not_found = action_if_not_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+
+            ret.push_str(&format!(
+                "{tab}if {} {{\n{}{tab}}}{}",
+                check_func,
+                action_if_found,
+                if !action_if_not_found.is_empty() {
+                    format!(" else {{\n{action_if_not_found}{tab}}}")
+                } else {
+                    "".into()
                 },
             ));
         }
@@ -1293,6 +1402,16 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 return lit.replace("{", "{{").replace("}", "}}");
             }
         }
+        if self.in_literal_assignment.get() {
+            if let WordFragment::Literal(lit) = shell_word {
+                self.assigned_literals.borrow_mut().extend(
+                    lit.split_whitespace()
+                        .filter(|s| !s.is_empty())
+                        .map(|s| s.to_owned()),
+                );
+                return lit.to_owned();
+            }
+        }
 
         match &shell_word {
             WordFragment::Escaped(lit) => match lit.as_str() {
@@ -1301,6 +1420,17 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
             },
             _ => self.shell_word_to_string(shell_word),
         }
+    }
+
+    fn display_parameter_substitution(
+        &self,
+        param_subst: &ParameterSubstitution<AcWord>,
+    ) -> String {
+        // we want to collect literals in assignment, but not ones in parameter substitution.
+        let saved = self.in_literal_assignment.replace(false);
+        let ret = self.parameter_substitution_to_string(param_subst);
+        self.in_literal_assignment.replace(saved);
+        ret
     }
 
     fn display_inner_param(&self, param: &Parameter<String>) -> String {
@@ -1315,7 +1445,22 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
 
     fn display_assignment(&self, name: &str, word: &AcWord, indent_level: usize) -> String {
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        self.in_literal_assignment.set(true);
         let rhs = self.display_word(word, false);
+        self.in_literal_assignment.set(false);
+        let assigned_literals = self
+            .assigned_literals
+            .borrow_mut()
+            .drain(..)
+            .dedup()
+            .collect::<Vec<_>>();
+        if assigned_literals.len() > 10 {
+            // these must be the literals that initialize a large list.
+            // we want to force LLMs emit them exactly.
+            for lit in assigned_literals {
+                self.require_snippet(lit);
+            }
+        }
         let loc = self.take_location();
         if let Some((dict_name, access, value_type)) = self.dict_accesses.get(&loc) {
             format!(
@@ -1359,7 +1504,9 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
             .map(|block_id| self.analyzer.get_block(*block_id).guards.last().unwrap())
             .collect::<Vec<_>>();
         assert_eq!(arms.len(), guards.len());
-        let should_replace_with_ifelse = guards.iter().all(|guard| should_guard_replaced(guard));
+        let should_replace_with_ifelse = guards
+            .iter()
+            .all(|guard| should_guard_replaced(guard) || is_guard_dead(guard));
         if should_replace_with_ifelse {
             assert_eq!(arms.len(), guards.len());
             let mut iter = arms.iter().zip(guards.iter());
@@ -1374,6 +1521,9 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
             let mut else_if = String::new();
             let mut else_branch = None;
             for (arm, guard) in iter {
+                if is_guard_dead(guard) {
+                    continue;
+                }
                 if matches!(guard, Guard::N(false, Atom::Arg(_, VarCond::MatchAny))) {
                     else_branch.replace(format!(
                         "{tab}else\n{}",
@@ -1563,8 +1713,21 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 if let Word::Single(MayM4::Shell(WordFragment::Literal(filename))) = &file.0 {
                     let rust_string = {
                         let path = format!("Path::new(\"{}\")", filename);
-                        self.record_translated_fragment(path.clone());
-                        let content = self.display_word_as_format_str(heredoc, false);
+                        self.require_snippet(path.clone());
+
+                        // Use heredoc placeholder system for LLM-friendly output
+                        let (format_string, vars) = self.take_format_string_and_vars(heredoc);
+                        let placeholder =
+                            self.create_heredoc_placeholder(format_string, vars.len());
+                        self.require_snippet(placeholder.clone());
+
+                        // Build the content string using the placeholder
+                        let content = if vars.is_empty() {
+                            format!("\"{}\"", placeholder)
+                        } else {
+                            format!("&format!(\"{}\", {})", placeholder, vars.join(", "))
+                        };
+
                         self.enclose_by_rust_tags(
                             format!("write_file({}, {})", path, content),
                             false,
@@ -1623,14 +1786,14 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                         match &policy.mig_type {
                             CCMigrationType::Cfg => {
                                 let key = policy.key.as_ref().unwrap();
-                                self.record_translated_fragment(key.into());
+                                self.require_snippet(key.into());
                                 self.found_define.replace(true);
                                 required_defines
                                     .push(format!("define_cfg({:?}, {:?})", key, policy.value));
                             }
                             CCMigrationType::Env => {
                                 let key = policy.key.as_ref().unwrap();
-                                self.record_translated_fragment(key.into());
+                                self.require_snippet(key.into());
                                 self.found_define.replace(true);
                                 required_defines.push(format!(
                                     "define_env({:?}, {:?})",
@@ -1844,6 +2007,39 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     &required_defines,
                 )
             }
+            "AC_CHECK_FUNC" => {
+                let function = match m4_macro.args.get(0).unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone().into(),
+                    _ => unreachable!(),
+                };
+                let action_if_found = m4_macro.get_arg_as_cmd(1);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(2);
+                self.display_ac_check_funcs(
+                    indent_level,
+                    &[function],
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &required_defines,
+                )
+            }
+            "AC_CHECK_FUNCS" => {
+                let functions = m4_macro
+                    .get_arg_as_array(0)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                let action_if_found = m4_macro.get_arg_as_cmd(1);
+                let action_if_not_found = m4_macro.get_arg_as_cmd(2);
+                self.display_ac_check_funcs(
+                    indent_level,
+                    &functions,
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &required_defines,
+                )
+            }
             "PKG_CHECK_MODULES" => self.display_pkg_check_modules(node_id, indent_level),
             "AC_COMPILE_IFELSE" => {
                 // AC_COMPILE_IFELSE([input], [action-if-true], [action-if-false])
@@ -1902,7 +2098,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 let macro_output = self.m4_macro_to_string(m4_macro, indent_level);
                 if !required_defines.is_empty() {
                     for req_def in &required_defines {
-                        self.record_translated_fragment(req_def.clone());
+                        self.require_snippet(req_def.clone());
                     }
                     let hint = format!(
                         "{tab}# NOTE: You MUST include: {}\n",
@@ -1919,15 +2115,34 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
 
 fn should_guard_replaced(guard: &Guard) -> bool {
     match guard {
-        Guard::N(_, atom) => should_atom_replaced(atom),
+        Guard::N(_, atom) => {
+            should_atom_replaced_with_cfg(atom) || should_atom_replaced_with_optional(atom)
+        }
         Guard::Or(guards) | Guard::And(guards) => guards.iter().any(should_guard_replaced),
     }
 }
 
-fn should_atom_replaced(atom: &Atom) -> bool {
+fn is_guard_dead(guard: &Guard) -> bool {
+    match guard {
+        Guard::N(true, Atom::Tautology) => true,
+        Guard::N(_, _) => false,
+        Guard::Or(guards) => guards.iter().any(is_guard_dead),
+        Guard::And(guards) => guards.iter().all(is_guard_dead),
+    }
+}
+
+fn should_atom_replaced_with_cfg(atom: &Atom) -> bool {
     use Atom::*;
     match atom {
         Arch(_) | Cpu(_) | Os(_) | Env(_) | Abi(_) | Arg(_, _) => true,
+        _ => false,
+    }
+}
+
+fn should_atom_replaced_with_optional(atom: &Atom) -> bool {
+    use Atom::*;
+    match atom {
+        Var(_, VarCond::Set | VarCond::Unset) => true,
         _ => false,
     }
 }
@@ -1940,7 +2155,7 @@ fn split_tag_word(tag: &AcWord) -> Option<(AcWord, AcWord)> {
                 .unwrap_or_default()
         }) {
             let first = Word::Concat(words[..colon_pos].iter().cloned().collect()).into();
-            let after_words = words[colon_pos+1..].iter().cloned().collect::<Vec<_>>();
+            let after_words = words[colon_pos + 1..].iter().cloned().collect::<Vec<_>>();
             let second = if after_words.is_empty() {
                 Word::Empty
             } else {
@@ -1980,10 +2195,6 @@ mod tests {
             "hello\\tworld"
         );
         assert_eq!(
-            TranslatingPrinter::escape_rust_string("hello\nworld"),
-            "hello\\nworld"
-        );
-        assert_eq!(
             TranslatingPrinter::escape_rust_string("hello\rworld"),
             "hello\\rworld"
         );
@@ -1998,12 +2209,6 @@ mod tests {
         assert_eq!(
             TranslatingPrinter::escape_rust_string("hello\0world"),
             "hello\\0world"
-        );
-
-        // Test a complex example with multiple special characters
-        assert_eq!(
-            TranslatingPrinter::escape_rust_string("\thi\n\"test\"\r\\path"),
-            "\\thi\\n\\\"test\\\"\\r\\\\path"
         );
     }
 }

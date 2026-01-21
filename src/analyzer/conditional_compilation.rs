@@ -118,7 +118,7 @@ impl Analyzer {
                 let contents = self
                     .get_project_source_contents()
                     .into_iter()
-                    .chain(self.get_project_template_contents().into_iter())
+                    .chain(self.get_project_other_contents().into_iter())
                     .collect::<Vec<_>>();
                 if detect_value_usage(&symbol_may_prefixed, &contents) {
                     CCMigraionPolicy {
@@ -139,7 +139,7 @@ impl Analyzer {
         let mut subst_to_cpp_map = HashMap::new();
         for file in self.project_info.subst_files.iter().map(|(_, src)| src) {
             let path = self.project_info.project_dir.join(file);
-            let bytes = std::fs::read(path).unwrap();
+            let bytes = std::fs::read(path.as_path()).unwrap();
             let content = String::from_utf8_lossy(&bytes);
             for res in parse_ac_subst_header(&content, &self.get_project_source_contents()) {
                 match res {
@@ -204,7 +204,7 @@ impl Analyzer {
 }
 
 /// Detects if a C/C++ symbol is used as a non-boolean value (e.g., in assignments, math).
-/// Handles macro expansions recursively and ignores trivial boolean checks (e.g., `if (SYMBOL)`).
+/// Handles macro aliasing recursively and ignores trivial boolean checks (e.g., `if (SYMBOL)`).
 fn detect_value_usage(target_symbol: &str, contents: &[&str]) -> bool {
     let mut visited_symbols = HashSet::new();
     check_usage_recursive(target_symbol, contents, &mut visited_symbols)

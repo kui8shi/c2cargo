@@ -328,8 +328,8 @@ impl Analyzer {
                 println!("{}", &printer.print_node(id));
             }
             println!(
-                "\n[required_rust_fragments]:\n{}",
-                printer.get_translated_fragments().join("\n")
+                "\n[required_snippets]:\n{}",
+                printer.get_required_snippets().join("\n")
             );
             println!("==============");
         }
@@ -351,10 +351,11 @@ impl Analyzer {
                     DataType::Integer => {
                         format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
                     }
-                    DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => format!(
-                        "option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()",
-                        &name
-                    ),
+                    DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => if let Some(val) = has_known_value(name) {
+                        format!("option_env!(\"{}\").unwrap_or(\"{}\").split_whitespace().map(|s| s.to_owned()).collect()", name, val)
+                    } else {
+                        format!("option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()", name)
+                    },
                     DataType::Literal | DataType::Either(_, _) =>  if let Some(val) = has_known_value(name) {
                         format!("option_env!(\"{}\").unwrap_or(\"{}\").to_owned()", name, val)
                     } else {
@@ -639,16 +640,6 @@ impl Analyzer {
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
 
-        // Patterns to sanitize in LLM output if not found in the original script
-        // Format: (escaped_pattern, replacement)
-        let sanitize_patterns: &[(&str, &str)] = &[
-            ("\\n", "\n"),
-            ("\\t", "\t"),
-            ("\\\\", "\\"),
-        ];
-        // Track which patterns to sanitize for each chunk
-        let mut chunk_sanitize_patterns: HashMap<ChunkId, Vec<(&str, &str)>> = HashMap::new();
-
         // Collect rule-based translations for inlining during LLM processing
         let mut inlined_translations: HashMap<ChunkId, InlinedTranslationOutput> = self
             .chunks
@@ -697,6 +688,7 @@ impl Analyzer {
             // For cached translations, we don't have the original metadata
             cache_used = true;
             for (chunk_id, _) in cached.iter() {
+                llm_chunk_ids.push(*chunk_id);
                 let chunk_size = self
                     .chunks
                     .get(*chunk_id)
@@ -741,39 +733,42 @@ impl Analyzer {
                     .map(|nid| printer.print_node(*nid).to_string())
                     .join("\n");
 
-                // Collect patterns to sanitize (those not found in the original script)
-                let patterns_to_sanitize: Vec<(&str, &str)> = sanitize_patterns
-                    .iter()
-                    .filter(|(pattern, _)| !script.contains(pattern))
-                    .copied()
-                    .collect();
-                chunk_sanitize_patterns.insert(chunk_id, patterns_to_sanitize);
-
                 if script.trim().is_empty() {
                     // empty chunk
-                    inlined_translations.insert(
+                    let inlined_output = InlinedTranslationOutput {
+                        id: chunk_id,
+                        inline_rust_code: Vec::new(),
+                    };
+                    let meta = ChunkTranslationMeta {
+                        chunk_size: 0,
+                        translation_type: TranslationType::Inlined,
+                        success: true,
+                        failure_reason: None,
+                        llm_cost: None,
+                        duration: Duration::ZERO,
+                        retry_count: 0,
+                    };
+                    results.insert(
                         chunk_id,
-                        InlinedTranslationOutput {
-                            id: chunk_id,
-                            inline_rust_code: Vec::new(),
-                        },
+                        (
+                            Some(ChunkTranslationOutput::Inlined(inlined_output.clone())),
+                            meta,
+                        ),
                     );
+                    inlined_translations.insert(chunk_id, inlined_output);
                     continue;
                 }
 
-                let header = format!(
-                    "{} {{{}\n  ",
-                    self.print_chunk_skeleton_signature(chunk_id),
-                    {
-                        let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n  ");
-                        if header.is_empty() {
-                            "".into()
-                        } else {
-                            format!("\n  {}", header)
-                        }
+                let signature = self.print_chunk_skeleton_signature(chunk_id);
+                let body_header = format!("{}\n  ", {
+                    let header = self.print_chunk_skeleton_body_header(chunk_id).join("\n  ");
+                    if header.is_empty() {
+                        "".into()
+                    } else {
+                        format!("\n  {}", header)
                     }
-                );
-                let footer = format!("{}\n}}", {
+                });
+                let body_footer = format!("{}\n", {
                     let footer = self.print_chunk_skeleton_body_footer(chunk_id);
                     if footer.is_empty() {
                         "".into()
@@ -781,7 +776,7 @@ impl Analyzer {
                         format!("\n  {}", footer)
                     }
                 });
-                let skeleton = format!("{}{{body}}{}", header, footer);
+                let skeleton = format!("{} {{{}{{body}}{}}}", signature, body_header, body_footer);
                 let required_funcs = printer.get_rust_funcs_required_for_chunk();
                 let embedded_chunks = printer.get_embedded_chunks();
                 depending_funcs.insert(chunk_id, embedded_chunks.clone());
@@ -827,13 +822,15 @@ impl Analyzer {
                 };
                 let evidence = LLMBasedTranslationEvidence {
                     id: chunk_id,
-                    rust_snippets: printer.get_translated_fragments(),
+                    snippets: printer.get_required_snippets(),
                     extra_validation_funcs,
                     predefinition: use_llm::get_predefinition(&required_funcs),
                     features: printer.get_cargo_features(),
-                    header,
-                    footer,
+                    signature,
+                    body_header,
+                    body_footer,
                     depending_func_defs,
+                    heredoc_placeholders: printer.get_heredoc_placeholders(),
                 };
                 inputs.push((input, evidence));
                 llm_chunk_ids.push(chunk_id);
@@ -865,14 +862,8 @@ impl Analyzer {
                             retry_count: result.retry_count,
                         },
                     );
-                    // Sanitize patterns not found in the original script
-                    let mut output = result.output;
-                    if let Some(patterns) = chunk_sanitize_patterns.get(&chunk_id) {
-                        for (pattern, replacement) in patterns {
-                            output.rust_func_body = output.rust_func_body.replace(pattern, replacement);
-                        }
-                    }
-                    res.insert(chunk_id, output);
+                    // Heredoc placeholder restoration is handled in validate()
+                    res.insert(chunk_id, result.output);
                 }
 
                 if self.options.rename_rust_functions {
@@ -1124,6 +1115,7 @@ fn main() {{
             "check_library",
             "check_decl",
             "check_compile",
+            "check_func",
             "check_link",
             "pkg_config",
         ]) + &get_function_definition_record(record_path)
@@ -1168,10 +1160,7 @@ lazy_static::lazy_static! {
 }
 
 fn known_values() -> HashMap<String, String> {
-    HashMap::from([
-        ("CC".into(), "cc".into()),
-        ("AWK".into(), "awk".into())
-    ])
+    HashMap::from([("CC".into(), "cc".into()), ("AWK".into(), "awk".into())])
 }
 
 fn has_known_value(name: &str) -> Option<String> {

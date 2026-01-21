@@ -21,20 +21,20 @@ pub(crate) struct ProjectInfo {
     pub subst_files: Vec<(PathBuf, PathBuf)>,
     pub am_files: Vec<PathBuf>,
     pub dynamic_links: Vec<(Vec<PathBuf>, Vec<PathBuf>)>,
+    // contents of project source files
     pub source_contents: Option<HashMap<PathBuf, String>>,
-    pub template_contents: Option<HashMap<PathBuf, String>>,
+    // contents of template or not explicitly compiled sources
+    pub other_contents: Option<HashMap<PathBuf, String>>,
 }
 
 impl Analyzer {
     pub(crate) fn load_project_files(&mut self) {
-        let template_contents = self
-            .get_project_template_paths()
+        let other_contents = self
+            .get_project_other_paths()
             .into_iter()
             .map(|path| (path.to_owned(), load_source(path)))
             .collect::<HashMap<_, _>>();
-        self.project_info
-            .template_contents
-            .replace(template_contents);
+        self.project_info.other_contents.replace(other_contents);
 
         let source_contents = self
             .get_project_source_paths()
@@ -50,6 +50,12 @@ impl Analyzer {
             .iter()
             .map(|w| &w.value)
             .chain(self.project_info.h_files.iter())
+            .chain(
+                self.project_info
+                    .config_files
+                    .iter()
+                    .map(|(_, before)| before),
+            )
             .map(|p| p.as_path())
             .collect()
     }
@@ -64,7 +70,7 @@ impl Analyzer {
             .collect()
     }
 
-    fn get_project_template_paths(&self) -> HashSet<&Path> {
+    fn get_project_other_paths(&self) -> HashSet<&Path> {
         self.project_info
             .subst_files
             .iter()
@@ -73,15 +79,15 @@ impl Analyzer {
                 self.project_info
                     .dynamic_links
                     .iter()
-                    .flat_map(|(_, to)| to.iter()),
+                    .flat_map(|(_, before)| before.iter()),
             )
             .map(|p| p.as_path())
             .collect::<HashSet<_>>()
     }
 
-    pub(crate) fn get_project_template_contents(&self) -> Vec<&str> {
+    pub(crate) fn get_project_other_contents(&self) -> Vec<&str> {
         self.project_info
-            .template_contents
+            .other_contents
             .as_ref()
             .unwrap()
             .values()

@@ -1,3 +1,5 @@
+use autotools_parser::ast::node::ShellCommand;
+use autotools_parser::ast::MayM4;
 use bincode::{Decode, Encode};
 use std::collections::{HashMap, HashSet};
 use std::{
@@ -9,7 +11,7 @@ use super::{
     guard::{Atom, Guard, VarCond, VoL},
     Analyzer, M4Macro, NodeId,
 };
-use crate::analyzer::as_single;
+use crate::analyzer::{as_literal, as_shell, as_single};
 use crate::utils::llm_analysis::LLMAnalysis;
 use crate::{
     analyzer::build_option::use_llm::BuildOptionLLMAnalysisResult, utils::glob::glob_enumerate,
@@ -20,13 +22,14 @@ use itertools::Itertools;
 mod use_llm;
 
 /// doc
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(crate) struct BuildOption {
     decl_id: NodeId,
     option_name: String,
     vars: Vec<String>,
     value_candidates: Vec<String>,
     declaration: String,
+    related_nodes: Vec<NodeId>,
     context: Vec<String>,
 }
 
@@ -212,9 +215,7 @@ impl Analyzer {
                     decl_id: *node_id,
                     option_name: option_name.clone(),
                     vars: vars.clone(),
-                    value_candidates: Vec::new(),
-                    declaration: String::new(),
-                    context: Vec::new(),
+                    ..Default::default()
                 };
                 ret.build_options.insert(option_name.clone(), build_option);
                 for id in self.collect_descendant_nodes_per_node(*node_id, false, true) {
@@ -291,6 +292,7 @@ impl Analyzer {
                                 })
                                 .cloned(),
                         );
+                        build_option.related_nodes.push(id);
                         build_option.context.push(self.display_node(id));
                     }
                 }
@@ -308,22 +310,47 @@ impl Analyzer {
             .build_options
             .drain()
             .collect::<HashMap<_, _>>();
+        let arg_vars = self
+            .build_option_info()
+            .arg_var_to_option_name
+            .keys()
+            .map(|s| s.as_str())
+            .collect::<HashSet<_>>();
         for build_option in build_options.values_mut() {
-            // Treat "yes" and "no" as value candidates by default
-            build_option
-                .value_candidates
-                .extend(["yes".to_owned(), "no".to_owned()]);
             let mut values = HashSet::new();
-            for id in self.collect_descendant_nodes_per_node(build_option.decl_id, false, false) {
-                for &block_id in &self.get_node(id).unwrap().info.branches {
-                    for guard in self.blocks[block_id].guards.iter() {
-                        values.extend(enumerate_literal(guard));
+            for &base_id in
+                std::iter::once(&build_option.decl_id).chain(build_option.related_nodes.iter())
+            {
+                for id in self.collect_descendant_nodes_per_node(base_id, false, false) {
+                    for &block_id in &self.get_node(id).unwrap().info.branches {
+                        for guard in self.blocks[block_id].guards.iter() {
+                            values.extend(enumerate_literal(&arg_vars, guard));
+                        }
+                    }
+                    if let MayM4::Shell(ShellCommand::Assignment(lhs, rhs)) =
+                        &self.get_node(id).unwrap().cmd.0
+                    {
+                        if arg_vars.contains(lhs.as_str()) {
+                            if let Some(lit) =
+                                as_single(rhs).and_then(as_shell).and_then(as_literal)
+                            {
+                                // literals assigned to arg var
+                                values.insert(lit.to_owned());
+                            }
+                        }
                     }
                 }
             }
-            build_option
-                .value_candidates
-                .extend(normalize(values.into_iter().collect()));
+            let (vals, is_num) = normalize(values.into_iter().collect());
+            if is_num {
+                build_option.value_candidates.extend(vals);
+            } else {
+                // Treat "yes" and "no" as value candidates by default
+                build_option
+                    .value_candidates
+                    .extend(["yes".to_owned(), "no".to_owned()]);
+                build_option.value_candidates.extend(vals);
+            }
         }
         self.build_option_info.as_mut().unwrap().build_options = build_options;
     }
@@ -532,6 +559,11 @@ impl Analyzer {
                     // TODO: however we may have to treat this case more carefully.
                     continue;
                 }
+                let enabled_by_default = result
+                    .non_boolean_default
+                    .as_ref()
+                    .is_some_and(|default_value| default_value == representative)
+                    .then_some(true);
                 let feature_name = if representative == &result.option_name {
                     result.option_name.clone()
                 } else if representative == "yes" {
@@ -562,7 +594,7 @@ impl Analyzer {
                     name: feature_name.clone(),
                     original_build_option: result.option_name.clone(),
                     value_map,
-                    enabled_by_default: None,
+                    enabled_by_default,
                 });
             }
         }
@@ -627,21 +659,28 @@ fn convert_guard_var_to_arg(guard: &Guard, arg_vars: &HashSet<&str>) -> Guard {
     }
 }
 
-fn enumerate_literal(guard: &Guard) -> Vec<String> {
+fn enumerate_literal(arg_vars: &HashSet<&str>, guard: &Guard) -> Vec<String> {
     match guard {
-        Guard::N(negated, Atom::Var(_, cond) | Atom::Arg(_, cond)) if !negated => match cond {
-            VarCond::Eq(VoL::Lit(lit)) => {
-                vec![lit.to_owned()]
+        Guard::N(negated, Atom::Var(name, cond) | Atom::Arg(name, cond))
+            if !negated && arg_vars.contains(name.as_str()) =>
+        {
+            match cond {
+                VarCond::Eq(VoL::Lit(lit)) => {
+                    vec![lit.to_owned()]
+                }
+                VarCond::Match(glob) if !glob.contains("*") => glob_enumerate(glob),
+                _ => Default::default(),
             }
-            VarCond::Match(glob) if !glob.contains("*") => glob_enumerate(glob),
-            _ => Default::default(),
-        },
-        Guard::And(v) | Guard::Or(v) => v.iter().flat_map(enumerate_literal).collect(),
+        }
+        Guard::And(v) | Guard::Or(v) => v
+            .iter()
+            .flat_map(|g| enumerate_literal(arg_vars, g))
+            .collect(),
         _ => Default::default(),
     }
 }
 
-fn normalize(values: Vec<String>) -> Vec<String> {
+fn normalize(values: Vec<String>) -> (Vec<String>, bool) {
     const MAX_NUM: usize = 10;
     if values.iter().all(|value| value.parse::<usize>().is_ok()) {
         let mut nums: Vec<usize> = values
@@ -651,14 +690,17 @@ fn normalize(values: Vec<String>) -> Vec<String> {
             .into_iter()
             .collect();
         nums.sort();
-        nums.into_iter()
-            .take(MAX_NUM)
-            .map(|num| num.to_string())
-            .collect()
+        (
+            nums.into_iter()
+                .take(MAX_NUM)
+                .map(|num| num.to_string())
+                .collect(),
+            true,
+        )
     } else {
         let mut literals: Vec<String> = values;
         literals.sort();
-        literals.into_iter().take(MAX_NUM).collect()
+        (literals.into_iter().take(MAX_NUM).collect(), false)
     }
 }
 

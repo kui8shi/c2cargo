@@ -554,6 +554,16 @@ impl Analyzer {
                             },
                         );
                     }
+                } else {
+                    // the macro don't have any side effects, why not remove it.
+                    let macro_name = macro_call.name.clone();
+                    side_effects_of_fixed_macros.insert(
+                        id,
+                        FixedMacroSideEffect {
+                            macro_name,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
         }

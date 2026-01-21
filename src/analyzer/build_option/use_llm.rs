@@ -31,6 +31,8 @@ pub(super) struct BuildOptionLLMAnalysisResult {
     pub aliases: Option<HashMap<String, String>>,
     /// Whether enabled by default or null if unknown.
     pub enabled_by_default: Option<bool>,
+    /// default value if the option is not boolean
+    pub non_boolean_default: Option<String>,
     /// Name of the build option
     pub option_name: String,
 }
@@ -38,7 +40,7 @@ pub(super) struct BuildOptionLLMAnalysisResult {
 impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
     /// Validate this result against the prompt-defined rules using the provided `values` as Candidates.
     /// Returns `Ok(())` if valid, or `Err(Vec<String>)` with all detected issues.
-    fn validate(&self, values: &Vec<String>) -> Result<(), Vec<String>> {
+    fn validate(&mut self, values: &Vec<String>) -> Result<(), Vec<String>> {
         use std::collections::HashSet;
 
         let mut errors = Vec::new();
@@ -68,7 +70,7 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
         }
 
         // 2a) representatives must not contain some literals
-        let banned_reps = ["auto", "detect", "check", "on", "off"];
+        let banned_reps = ["auto", "detect", "check", "on", "off", "default"];
         let found_banned: Vec<&str> = banned_reps
             .iter()
             .copied()
@@ -95,6 +97,16 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
                     r#"Binary representatives must contain yes and no. They must not hold any other values: {:?}"#,
                     reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
                 ))
+        }
+
+        // 2c) non binary build option must select default value from representatives
+        if (!reps_set.contains("yes") && !reps_set.contains("no"))
+            && self
+                .non_boolean_default
+                .as_ref()
+                .is_none_or(|v| !self.representatives.contains(&v))
+        {
+            errors.push(format!(r#"Non binary build option must have default value"#));
         }
 
         // 3) aliases must partition the non-representatives:
@@ -233,6 +245,7 @@ impl LLMAnalysis for LLMUser {
     "representatives",
     "aliases",
     "enabled_by_default",
+    "non_boolean_default",
     "option_name"
   ],
   "properties": {
@@ -244,6 +257,7 @@ impl LLMAnalysis for LLMUser {
     },
     "aliases": { "type": ["object", "null"] },
     "enabled_by_default": { "type": ["boolean", "null"] },
+    "non_boolean_default": { "type": ["str", "null"] },
     "option_name": { "type": "string" }
   },
   "additionalProperties": false
@@ -276,6 +290,9 @@ Extraction procedure:
   c. Later shell logic setting a default (e.g. : ${enable_foo=no}).
   d. If option is non-binary (auto/enums) and no binary default is forced, use null.
   e. Otherwise null.
+6. Determine non_boolean_default by the following precedence:
+  a. if the option is boolean, null.
+  b. otherwise, select a default value from the representatives
 
 Per-option output fields:
 1. option_name: copy the given name.

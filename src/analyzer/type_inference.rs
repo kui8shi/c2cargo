@@ -8,9 +8,7 @@ use crate::analyzer::{
 
 use super::{AcWord, Analyzer, AstVisitor, MayM4, Node, NodeId, Parameter, PatternBodyPair, Word};
 use autotools_parser::ast::{
-    condition::{Condition, Operator},
-    minimal::WordFragment,
-    Redirect,
+    condition::{Condition, Operator}, minimal::WordFragment, Arithmetic, Redirect
 };
 
 #[allow(dead_code)]
@@ -87,8 +85,8 @@ pub enum TypeHint {
     /// used in `rm` or `cat` commands.
     /// or, appear in redirection
     UsedAsPath,
-    /// used in expr command
-    UsedInExpr,
+    /// used in expr command or arithmetic expression
+    Calculated,
     /// used in test command with options such as '-ge', or '-lt'
     SizeComparison,
 }
@@ -204,18 +202,18 @@ impl<'a> TypeInferrer<'a> {
         if hints.contains(&CanContainWhitespace) {
             inferred = List(Box::new(Literal));
         }
-        if hints.contains(&CanBeNum) {
-            if let Some(set) = self.assigned.get(name) {
-                inferred = Either(Box::new(Integer), Vec::from_iter(set.iter().cloned()))
-            } else {
-                inferred = Integer;
-            }
-        }
         if hints.contains(&CanBeBoolLike) {
             if let Some(set) = self.assigned.get(name) {
                 inferred = Either(Box::new(Boolean), Vec::from_iter(set.iter().cloned()))
             } else if !name.to_lowercase().contains("version") {
                 inferred = Boolean
+            }
+        }
+        if hints.contains(&CanBeNum) {
+            if let Some(set) = self.assigned.get(name) {
+                inferred = Either(Box::new(Integer), Vec::from_iter(set.iter().cloned()))
+            } else {
+                inferred = Integer;
             }
         }
         if hints.contains(&AppendedSelf) {
@@ -239,7 +237,7 @@ impl<'a> TypeInferrer<'a> {
         if hints.contains(&UsedAsPath) {
             inferred = Path;
         }
-        if hints.contains(&UsedInExpr) || hints.contains(&SizeComparison) {
+        if hints.contains(&Calculated) || hints.contains(&SizeComparison) {
             inferred = Integer;
         }
         if let Some(ty) = has_known_type(name) {
@@ -258,15 +256,15 @@ impl<'a> TypeInferrer<'a> {
 
     fn check_literal(&mut self, var: &str, lit: &str) {
         let mut found_hint = false;
-        if is_boolean(lit) {
-            self.add_type_hint(var, CanBeBoolLike);
-            found_hint = true;
-        }
         if lit.is_empty() {
             self.add_type_hint(var, CanBeEmpty);
             found_hint = true;
         }
-        if is_numeric(lit) {
+        if is_boolean(lit) {
+            self.add_type_hint(var, CanBeBoolLike);
+            found_hint = true;
+        }
+        if !is_boolean(lit) && is_numeric(lit) {
             self.add_type_hint(var, CanBeNum);
             found_hint = true;
         }
@@ -411,13 +409,20 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
                 if matches!(lit, "expr") {
                     for arg in &cmd_words[1..] {
                         if let Some(name) = as_single(arg).and_then(as_shell).and_then(as_var) {
-                            self.add_type_hint(name, UsedInExpr);
+                            self.add_type_hint(name, Calculated);
                         }
                     }
                 }
             }
         }
         self.walk_command(cmd_words);
+    }
+
+    fn visit_arithmetic(&mut self, arith: &Arithmetic<String>) {
+        if let Arithmetic::Var(var) = arith {
+            self.add_type_hint(var, Calculated);
+        }
+        self.walk_arithmetic(arith);
     }
 
     fn visit_condition(&mut self, cond: &Condition<NodeId, AcWord>) {
@@ -566,9 +571,8 @@ lazy_static::lazy_static! {
 
 fn known_types() -> HashMap<String, DataType> {
     HashMap::from([
-        // For CC, i know there is a case like 'CC="gcc -pipe"' but why
-        // not put the flags to CFLAGS? things should be simplified AMAP
-        ("CC".into(), DataType::Literal),
+        ("CC".into(), DataType::List(Box::new(DataType::Literal))),
+        ("CPP".into(), DataType::List(Box::new(DataType::Literal))),
         ("LIBS".into(), DataType::List(Box::new(DataType::Literal))),
         (
             "LDFLAGS".into(),
@@ -579,6 +583,7 @@ fn known_types() -> HashMap<String, DataType> {
             DataType::List(Box::new(DataType::Literal)),
         ),
         ("CFLAGS".into(), DataType::List(Box::new(DataType::Literal))),
+        ("GCC".into(), DataType::Boolean),
         ("enable_shared".into(), DataType::Boolean),
         ("prefix".into(), DataType::Path),
         ("exec_prefix".into(), DataType::Path),

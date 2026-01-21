@@ -14,7 +14,7 @@ use autotools_parser::ast::{minimal::WordFragment, node::NodeId, Parameter};
 use itertools::Itertools;
 
 use crate::{
-    analyzer::{as_literal, as_shell, as_single, guard::VoL, Analyzer},
+    analyzer::{as_literal, as_shell, as_single, as_var, guard::VoL, Analyzer},
     utils::is_h_extension,
 };
 
@@ -633,9 +633,6 @@ impl Analyzer {
         for pkg_config_macro in ["PKG_CHECK_MODULES"] {
             if let Some(v) = macro_calls.get(pkg_config_macro) {
                 for (node_id, macro_call) in v {
-                    // TODO: we are going to extensive analysis of this macro to prepare all for
-                    // rule-based translation.
-
                     let prefix = macro_call.get_arg_as_literal(0).unwrap();
                     let mut words = macro_call.get_arg_as_array(1).unwrap().into_iter();
                     let action_if_found = macro_call.get_arg_as_cmd(2).unwrap_or_default();
@@ -643,23 +640,21 @@ impl Analyzer {
 
                     let mut packages = Vec::new();
                     while let Some(w) = words.next() {
-                        if let Some(package_name) = as_single(&w)
-                            .and_then(as_shell)
-                            .and_then(as_literal)
-                            .map(|s| s.to_owned())
-                        {
-                            let mut peekable = words.clone().peekable();
-                            let peeked_literal = peekable
-                                .peek()
-                                .and_then(as_single)
-                                .and_then(as_shell)
-                                .and_then(as_literal);
-                            let has_minimum_version = peeked_literal.is_some_and(|lit| lit == ">=");
-                            let has_unsupported_version_requirement = peeked_literal
-                                .is_some_and(|lit| matches!(lit, "=" | ">" | "<" | "<="));
-                            if has_minimum_version {
-                                words.next();
-                                let at_least_version = words
+                        if let Some(shell_word) = as_single(&w).and_then(as_shell) {
+                            if let Some(package_name) = as_literal(shell_word) {
+                                let mut peekable = words.clone().peekable();
+                                let peeked_literal = peekable
+                                    .peek()
+                                    .and_then(as_single)
+                                    .and_then(as_shell)
+                                    .and_then(as_literal);
+                                let has_minimum_version =
+                                    peeked_literal.is_some_and(|lit| lit == ">=");
+                                let has_unsupported_version_requirement = peeked_literal
+                                    .is_some_and(|lit| matches!(lit, "=" | ">" | "<" | "<="));
+                                if has_minimum_version {
+                                    words.next();
+                                    let at_least_version = words
                                     .next()
                                     .as_ref()
                                     .and_then(as_single)
@@ -670,11 +665,37 @@ impl Analyzer {
                                         _ => todo!("Unsupported version representation found in PKG_CHECK_MODULES"),
                                     })
                                     .unwrap();
-                                packages.push((package_name, Some(at_least_version)));
-                            } else if has_unsupported_version_requirement {
-                                todo!("Unsupported version requirement found in PKG_CHECK_MODULES");
-                            } else {
-                                packages.push((package_name, None));
+                                    packages
+                                        .push((package_name.to_owned(), Some(at_least_version)));
+                                } else if has_unsupported_version_requirement {
+                                    todo!("Unsupported version requirement found in PKG_CHECK_MODULES");
+                                } else {
+                                    packages.push((package_name.to_owned(), None));
+                                }
+                            } else if let Some(var) = as_var(shell_word) {
+                                // `resolve_var` returns an unordered set, although the order in the string matter.
+                                // For example, var="glib-2.0 >= 2.0.0".
+                                // However, fortunately we can get the correct order by sort
+                                // because each literal comes from distinct char set
+                                // (alphabet, sign, and number).
+                                let literals = self
+                                    .resolve_var(var, None, false)
+                                    .into_iter()
+                                    .sorted()
+                                    .rev()
+                                    .collect::<Vec<_>>();
+                                if literals.len() == 1 {
+                                    let package_name = literals.first().unwrap().to_owned();
+                                    packages.push((package_name, None));
+                                } else if literals.len() == 3
+                                    && literals.get(1).is_some_and(|sign| sign == ">=")
+                                {
+                                    let package_name = literals.first().unwrap().to_owned();
+                                    let at_least_version =
+                                        VoL::Lit(literals.last().unwrap().to_owned());
+                                    packages
+                                        .push((package_name.to_owned(), Some(at_least_version)));
+                                }
                             }
                         }
                     }

@@ -14,16 +14,19 @@ fn check_header(cc: &str, header: &str, prelude: &str, cppflags: &[String]) -> b
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().expect("failed to spawn cc for header check");
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-        stdin
-            .write_all(test_prog.as_bytes())
-            .expect("failed to write to cc stdin");
+    if let Ok(mut child) = cmd.spawn() {
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
+            stdin
+                .write_all(test_prog.as_bytes())
+                .expect("failed to write to cc stdin");
+        }
+        let status = child.wait().expect("failed to wait on cc header check");
+        status.success()
+    } else {
+        false
     }
-    let status = child.wait().expect("failed to wait on cc header check");
-    status.success()
 }"#
 }
 
@@ -57,19 +60,19 @@ fn check_library(
         cmd.stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null());
-        let mut child = cmd.spawn().expect("failed to spawn cc for link test");
-        {
-            use std::io::Write;
-            let mut stdin = child
-                .stdin
-                .take()
-                .expect("failed to open stdin for cc link test");
-            stdin
-                .write_all(test_prog.as_bytes())
-                .expect("failed to write test program");
+        if let Ok(mut child) = cmd.spawn() {
+            {
+                use std::io::Write;
+                let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
+                stdin
+                    .write_all(test_prog.as_bytes())
+                    .expect("failed to write to cc stdin");
+            }
+            let status = child.wait().expect("failed to wait on cc link test");
+            status.success()
+        } else {
+            false
         }
-        let status = child.wait().expect("failed to wait on cc link test");
-        status.success()
     };
 
     if try_std {
@@ -109,16 +112,51 @@ fn check_decl(cc: &str, symbol: &str, prelude: &str, cppflags: &[String]) -> boo
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().expect("failed to spawn cc for decl check");
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().expect("failed to open stdin");
-        stdin
-            .write_all(test_prog.as_bytes())
-            .expect("failed to write to stdin");
+    if let Ok(mut child) = cmd.spawn() {
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
+            stdin
+                .write_all(test_prog.as_bytes())
+                .expect("failed to write to cc stdin");
+        }
+        let status = child.wait().expect("failed to wait on cc declaration check");
+        status.success()
+    } else {
+        false
     }
-    let status = child.wait().expect("failed to wait on cc declaration check");
-    status.success()
+}"#
+}
+
+pub(super) fn get_function_definition_check_func() -> &'static str {
+    r#"
+fn check_func(cc: &str, function_name: &str, ldflags: &[String]) -> bool {
+    let test_prog = format!(
+        "char {0} (void); int main (void) {{ return {0} (); }}",
+        function_name
+    );
+
+    let mut cmd = std::process::Command::new(cc);
+    cmd.args(&["-x", "c", "-", "-o", "/dev/null"]);
+    for flag in ldflags {
+        cmd.arg(flag);
+    }
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    if let Ok(mut child) = cmd.spawn() {
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
+            stdin
+                .write_all(test_prog.as_bytes())
+                .expect("failed to write to cc stdin");
+        }
+        let status = child.wait().expect("failed to wait on cc func check");
+        status.success()
+    } else {
+        false
+    }
 }"#
 }
 
@@ -136,16 +174,19 @@ fn check_compile(cc: &str, cflags: &[String], cppflags: &[String], code: &str) -
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().expect("failed to spawn cc for compile check");
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().expect("failed to open stdin");
-        stdin
-            .write_all(code.as_bytes())
-            .expect("failed to write to stdin");
+    if let Ok(mut child) = cmd.spawn() {
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
+            stdin
+                .write_all(code.as_bytes())
+                .expect("failed to write to cc stdin");
+        }
+        let status = child.wait().expect("failed to wait on cc compile check");
+        status.success()
+    } else {
+        false
     }
-    let status = child.wait().expect("failed to wait on cc compile check");
-    status.success()
 }"#
 }
 
@@ -166,16 +207,19 @@ fn check_link(cc: &str, cflags: &[String], ldflags: &[String], libs: &[String], 
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let mut child = cmd.spawn().expect("failed to spawn cc for link check");
-    {
-        use std::io::Write;
-        let mut stdin = child.stdin.take().expect("failed to open stdin");
-        stdin
-            .write_all(code.as_bytes())
-            .expect("failed to write to stdin");
+    if let Ok(mut child) = cmd.spawn() {
+        {
+            use std::io::Write;
+            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
+            stdin
+                .write_all(code.as_bytes())
+                .expect("failed to write to cc stdin");
+        }
+        let status = child.wait().expect("failed to wait on cc link check");
+        status.success()
+    } else {
+        false
     }
-    let status = child.wait().expect("failed to wait on cc link check");
-    status.success()
 }"#
 }
 

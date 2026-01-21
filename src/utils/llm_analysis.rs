@@ -17,7 +17,7 @@ pub(crate) struct LLMResultWithMeta<O> {
 }
 
 pub(crate) trait LLMOutput<E>: std::fmt::Debug + Serialize + DeserializeOwned {
-    fn validate(&self, evidence: &E) -> Result<(), Vec<String>>;
+    fn validate(&mut self, evidence: &E) -> Result<(), Vec<String>>;
 
     fn normalize(&mut self) {}
 }
@@ -134,7 +134,7 @@ pub(crate) trait LLMAnalysis {
             match llm.chat(&[msg]).await {
                 Ok(response) => {
                     let text = response.text().ok_or("No text in response")?;
-                    println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
+                    // println!("Raw JSON (attempt {}):\n{}", attempt + 1, text);
                     if let Some(usage) = response.usage() {
                         Self::show_cost(&usage);
                         total_cost += Self::calculate_cost(&usage);

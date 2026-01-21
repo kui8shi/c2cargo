@@ -718,7 +718,8 @@ impl Analyzer {
                 .to_str()
                 .is_some_and(|file_name| file_name == "configure.ac")
         }) {
-            autotools_parser::preprocess::partial_expansion(path)
+            autotools_parser::preprocess::partial_expansion(path, true)
+                .or_else(|_| autotools_parser::preprocess::partial_expansion(path, false))
                 .expect("Partial Expansion of configure.ac has failed.")
         } else {
             std::fs::read_to_string(path).expect("Reading a file has failed.")
@@ -828,7 +829,6 @@ impl Analyzer {
 
         s.construct_chunk_skeletons();
 
-        dbg!(&s.inferred_types);
         s
     }
 
