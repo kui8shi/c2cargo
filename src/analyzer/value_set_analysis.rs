@@ -70,11 +70,15 @@ pub(crate) struct VSACache {
 
 impl Analyzer {
     pub(crate) fn eval_assigns(&self) -> &HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>> {
-        self.eval_assigns.as_ref().unwrap()
+        self.eval_assigns
+            .as_ref()
+            .expect("eval_assigns not yet initialized; review calling order")
     }
 
     pub(crate) fn divided_vars(&self) -> &HashMap<String, DividedVariable> {
-        self.divided_vars.as_ref().unwrap()
+        self.divided_vars
+            .as_ref()
+            .expect("divided_vars not yet initialized; review calling order")
     }
 
     /// run value set analysis to obtain value candidates of variables appeared in eval statements.
@@ -111,9 +115,7 @@ impl Analyzer {
         }
         for (name, ref_loc) in new_locs {
             let locs = self
-                .var_indirect_usages
-                .as_mut()
-                .unwrap()
+                .indirect_usages_mut()
                 .entry(name)
                 .or_default();
             if !locs.contains(&ref_loc) {

@@ -7,7 +7,9 @@ use serde::{Deserialize, Serialize};
 use crate::{
     analyzer::{
         pkg_config::get_function_definition_pkg_config,
-        translator::pretranslation::get_function_definition_check_decl,
+        translator::pretranslation::{
+            get_function_definition_check_decl, get_function_definition_execute_cmd,
+        },
     },
     utils::llm_analysis::{LLMAnalysis, LLMOutput},
 };
@@ -31,12 +33,16 @@ pub(super) struct LLMBasedTranslationInput {
 }
 
 impl LLMBasedTranslationInput {
-    pub fn new(id: usize, script: String, skeleton: String, required_funcs: &[&str]) -> Self {
+    pub fn new(id: usize, script: String, skeleton: String, required_funcs: &[String]) -> Self {
+        let req = required_funcs
+            .into_iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>();
         Self {
             id,
             script,
             skeleton,
-            predefined: get_predefinition(required_funcs),
+            predefined: get_predefinition(&req),
         }
     }
 }
@@ -84,6 +90,7 @@ fn write_file(path: &Path, content: &str) {
   writeln!(f, "{content}").expect("writing");
 }"#,
         ),
+        ("execute_cmd", get_function_definition_execute_cmd()),
         (
             "define_cfg",
             r#"
@@ -150,8 +157,9 @@ fn sanitize_rust_name(s: &str) -> String {
         ("check_link", get_function_definition_check_link()),
         ("pkg_config", get_function_definition_pkg_config()),
     ]);
-    std::iter::once("default_modules")
-        .chain(required_funcs.iter().cloned())
+    ["default_modules", "execute_cmd"]
+        .iter()
+        .chain(required_funcs.iter())
         .map(|key| predefinitions.get(key).unwrap())
         .join("\n")
 }

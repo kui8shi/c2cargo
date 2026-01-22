@@ -73,11 +73,13 @@ impl FeatureState {
 #[allow(dead_code)]
 impl Analyzer {
     pub(crate) fn get_macro_call(&self, name: &str) -> Option<&Vec<(NodeId, M4Macro)>> {
-        self.macro_calls.as_ref().unwrap().get(name)
+        self.macro_calls().get(name)
     }
 
     pub(crate) fn build_option_info(&self) -> &BuildOptionInfo {
-        self.build_option_info.as_ref().unwrap()
+        self.build_option_info
+            .as_ref()
+            .expect("build_option_info not yet initialized; review calling order")
     }
 
     /// Analyze basic properties of build options
@@ -112,9 +114,7 @@ impl Analyzer {
             if let Some(cached_features) = self.load_build_option_cache() {
                 println!("Using cached build option analysis results");
                 self.record_collector_mut().set_build_option_cache_used();
-                self.build_option_info
-                    .as_mut()
-                    .unwrap()
+                self.build_option_info_mut()
                     .cargo_features
                     .replace(cached_features);
                 self.apply_non_empty_property_of_cargo_features();
@@ -135,9 +135,7 @@ impl Analyzer {
             )
             .await;
 
-        self.build_option_info
-            .as_mut()
-            .unwrap()
+        self.build_option_info_mut()
             .cargo_features
             .replace(Default::default());
         for result in results {
@@ -175,9 +173,7 @@ impl Analyzer {
                 result.retry_count,
             );
 
-            self.build_option_info
-                .as_mut()
-                .unwrap()
+            self.build_option_info_mut()
                 .cargo_features
                 .as_mut()
                 .unwrap()
@@ -237,9 +233,7 @@ impl Analyzer {
             }
             if build_option.context.is_empty() {
                 // remove build options themselves that have no side effects.
-                self.build_option_info
-                    .as_mut()
-                    .unwrap()
+                self.build_option_info_mut()
                     .build_options
                     .remove(&option_name);
             }
@@ -247,14 +241,13 @@ impl Analyzer {
     }
 
     fn find_build_option_guards(&mut self) {
-        let arg_vars = self
-            .build_option_info
-            .as_ref()
-            .unwrap()
+        let arg_var_keys: Vec<_> = self
+            .build_option_info()
             .arg_var_to_option_name
             .keys()
-            .map(|s| s.as_str())
-            .collect::<HashSet<_>>();
+            .cloned()
+            .collect();
+        let arg_vars: HashSet<&str> = arg_var_keys.iter().map(|s| s.as_str()).collect();
         for (_, block) in self.blocks.iter_mut() {
             block.guards = block
                 .guards
@@ -267,9 +260,7 @@ impl Analyzer {
     /// doc
     fn collect_build_option_contexts(&mut self) {
         let mut build_options = self
-            .build_option_info
-            .as_mut()
-            .unwrap()
+            .build_option_info_mut()
             .build_options
             .drain()
             .collect::<HashMap<_, _>>();
@@ -299,14 +290,12 @@ impl Analyzer {
             }
         }
 
-        self.build_option_info.as_mut().unwrap().build_options = build_options;
+        self.build_option_info_mut().build_options = build_options;
     }
 
     fn collect_build_option_value_candidates(&mut self) {
         let mut build_options = self
-            .build_option_info
-            .as_mut()
-            .unwrap()
+            .build_option_info_mut()
             .build_options
             .drain()
             .collect::<HashMap<_, _>>();
@@ -352,7 +341,7 @@ impl Analyzer {
                 build_option.value_candidates.extend(vals);
             }
         }
-        self.build_option_info.as_mut().unwrap().build_options = build_options;
+        self.build_option_info_mut().build_options = build_options;
     }
 
     /// Remove nodes where a build option variable is set to "no".
@@ -360,7 +349,7 @@ impl Analyzer {
         use crate::analyzer::{as_literal, as_shell, MayM4};
         use autotools_parser::ast::node::ShellCommand;
 
-        let info = self.build_option_info.as_ref().unwrap();
+        let info = self.build_option_info();
         let mut nodes_to_remove = Vec::new();
 
         // Find all assignment nodes where a target variable is set to "no"
@@ -396,7 +385,7 @@ impl Analyzer {
         use crate::analyzer::{as_literal, as_shell, MayM4};
         use autotools_parser::ast::node::ShellCommand;
 
-        let info = self.build_option_info.as_ref().unwrap();
+        let info = self.build_option_info();
         let mut nodes_to_remove = Vec::new();
         let mut dependencies = HashMap::new();
 
@@ -455,9 +444,7 @@ impl Analyzer {
             self.remove_node(node_id);
         }
 
-        self.build_option_info
-            .as_mut()
-            .unwrap()
+        self.build_option_info_mut()
             .feature_dependencies = dependencies;
     }
 
@@ -468,7 +455,7 @@ impl Analyzer {
 
         let mut nodes_to_remove = Vec::new();
 
-        let info = self.build_option_info.as_ref().unwrap();
+        let info = self.build_option_info();
         let arg_vars = info.arg_var_to_option_name.keys().collect::<Vec<_>>();
 
         // Find assignment nodes where build option variable's value is directly used
@@ -604,14 +591,15 @@ impl Analyzer {
 
     /// convert some conditions according to the assumption of empty properties of cargo features
     fn apply_non_empty_property_of_cargo_features(&mut self) {
+        let arg_var_to_option_name = self.build_option_info().arg_var_to_option_name.clone();
+        let cargo_features = self.build_option_info().cargo_features.clone();
         for (_, block) in self.blocks.iter_mut() {
             let mut converted = Vec::new();
             for guard in block.guards.iter() {
-                let info = self.build_option_info.as_ref().unwrap();
                 match convert_empty_argument_guards(
                     guard,
-                    &info.arg_var_to_option_name,
-                    &info.cargo_features,
+                    &arg_var_to_option_name,
+                    &cargo_features,
                 ) {
                     Ok(guard) => converted.push(guard),
                     Err(true) => converted.push(Guard::confirmed(Atom::Tautology)),

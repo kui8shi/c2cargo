@@ -150,18 +150,17 @@ impl Analyzer {
 
     fn convert_guards_for_numeric_boolean(&mut self) {
         let bool_vars = self
-            .inferred_types
-            .as_ref()
-            .unwrap()
+            .inferred_types()
             .iter()
             .filter(|(_, ty)| *ty == &DataType::Boolean)
-            .map(|(var_name, _)| var_name.as_str())
-            .collect::<HashSet<_>>();
+            .map(|(var_name, _)| var_name.clone())
+            .collect::<HashSet<String>>();
+        let bool_var_refs = bool_vars.iter().map(|s| s.as_str()).collect::<HashSet<_>>();
         for (_, block) in self.blocks.iter_mut() {
             block.guards = block
                 .guards
                 .iter()
-                .map(|guard| convert_guard_numeric_boolean(guard, &bool_vars))
+                .map(|guard| convert_guard_numeric_boolean(guard, &bool_var_refs))
                 .collect();
         }
     }

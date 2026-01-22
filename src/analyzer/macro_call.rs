@@ -125,30 +125,37 @@ impl Analyzer {
 }
 
 impl Analyzer {
+    pub(super) fn side_effects_of_frozen_macros(&self) -> &HashMap<NodeId, FixedMacroSideEffect> {
+        self.side_effects_of_frozen_macros
+            .as_ref()
+            .expect("side_effects_of_frozen_macros not yet initialized; review calling order")
+    }
+
     fn consume_error_macros(&mut self) {
-        let macro_calls = self.macro_calls.as_ref().unwrap();
-        if let Some(v) = macro_calls.get("AX_PREFIX_CONFIG_H") {
-            if let Some((_id, m4_macro)) = v.first() {
-                if let Some(lit) = m4_macro.get_arg_as_literal(1) {
-                    self.cpp_prefix.replace(lit + "_");
-                }
-            }
+        let prefix = self
+            .macro_calls()
+            .get("AX_PREFIX_CONFIG_H")
+            .and_then(|v| v.first())
+            .and_then(|(_, m4_macro)| m4_macro.get_arg_as_literal(1));
+        if let Some(lit) = prefix {
+            self.cpp_prefix.replace(lit + "_");
         }
 
-        for error_macro in ["AC_MSG_ERROR"] {
-            if let Some(v) = macro_calls.get(error_macro) {
-                for (node_id, _) in v {
-                    if let Some(block_id) = self.get_node(*node_id).unwrap().info.block {
-                        self.blocks[block_id].error_out = true;
-                    }
-                }
+        let error_node_ids: Vec<_> = ["AC_MSG_ERROR"]
+            .iter()
+            .flat_map(|name| self.macro_calls().get(*name).into_iter().flatten())
+            .map(|(node_id, _)| *node_id)
+            .collect();
+        for node_id in error_node_ids {
+            if let Some(block_id) = self.get_node(node_id).unwrap().info.block {
+                self.blocks[block_id].error_out = true;
             }
         }
     }
 
     fn consume_m4sh_internal_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for m4sh_internal_macro in ["AS_INIT", "AS_ME_PREPARE", "AS_UNAME"] {
             if let Some(v) = macro_calls.get(m4sh_internal_macro) {
                 for (node_id, _) in v {
@@ -164,7 +171,7 @@ impl Analyzer {
 
     fn consume_autoconf_internal_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for autoconf_internal_macro in ["AC_CONFIG_SRCDIR"] {
             if let Some(v) = macro_calls.get(autoconf_internal_macro) {
                 for (node_id, _) in v {
@@ -180,7 +187,7 @@ impl Analyzer {
 
     fn consume_notice_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for notice_macro in ["AC_PREREQ", "AC_COPYRIGHT", "AC_REVISION", "AH_TOP"] {
             if let Some(v) = macro_calls.get(notice_macro) {
                 for (node_id, _) in v {
@@ -196,7 +203,7 @@ impl Analyzer {
 
     fn consume_msg_only_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for msg_only_macro in ["AC_MSG_CHECKING", "AC_MSG_RESULT", "AC_MSG_NOTICE"] {
             if let Some(v) = macro_calls.get(msg_only_macro) {
                 for (node_id, _) in v {
@@ -212,72 +219,77 @@ impl Analyzer {
 
     fn consume_config_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let mut config_files = Vec::new();
+        let mut am_files = Vec::new();
+        let mut subst_files = Vec::new();
 
-        for config_macro in ["AC_CONFIG_HEADERS"] {
-            if let Some(v) = macro_calls.get(config_macro) {
-                for (node_id, macro_call) in v {
-                    if let Some(tags) = macro_call
-                        .effects
-                        .as_ref()
-                        .and_then(|side_effects| side_effects.tags.as_ref())
-                    {
-                        for (dst, src) in tags {
-                            let dst = PathBuf::from(dst);
-                            let src = if let Some(src) = src {
-                                PathBuf::from(src)
-                            } else {
-                                let mut path = dst.clone();
-                                path.add_extension("in");
-                                path
-                            };
-                            if src.exists() {
-                                dbg!(&dst, &src);
-                                self.project_info.config_files.push((dst, src));
-                            }
-                        }
+        for (node_id, macro_call) in self
+            .macro_calls()
+            .get("AC_CONFIG_HEADERS")
+            .cloned()
+            .into_iter()
+            .flatten()
+        {
+            if let Some(tags) = macro_call
+                .effects
+                .as_ref()
+                .and_then(|side_effects| side_effects.tags.as_ref())
+            {
+                for (dst, src) in tags {
+                    let dst = PathBuf::from(dst);
+                    let src = if let Some(src) = src {
+                        PathBuf::from(src)
+                    } else {
+                        let mut path = dst.clone();
+                        path.add_extension("in");
+                        path
+                    };
+                    if src.exists() {
+                        config_files.push((dst, src));
                     }
-                    remove_nodes.insert(*node_id);
                 }
             }
+            remove_nodes.insert(node_id);
         }
 
-        for subst_macro in ["AC_CONFIG_FILES", "AC_OUTPUT"] {
-            if let Some(v) = macro_calls.get(subst_macro) {
-                for (node_id, macro_call) in v {
-                    if let Some(tags) = macro_call
-                        .effects
-                        .as_ref()
-                        .and_then(|side_effects| side_effects.tags.as_ref())
-                    {
-                        for (dst, src) in tags {
-                            let mut is_automake = false;
-                            let dst = PathBuf::from(dst);
-                            let src = if let Some(src) = src {
-                                PathBuf::from(src)
-                            } else {
-                                let mut path = dst.clone();
-                                if path.ends_with("Makefile") {
-                                    path.add_extension("am");
-                                    is_automake = true;
-                                } else {
-                                    path.add_extension("in");
-                                }
-                                path
-                            };
-                            if src.exists() {
-                                if is_automake {
-                                    self.project_info.am_files.push(src.clone());
-                                }
-                                self.project_info.subst_files.push((dst, src));
-                            }
+        for (node_id, macro_call) in ["AC_CONFIG_FILES", "AC_OUTPUT"]
+            .iter()
+            .flat_map(|name| self.macro_calls().get(*name).cloned().into_iter().flatten())
+        {
+            if let Some(tags) = macro_call
+                .effects
+                .as_ref()
+                .and_then(|side_effects| side_effects.tags.as_ref())
+            {
+                for (dst, src) in tags {
+                    let mut is_automake = false;
+                    let dst = PathBuf::from(dst);
+                    let src = if let Some(src) = src {
+                        PathBuf::from(src)
+                    } else {
+                        let mut path = dst.clone();
+                        if path.ends_with("Makefile") {
+                            path.add_extension("am");
+                            is_automake = true;
+                        } else {
+                            path.add_extension("in");
                         }
+                        path
+                    };
+                    if src.exists() {
+                        if is_automake {
+                            am_files.push(src.clone());
+                        }
+                        subst_files.push((dst, src));
                     }
-                    remove_nodes.insert(*node_id);
                 }
             }
+            remove_nodes.insert(node_id);
         }
 
+        self.project_info.config_files.extend(config_files);
+        self.project_info.am_files.extend(am_files);
+        self.project_info.subst_files.extend(subst_files);
         for id in remove_nodes {
             self.remove_node(id);
         }
@@ -285,17 +297,18 @@ impl Analyzer {
 
     fn consume_subst_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
-        for subst_macro in ["AC_SUBST", "AM_SUBST_NOTMAKE"] {
-            for (id, macro_call) in macro_calls.get(subst_macro).cloned().into_iter().flatten() {
-                if macro_call.args.len() > 1 {
-                    let name = macro_call.get_arg_as_literal(0).unwrap();
-                    let word = macro_call.get_arg_as_word(1).unwrap();
-                    // replace substitution command with assignment
-                    self.pool.nodes[id].cmd = ShellCommand::Assignment(name.clone(), word).into();
-                } else {
-                    remove_nodes.insert(id);
-                }
+        let subst_entries: Vec<_> = ["AC_SUBST", "AM_SUBST_NOTMAKE"]
+            .iter()
+            .flat_map(|name| self.macro_calls().get(*name).cloned().into_iter().flatten())
+            .collect();
+        for (id, macro_call) in subst_entries {
+            if macro_call.args.len() > 1 {
+                let name = macro_call.get_arg_as_literal(0).unwrap();
+                let word = macro_call.get_arg_as_word(1).unwrap();
+                // replace substitution command with assignment
+                self.pool.nodes[id].cmd = ShellCommand::Assignment(name.clone(), word).into();
+            } else {
+                remove_nodes.insert(id);
             }
         }
 
@@ -306,7 +319,7 @@ impl Analyzer {
 
     fn consume_prereq_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for prereq_macro in ["AC_PREREQ"] {
             for (id, _) in macro_calls.get(prereq_macro).cloned().into_iter().flatten() {
                 remove_nodes.insert(id);
@@ -320,7 +333,7 @@ impl Analyzer {
 
     fn consume_arg_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for arg_macro in ["AC_ARG_VAR"] {
             for (id, _) in macro_calls.get(arg_macro).cloned().into_iter().flatten() {
                 remove_nodes.insert(id);
@@ -335,7 +348,7 @@ impl Analyzer {
     fn consume_cpp_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
         let mut cpp_defs = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
 
         for cpp_verbatim_macro in ["AH_VERBATIM"] {
             for (id, macro_call) in macro_calls
@@ -346,7 +359,7 @@ impl Analyzer {
             {
                 let prog = macro_call.get_arg_as_program(1).unwrap();
                 if let Some(template) = as_single(&prog).and_then(as_shell).and_then(as_literal) {
-                    let undef_re = Regex::new(r"^#undef\s+(?<key>[A-Z0-9_]+)").unwrap();
+                    let undef_re = Regex::new(r"(?m)^#undef\s+(?<key>[a-zA-Z0-9_]+)").unwrap();
                     for cap in undef_re.captures_iter(&template) {
                         let key = cap.name("key").unwrap().as_str().to_string();
                         cpp_defs.insert(key);
@@ -376,18 +389,21 @@ impl Analyzer {
                 .into_iter()
                 .flatten()
             {
-                let key = match macro_call.args.first() {
+                match macro_call.args.first() {
                     Some(M4Argument::Word(word)) => {
                         if let Some(lit) = as_single(word).and_then(as_shell).and_then(as_literal) {
-                            lit.to_owned()
+                            cpp_defs.insert(lit.to_owned());
                         } else {
-                            continue;
+                            // we don't need to resolve variables here
+                            // since autoheader requires developers to directly mention all
+                            // definitions via AH_VERBATIM or AH_TEMPLATE.
                         }
                     }
-                    Some(M4Argument::Literal(lit)) => lit.clone(),
+                    Some(M4Argument::Literal(lit)) => {
+                        cpp_defs.insert(lit.to_owned());
+                    }
                     _ => unreachable!(),
-                };
-                cpp_defs.insert(key);
+                }
             }
         }
 
@@ -399,12 +415,12 @@ impl Analyzer {
     }
 
     fn consume_ac_init_macro(&mut self) {
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
+
+        let mut metadata = super::ProjectMetadata::default();
 
         if let Some(v) = macro_calls.get("AC_INIT") {
             for (_, macro_call) in v {
-                let mut metadata = super::ProjectMetadata::default();
-
                 // AC_INIT([package-name], [version], [bug-report], [tarname], [url])
                 if let Some(name) = macro_call.get_arg_as_literal(0) {
                     let rust_name = name
@@ -432,75 +448,64 @@ impl Analyzer {
                 if let Some(url) = macro_call.get_arg_as_literal(4) {
                     metadata.url = Some(url);
                 }
-
-                self.project_metadata.replace(metadata);
-                // Note: Don't remove AC_INIT nodes as they're needed for build.rs generation
             }
         }
+        self.project_metadata.replace(metadata);
     }
 
     pub(super) fn analyze_link_macros(&mut self) {
-        let macro_calls = self.macro_calls.as_ref().unwrap();
-        for ac_link_macro in ["AC_CONFIG_LINKS"] {
-            for (id, macro_call) in macro_calls
-                .get(ac_link_macro)
-                .cloned()
-                .into_iter()
-                .flatten()
-            {
-                let loc = self.get_location_of_node_end(id);
-                // due to the limitation of side effects description parsed in autoconf-parser,
-                // we have to take pairs of paths from the macro argument.
-                for word in macro_call.get_arg_as_array(0).unwrap() {
-                    let value_exprs = self.vsa_inspect_word(&word, loc.order_reset(), Some(':'));
-                    if value_exprs.len() != 2 {
-                        // exactly two value expressions (:paths) in an element required;
-                        continue;
-                    }
-                    let from = self
-                        .resolve_value_expression(&value_exprs[0], &loc, false)
-                        .into_iter()
-                        .map(PathBuf::from)
-                        .collect::<Vec<_>>();
-                    let to = self
-                        .resolve_value_expression(&value_exprs[1], &loc, false)
-                        .into_iter()
-                        .map(PathBuf::from)
-                        .filter(|path| self.project_info.project_dir.join(path).exists())
-                        .collect::<Vec<_>>();
-                    self.project_info.dynamic_links.push((from, to));
+        let link_entries: Vec<_> = ["AC_CONFIG_LINKS"]
+            .iter()
+            .flat_map(|name| self.macro_calls().get(*name).cloned().into_iter().flatten())
+            .collect();
+        for (id, macro_call) in link_entries {
+            let loc = self.get_location_of_node_end(id);
+            // due to the limitation of side effects description parsed in autoconf-parser,
+            // we have to take pairs of paths from the macro argument.
+            for word in macro_call.get_arg_as_array(0).unwrap() {
+                let value_exprs = self.vsa_inspect_word(&word, loc.order_reset(), Some(':'));
+                if value_exprs.len() != 2 {
+                    // exactly two value expressions (:paths) in an element required;
+                    continue;
                 }
+                let from = self
+                    .resolve_value_expression(&value_exprs[0], &loc, false)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .collect::<Vec<_>>();
+                let to = self
+                    .resolve_value_expression(&value_exprs[1], &loc, false)
+                    .into_iter()
+                    .map(PathBuf::from)
+                    .filter(|path| self.project_info.project_dir.join(path).exists())
+                    .collect::<Vec<_>>();
+                self.project_info.dynamic_links.push((from, to));
             }
         }
     }
 
     pub(super) fn consume_automake_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
         // Actually there are few macros that export am conditional implicitly.
         // (e.g. PKG_WITH_MODULES)
         // But we won't cover them for now.
         let mut am_cond_to_guard = HashMap::new();
-        for am_cond_macro in ["AM_CONDITIONAL"] {
-            for (id, macro_call) in macro_calls
-                .get(am_cond_macro)
-                .cloned()
-                .into_iter()
-                .flatten()
+        let am_cond_entries: Vec<_> = ["AM_CONDITIONAL"]
+            .iter()
+            .flat_map(|name| self.macro_calls().get(*name).cloned().into_iter().flatten())
+            .collect();
+        for (id, macro_call) in am_cond_entries {
+            let block_id = self.get_node(id).unwrap().info.branches.first().unwrap();
+            let guard = self.get_block(*block_id).guards.last().unwrap();
+            for am_cond_name in macro_call
+                .effects
+                .as_ref()
+                .iter()
+                .flat_map(|e| e.am_conds.iter().flatten())
             {
-                let block_id = self.get_node(id).unwrap().info.branches.first().unwrap();
-                let guard = self.get_block(*block_id).guards.last().unwrap();
-                for am_cond_name in macro_call
-                    .effects
-                    .as_ref()
-                    .iter()
-                    .flat_map(|e| e.am_conds.iter().flatten())
-                {
-                    am_cond_to_guard.insert(am_cond_name.to_owned(), guard.clone());
-                    //s.analyzer.automake
-                }
-                remove_nodes.insert(id);
+                am_cond_to_guard.insert(am_cond_name.to_owned(), guard.clone());
             }
+            remove_nodes.insert(id);
         }
         self.automake_mut().am_cond_to_guard = am_cond_to_guard;
 
@@ -511,7 +516,7 @@ impl Analyzer {
 
     // froze macros for legacy systems
     pub(super) fn froze_macros(&mut self) {
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         let mut side_effects_of_fixed_macros = HashMap::new();
         for legacy_compiler_macro in macros_list::MACROS_BLACKLIST {
             for (id, macro_call) in macro_calls
@@ -578,9 +583,7 @@ impl Analyzer {
 impl Analyzer {
     pub(super) fn aggregate_cpp_defs(&mut self) {
         let cpp_defs = self
-            .macro_calls
-            .as_ref()
-            .unwrap()
+            .macro_calls()
             .values()
             .flatten()
             .flat_map(|(_, m4_macro)| {
@@ -593,7 +596,7 @@ impl Analyzer {
                     .map(|sym| sym.name.clone())
             })
             .collect::<HashSet<String>>();
-        self.cpp_defs.as_mut().unwrap().extend(cpp_defs);
+        self.cpp_defs_mut().extend(cpp_defs);
     }
 
     pub(super) fn aggregate_subst_vars(&mut self) {
@@ -607,9 +610,7 @@ impl Analyzer {
             })
             .collect::<Vec<_>>();
         let subst_vars = self
-            .macro_calls
-            .as_ref()
-            .unwrap()
+            .macro_calls()
             .values()
             .flatten()
             .flat_map(|(_, m4_macro)| {
@@ -631,9 +632,7 @@ impl Analyzer {
 
     pub(super) fn aggregate_input_vars(&mut self) {
         let input_vars = self
-            .macro_calls
-            .as_ref()
-            .unwrap()
+            .macro_calls()
             .values()
             .flatten()
             .flat_map(|(_, m4_macro)| {
@@ -654,9 +653,7 @@ impl Analyzer {
 
     pub(super) fn aggregate_env_vars(&mut self) {
         let env_vars = self
-            .input_vars
-            .as_ref()
-            .unwrap()
+            .input_vars()
             .iter()
             .filter(|&var_name| {
                 self.get_scopes(var_name.as_str()).is_some_and(|scopes| {

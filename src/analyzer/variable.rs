@@ -441,9 +441,7 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
                         self.record_variable_definition(name);
                     }
                     self.analyzer
-                        .eval_assigns
-                        .as_mut()
-                        .unwrap()
+                        .eval_assigns_mut()
                         .entry(lhs)
                         .or_default()
                         .push((rhs, eval_loc.clone()));
@@ -469,9 +467,7 @@ pub(crate) fn is_eval(word: &AcWord) -> bool {
 impl Analyzer {
     pub(super) fn remove_unused_variables(&mut self) {
         let unused_vars = self
-            .var_definitions
-            .as_ref()
-            .unwrap()
+            .definitions()
             .iter()
             .filter(|(var, locs)| {
                 let var = var.as_str();
@@ -491,9 +487,7 @@ impl Analyzer {
                     matches!(&n.cmd.0, MayM4::Shell(ShellCommand::Assignment(_, _)))
                 }) {
                     self.remove_node(loc.node_id);
-                    self.var_definitions
-                        .as_mut()
-                        .unwrap()
+                    self.definitions_mut()
                         .remove(unused_var.as_str());
                 }
             }

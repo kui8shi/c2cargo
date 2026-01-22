@@ -629,7 +629,7 @@ pub(crate) struct PkgCheckModulesInfo {
 impl Analyzer {
     pub(super) fn consume_pkg_config_macros(&mut self) {
         let mut map = HashMap::new();
-        let macro_calls = self.macro_calls.as_ref().unwrap();
+        let macro_calls = self.macro_calls();
         for pkg_config_macro in ["PKG_CHECK_MODULES"] {
             if let Some(v) = macro_calls.get(pkg_config_macro) {
                 for (node_id, macro_call) in v {
@@ -725,7 +725,9 @@ impl Analyzer {
     }
 
     pub(super) fn pkg_config_analyzer(&self) -> &PkgConfigAnalyzer {
-        self.pkg_config_analyzer.as_ref().unwrap()
+        self.pkg_config_analyzer
+            .as_ref()
+            .expect("pkg_config_analyzer not yet initialized; review calling order")
     }
 
     /// Generate a wrapper.h file for analyzed packages based on project headers

@@ -462,7 +462,7 @@ impl Analyzer {
         &self,
         recipes: &mut HashMap<DictId, DictionaryInstanceRecipe>,
     ) {
-        for (full_name, divided) in self.divided_vars.as_ref().unwrap().iter() {
+        for (full_name, divided) in self.divided_vars().iter() {
             let dict_id = {
                 let mut idents = divided
                     .eval_locs
@@ -618,7 +618,7 @@ impl Analyzer {
     }
 
     pub(crate) fn get_dict(&self, name: &str) -> Option<&DictionaryInstance> {
-        self.dicts.as_ref().unwrap().iter().find(|d| d.name == name)
+        self.dicts().iter().find(|d| d.name == name)
     }
 
     pub(crate) fn print_dictionary_type(&self, name: &str) -> String {

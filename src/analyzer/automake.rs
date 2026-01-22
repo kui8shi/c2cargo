@@ -175,11 +175,15 @@ fn as_template(am: &AmVar) -> Option<&str> {
 
 impl Analyzer {
     pub(super) fn automake(&self) -> &AutomakeAnalyzer {
-        self.automake.as_ref().unwrap()
+        self.automake
+            .as_ref()
+            .expect("automake not yet initialized; review calling order")
     }
 
     pub(super) fn automake_mut(&mut self) -> &mut AutomakeAnalyzer {
-        self.automake.as_mut().unwrap()
+        self.automake
+            .as_mut()
+            .expect("automake not yet initialized; review calling order")
     }
 
     pub(super) fn analyze_automake_files(&mut self) {
@@ -720,9 +724,11 @@ impl Analyzer {
     }
 
     fn extract_source_files(&mut self) {
-        for (_, am_file) in self.automake.as_ref().unwrap().files.iter() {
+        let mut c_files = Vec::new();
+        let mut built_files = Vec::new();
+        for (_, am_file) in self.automake().files.iter() {
             for target in am_file.libraries.get("lib").iter().flat_map(|v| v.iter()) {
-                self.project_info.c_files.extend(
+                c_files.extend(
                     target
                         .sources
                         .iter()
@@ -733,7 +739,7 @@ impl Analyzer {
                         .map(|v| v.clone()),
                 );
             }
-            self.project_info.built_files.extend(
+            built_files.extend(
                 am_file
                     .built_sources
                     .iter()
@@ -741,18 +747,24 @@ impl Analyzer {
                     .cloned(),
             );
         }
+        self.project_info.c_files.extend(c_files);
+        self.project_info.built_files.extend(built_files);
     }
 
     fn extract_header_files(&mut self) {
-        for (_, am_file) in self.automake.as_ref().unwrap().files.iter() {
-            self.project_info.built_files.extend(
+        let built_files: Vec<_> = self
+            .automake()
+            .files
+            .iter()
+            .flat_map(|(_, am_file)| {
                 am_file
                     .built_sources
                     .iter()
                     .filter(|&v| v.extension().is_some_and(|ext| is_h_extension(ext)))
-                    .cloned(),
-            );
-        }
+                    .cloned()
+            })
+            .collect();
+        self.project_info.built_files.extend(built_files);
         let will_be_generated = self
             .project_info
             .built_files
@@ -812,21 +824,26 @@ impl Analyzer {
     }
 
     fn extract_cflags_var_names(&mut self) {
-        for (_, am_file) in self.automake.as_ref().unwrap().files.iter() {
-            for target in am_file.libraries.get("lib").iter().flat_map(|v| v.iter()) {
-                if let Some(cflags) = &target.cflags {
-                    self.project_info.cflags_var_names.extend(
-                        cflags
-                            .iter()
-                            .filter_map(|v| match v {
-                                AmValue::Var(var) => Some(var),
-                                _ => None,
-                            })
-                            .map(|v| v.clone()),
-                    );
-                }
-            }
-        }
+        let cflags_var_names: Vec<_> = self
+            .automake()
+            .files
+            .iter()
+            .flat_map(|(_, am_file)| {
+                am_file
+                    .libraries
+                    .get("lib")
+                    .into_iter()
+                    .flat_map(|v| v.iter())
+                    .filter_map(|target| target.cflags.as_ref())
+                    .flat_map(|cflags| {
+                        cflags.iter().filter_map(|v| match v {
+                            AmValue::Var(var) => Some(var.clone()),
+                            _ => None,
+                        })
+                    })
+            })
+            .collect();
+        self.project_info.cflags_var_names.extend(cflags_var_names);
     }
 }
 

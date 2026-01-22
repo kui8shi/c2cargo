@@ -353,3 +353,28 @@ pub(super) fn get_expansion_ac_includes_default() -> &'static str {
 #endif
 "#
 }
+
+pub(super) fn get_function_definition_execute_cmd() -> &'static str {
+    r#"
+fn execute_cmd(cmd: &mut std::process::Command, input: Option<&str>) -> Option<String> {
+    let mut child = cmd
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+
+    if let Some(input) = input {
+        if let Some(mut stdin) = child.stdin.take() {
+            let _ = stdin.write_all(input.as_bytes());
+        }
+    }
+
+    let out = child.wait_with_output().ok()?;
+    if out.status.success() {
+        Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+    } else {
+        None
+    }
+}"#
+}

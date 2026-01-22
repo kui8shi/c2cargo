@@ -53,8 +53,14 @@ pub(super) enum CCMigrationType {
 }
 
 impl Analyzer {
+    pub(super) fn conditional_compilation_map(&self) -> &ConditionalCompilationMap {
+        self.conditional_compilation_map
+            .as_ref()
+            .expect("conditional_compilation_map not yet initialized; review calling order")
+    }
+
     pub(crate) fn print_conditional_compilation_map(&self) -> String {
-        serde_json::to_string_pretty(self.conditional_compilation_map.as_ref().unwrap()).unwrap()
+        serde_json::to_string_pretty(self.conditional_compilation_map()).unwrap()
     }
 
     pub(super) fn query_conditional_compilation_migration_policy(
@@ -62,7 +68,7 @@ impl Analyzer {
         key: &str,
     ) -> Option<&CCMigraionPolicy> {
         let symbol = self.may_prefix_cpp_symbol(key);
-        let ccm = self.conditional_compilation_map.as_ref().unwrap();
+        let ccm = self.conditional_compilation_map();
         ccm.cpp_map
             .get(&symbol)
             .or(ccm.subst_to_cpp_map.get(&symbol))
@@ -70,9 +76,8 @@ impl Analyzer {
 
     pub(super) fn create_conditional_compilation_map(&mut self) {
         let cpp_defs = self
-            .cpp_defs
+            .cpp_defs()
             .clone()
-            .unwrap()
             .into_iter()
             .filter(|symbol| {
                 self.get_project_source_contents()
@@ -81,9 +86,7 @@ impl Analyzer {
             })
             .collect::<HashSet<_>>();
         let fixed_cpp_values = self
-            .side_effects_of_frozen_macros
-            .as_ref()
-            .unwrap()
+            .side_effects_of_frozen_macros()
             .values()
             .flat_map(|effects| effects.cpps.iter())
             .collect::<HashMap<_, _>>();

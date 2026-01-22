@@ -82,7 +82,7 @@ pub(crate) struct ChunkIO {
 
 impl Analyzer {
     pub(crate) fn get_scopes(&self, var_name: &str) -> Option<&Vec<Scope>> {
-        self.var_scopes.as_ref().unwrap().get(var_name)
+        self.var_scopes().get(var_name)
     }
 
     pub(crate) fn get_chunk_id(&self, node_id: NodeId) -> Option<ChunkId> {
@@ -244,7 +244,7 @@ impl Analyzer {
         }
     }
 
-    fn add_chunk(&mut self, nodes: Vec<NodeId>) -> ChunkId {
+    fn add_chunk(&mut self, nodes: Vec<NodeId>) {
         let parent = self
             .get_node(*nodes.first().unwrap())
             .unwrap()
@@ -287,7 +287,6 @@ impl Analyzer {
             self.chunks[id].children.push(new_chunk_id)
         }
         debug_assert!(self.verify_relationships_between_chunk_and_top_nodes());
-        new_chunk_id
     }
 
     fn verify_relationships_between_chunk_and_top_nodes(&self) -> bool {
@@ -356,9 +355,7 @@ impl Analyzer {
             .filter(|(var, locs)| {
                 // dictionaries will be global but we don't handle here
                 !self
-                    .divided_vars
-                    .as_ref()
-                    .unwrap()
+                    .divided_vars()
                     .get(var.as_str())
                     .is_some_and(|div| {
                         locs.iter()
@@ -408,9 +405,7 @@ impl Analyzer {
             .into_iter()
             .filter(|(var, locs)| {
                 !self
-                    .divided_vars
-                    .as_ref()
-                    .unwrap()
+                    .divided_vars()
                     .get(var.as_str())
                     .is_some_and(|div| {
                         locs.iter()
@@ -430,9 +425,7 @@ impl Analyzer {
             .collect();
 
         let dictionaries = self
-            .dicts
-            .as_ref()
-            .unwrap()
+            .dicts()
             .iter()
             .filter_map(|dictionary_instance| {
                 let accesses = dictionary_instance
@@ -643,14 +636,14 @@ impl Analyzer {
                 self.add_chunkwise_scope(var.as_str(), current_scope);
             }
         }
-        for scopes in self.var_scopes.as_mut().unwrap().values_mut() {
+        for scopes in self.var_scopes_mut().values_mut() {
             scopes.reverse();
         }
         self.reinfer_types_for_multiscope_vars();
     }
 
     fn reinfer_types_for_multiscope_vars(&mut self) {
-        let var_scopes = self.var_scopes.as_ref().unwrap();
+        let var_scopes = self.var_scopes();
         let multiscope_vars: Vec<String> = var_scopes
             .iter()
             .filter(|(_, scopes)| scopes.len() > 1)
@@ -658,14 +651,12 @@ impl Analyzer {
             .collect();
 
         for var_name in multiscope_vars {
-            let scopes = self.var_scopes.as_ref().unwrap().get(&var_name).unwrap();
+            let scopes = self.var_scopes().get(&var_name).unwrap();
             let num_scopes = scopes.len();
             for scope_idx in 0..num_scopes {
-                let scope = &self.var_scopes.as_ref().unwrap()[&var_name][scope_idx];
+                let scope = &self.var_scopes()[&var_name][scope_idx];
                 let scope_type = self.infer_type_for_scope(&var_name, scope);
-                self.var_scopes
-                    .as_mut()
-                    .unwrap()
+                self.var_scopes_mut()
                     .get_mut(&var_name)
                     .unwrap()[scope_idx]
                     .inferred_type = Some(scope_type);
@@ -705,9 +696,7 @@ impl Analyzer {
             .sort_by_key(|cid| self.chunks[*cid].range.0);
         scope.readers.sort_by_key(|cid| self.chunks[*cid].range.0);
         scope.post_order = self.calculate_chunk_post_order(&scope);
-        self.var_scopes
-            .as_mut()
-            .unwrap()
+        self.var_scopes_mut()
             .entry(var.to_owned())
             .or_default()
             .push(scope);
@@ -798,7 +787,7 @@ impl Analyzer {
             .iter()
             .map(|(cid, _)| (cid, Default::default()))
             .collect();
-        for (var, scopes) in self.var_scopes.as_ref().unwrap().iter() {
+        for (var, scopes) in self.var_scopes().iter() {
             for scope in scopes {
                 if let Some(cid) = scope.owner.as_ref() {
                     let pos = scope.post_order.iter().position(|id| id == cid).unwrap();
@@ -922,9 +911,7 @@ impl Analyzer {
             while let Some(child_cid) = post_order.pop() {
                 if let Some(parent_cid) = self.chunks.get(child_cid).unwrap().parent {
                     let vars_within_parent_scope = self
-                        .var_scopes
-                        .as_ref()
-                        .unwrap()
+                        .var_scopes()
                         .iter()
                         .filter_map(|(var, scopes)| {
                             scopes
@@ -1046,7 +1033,7 @@ pub(crate) struct FunctionSkeleton {
 
 impl Analyzer {
     pub(crate) fn get_chunk_skeleton(&self, id: ChunkId) -> Option<&FunctionSkeleton> {
-        self.chunk_skeletons.as_ref().unwrap().get(&id)
+        self.chunk_skeletons().get(&id)
     }
 
     /// Check if a variable is internal to a chunk (not an argument or return value)
@@ -1063,7 +1050,7 @@ impl Analyzer {
     }
 
     pub(crate) fn print_chunk_skeleton_signature(&self, id: ChunkId) -> String {
-        let sk = self.chunk_skeletons.as_ref().unwrap().get(&id).unwrap();
+        let sk = self.chunk_skeletons().get(&id).unwrap();
         let print_mut = |is_mut: bool| -> &'static str {
             if is_mut {
                 "mut "
@@ -1109,7 +1096,7 @@ impl Analyzer {
     }
 
     pub(crate) fn print_chunk_skeleton_body_header(&self, id: ChunkId) -> Vec<String> {
-        let sk = self.chunk_skeletons.as_ref().unwrap().get(&id).unwrap();
+        let sk = self.chunk_skeletons().get(&id).unwrap();
         sk.declared
             .iter()
             .sorted_by_key(|(name, _)| (*name).clone())
@@ -1126,7 +1113,7 @@ impl Analyzer {
     }
 
     pub(crate) fn print_chunk_skeleton_body_footer(&self, id: ChunkId) -> String {
-        let sk = self.chunk_skeletons.as_ref().unwrap().get(&id).unwrap();
+        let sk = self.chunk_skeletons().get(&id).unwrap();
         let return_elements = sk
             .return_to_bind
             .iter()
@@ -1149,8 +1136,8 @@ impl Analyzer {
     ) -> String {
         let caller_sk = caller
             .as_ref()
-            .map(|cid| self.chunk_skeletons.as_ref().unwrap().get(cid).unwrap());
-        let callee_sk = self.chunk_skeletons.as_ref().unwrap().get(&callee).unwrap();
+            .map(|cid| self.chunk_skeletons().get(cid).unwrap());
+        let callee_sk = self.chunk_skeletons().get(&callee).unwrap();
         let print_mut = |is_mut: bool| -> &'static str {
             if is_mut {
                 "mut "

@@ -16,7 +16,7 @@ use crate::{
         pkg_config::get_function_definition_bindgen,
         record::TranslationType,
         translator::{
-            printer::TranslatingPrinter,
+            printer::{FuncRequests, TranslatingPrinter},
             use_llm::{LLMBasedTranslationOutput, LLMUser, LLMValidationFunc},
         },
         type_inference::DataType,
@@ -32,10 +32,19 @@ mod pretranslation;
 mod printer;
 mod use_llm;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct InlinedTranslationOutput {
     pub id: ChunkId,
     pub inline_rust_code: Vec<String>,
+    pub evidence: Option<InlineEvidence>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct InlineEvidence {
+    pub required_snippets: HashSet<String>,
+    pub func_requests: FuncRequests,
+    pub features: HashSet<String>,
+    pub placeholders: HashSet<(String, String)>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,7 +93,7 @@ pub(crate) struct TranslationResult {
 
 impl Analyzer {
     /// Check if a chunk can be handled as a inlined translation
-    fn is_inlined_chunk(&self, chunk_id: ChunkId) -> bool {
+    fn should_inline_this_chunk(&self, chunk_id: ChunkId) -> bool {
         let chunk = match self.chunks.get(chunk_id) {
             Some(chunk) => chunk,
             None => return false,
@@ -95,27 +104,29 @@ impl Analyzer {
             return false;
         }
 
-        // Check all nodes are assignments
-        for &node_id in &chunk.nodes {
-            if let Some(node) = self.get_node(node_id) {
-                match &node.cmd.0 {
-                    MayM4::Shell(ShellCommand::Assignment(_, _)) => continue,
-                    _ => return false,
+        if chunk.parent.is_some() && chunk.nodes.len() == 1 && chunk.io.exported.is_empty() {
+            if chunk.nodes.len() == 1 {
+                let node = self.get_node(chunk.nodes[0]).unwrap();
+                if node.info.branches.is_empty() {
+                    // we should make this chunk inline
+                    return true;
                 }
-            } else {
-                return false;
+                if let MayM4::Shell(ShellCommand::Brace(children)) = &node.cmd.0 {
+                    if children.len() == 1 {
+                        // we should make this chunk inline
+                        return true;
+                    }
+                }
             }
         }
 
-        // No complex dictionary operations
-        if !chunk.io.dictionaries.is_empty() {
-            return false;
-        }
-
-        // Simple imported/exported variables only
-        let has_complex_deps = chunk.io.imported.len() > 3 || chunk.io.exported.len() > 2;
-        if has_complex_deps {
-            return false;
+        // Check all nodes
+        for &node_id in &chunk.nodes {
+            let node = self.get_node(node_id).unwrap();
+            match &node.cmd.0 {
+                MayM4::Shell(ShellCommand::Assignment(_, _)) => continue,
+                _ => return false,
+            }
         }
 
         true
@@ -125,12 +136,12 @@ impl Analyzer {
     fn translate_inlined_chunk(&self, chunk_id: ChunkId) -> Option<InlinedTranslationOutput> {
         let chunk = self.chunks.get(chunk_id)?;
         let skeleton = self
-            .chunk_skeletons
-            .as_ref()
-            .unwrap()
+            .chunk_skeletons()
             .get(&chunk_id)
             .unwrap();
         let mut rust_lines = Vec::new();
+
+        let mut evidence = None;
 
         for &node_id in &chunk.nodes {
             let node = self.get_node(node_id)?;
@@ -154,7 +165,16 @@ impl Analyzer {
                 };
                 rust_lines.push(may_binding_rust_assignment);
             } else {
-                return None; // Non-assignment node, fail fast!
+                let printer = TranslatingPrinter::new(self, None, true);
+                let printed = printer.print_node(node_id);
+
+                let e: &mut InlineEvidence = evidence.get_or_insert_default();
+                e.required_snippets.extend(printer.get_required_snippets());
+                e.func_requests.merge(printer.get_func_requests());
+                e.features.extend(printer.get_cargo_features());
+                e.placeholders.extend(printer.get_heredoc_placeholders());
+
+                rust_lines.push(printed);
             }
         }
 
@@ -165,6 +185,7 @@ impl Analyzer {
         Some(InlinedTranslationOutput {
             id: chunk_id,
             inline_rust_code: rust_lines,
+            evidence,
         })
     }
 
@@ -292,6 +313,20 @@ impl Analyzer {
     /// debug print of chunks that would be fed to LLMs
     pub(crate) fn debug_print_chunks(&mut self) {
         println!("=== TRANSLATE DEBUG: Starting translation analysis ===");
+        // Collect rule-based translations for inlining during LLM processing
+        let inlined_translations: HashMap<ChunkId, InlinedTranslationOutput> = self
+            .chunks
+            .iter()
+            .filter_map(|(chunk_id, _)| {
+                if self.should_inline_this_chunk(chunk_id) {
+                    self.translate_inlined_chunk(chunk_id)
+                        .map(|st| (chunk_id, st))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         for (i, chunk) in self.chunks.iter() {
             let last_id = *chunk.nodes.last().unwrap();
             println!(
@@ -324,7 +359,7 @@ impl Analyzer {
                 self.print_chunk_skeleton_call_site(None, i, &format!("func{}", i))
             );
             println!("=====body=====");
-            let printer = TranslatingPrinter::new(&self, None, false);
+            let printer = TranslatingPrinter::new(&self, Some(&inlined_translations), false);
             for &id in chunk.nodes.iter() {
                 println!("{}", &printer.print_node(id));
             }
@@ -348,9 +383,7 @@ impl Analyzer {
     pub async fn translate(&mut self) -> TranslationResult {
         let tab = " ".repeat(TranslatingPrinter::get_tab_width());
         let env_init = self
-            .env_vars
-            .as_ref()
-            .unwrap()
+            .env_vars()
             .iter()
             .sorted()
             .map(|name| {
@@ -391,17 +424,13 @@ impl Analyzer {
             })
             .join("\n");
 
-        let unused_subst_vars = self.subst_vars.as_ref().unwrap().iter().filter(|var| {
-            self.var_scopes
-                .as_ref()
-                .unwrap()
+        let unused_subst_vars = self.subst_vars().iter().filter(|var| {
+            self.var_scopes()
                 .get(var.as_str())
                 .is_none_or(|scopes| scopes.first().is_none_or(|scope| scope.owner.is_none()))
         });
         let default_init = self
-            .var_scopes
-            .as_ref()
-            .unwrap()
+            .var_scopes()
             .iter()
             .filter(|(_, scopes)| {
                 scopes
@@ -410,7 +439,7 @@ impl Analyzer {
             })
             .map(|(var_name, _)| var_name)
             .chain(unused_subst_vars)
-            .filter(|var_name| !self.env_vars.as_ref().unwrap().contains(var_name.as_str()))
+            .filter(|var_name| !self.env_vars().contains(var_name.as_str()))
             .collect::<HashSet<_>>()
             .into_iter()
             .sorted()
@@ -432,7 +461,7 @@ impl Analyzer {
                     data_type.print()
                 )
             })
-            .chain(self.dicts.as_ref().unwrap().iter().map(|dict| {
+            .chain(self.dicts().iter().map(|dict| {
                 let dict_type_str = self.print_dictionary_type(&dict.name);
                 format!(
                     "{tab}let mut {}: {} = Default::default();",
@@ -487,9 +516,7 @@ impl Analyzer {
             .join("\n");
 
         let subst_to_cpps = {
-            self.conditional_compilation_map
-                .as_ref()
-                .unwrap()
+            self.conditional_compilation_map()
                 .subst_to_cpp_map
                 .iter()
                 .sorted_by_key(|(k, _)| (*k).clone())
@@ -525,9 +552,7 @@ impl Analyzer {
                 std::collections::HashMap::new();
 
             for conds in self
-                .conditional_compilation_map
-                .as_ref()
-                .unwrap()
+                .conditional_compilation_map()
                 .src_incl_map
                 .values()
             {
@@ -642,9 +667,7 @@ impl Analyzer {
     /// Returns translations
     async fn translate_chunks(
         &mut self,
-    ) -> 
-        HashMap<ChunkId, (Option<ChunkTranslationOutput>, ChunkTranslationMeta)>
-    {
+    ) -> HashMap<ChunkId, (Option<ChunkTranslationOutput>, ChunkTranslationMeta)> {
         let mut results = HashMap::new();
         let mut user = LLMUser::new();
         let mut inputs = Vec::new();
@@ -655,7 +678,7 @@ impl Analyzer {
             .chunks
             .iter()
             .filter_map(|(chunk_id, _)| {
-                if self.is_inlined_chunk(chunk_id) {
+                if self.should_inline_this_chunk(chunk_id) {
                     self.translate_inlined_chunk(chunk_id)
                         .map(|st| (chunk_id, st))
                 } else {
@@ -689,7 +712,7 @@ impl Analyzer {
             );
         }
 
-        let max_retries = 5;
+        let max_retries = 10;
         // Track LLM metadata separately since cache may not have it
         let mut llm_chunk_ids: Vec<ChunkId> = Vec::new();
         let mut llm_metadata: HashMap<ChunkId, ChunkTranslationMeta> = HashMap::new();
@@ -748,6 +771,7 @@ impl Analyzer {
                     let inlined_output = InlinedTranslationOutput {
                         id: chunk_id,
                         inline_rust_code: Vec::new(),
+                        evidence: None,
                     };
                     let meta = ChunkTranslationMeta {
                         chunk_size: 0,
@@ -788,6 +812,12 @@ impl Analyzer {
                 });
                 let skeleton = format!("{} {{{}{{body}}{}}}", signature, body_header, body_footer);
                 let required_funcs = printer.get_rust_funcs_required_for_chunk();
+                let predefinition = use_llm::get_predefinition(
+                    &required_funcs
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>(),
+                );
                 let embedded_chunks = printer.get_embedded_chunks();
                 depending_funcs.insert(chunk_id, embedded_chunks.clone());
 
@@ -801,12 +831,6 @@ impl Analyzer {
                     .collect::<Vec<_>>()
                     .join("\n\n");
 
-                let input = LLMBasedTranslationInput::new(
-                    chunk_id,
-                    script,
-                    skeleton.clone(),
-                    &required_funcs,
-                );
                 let extra_validation_funcs = if let Some(threshold) =
                     printer.get_max_num_consecutive_slashes()
                 {
@@ -830,11 +854,18 @@ impl Analyzer {
                 } else {
                     Default::default()
                 };
+
+                let input = LLMBasedTranslationInput::new(
+                    chunk_id,
+                    script,
+                    skeleton.clone(),
+                    &required_funcs,
+                );
                 let evidence = LLMBasedTranslationEvidence {
                     id: chunk_id,
                     snippets: printer.get_required_snippets(),
                     extra_validation_funcs,
-                    predefinition: use_llm::get_predefinition(&required_funcs),
+                    predefinition,
                     features: printer.get_cargo_features(),
                     signature,
                     body_header,
@@ -920,7 +951,7 @@ impl Analyzer {
             let chunk_size = self
                 .chunks
                 .get(chunk_id)
-                .map(|c| c.nodes.len())
+                .map(|c| c.range.0.abs_diff(c.range.1))
                 .unwrap_or(0);
             let output = llm_translations
                 .get(&chunk_id)

@@ -16,8 +16,9 @@ use crate::analyzer::{
     dictionary::{DictionaryAccess, DictionaryOperation, DictionaryValue},
     guard::{Atom, VarCond, VoL},
     location::Location,
-    translator::pretranslation::{
-        self, get_function_body_ac_init, get_function_body_am_init_automake,
+    translator::{
+        pretranslation::{self, get_function_body_ac_init, get_function_body_am_init_automake},
+        InlineEvidence,
     },
     type_inference::DataType,
     variable::is_eval,
@@ -36,6 +37,47 @@ use autotools_parser::{
 };
 
 use itertools::Itertools;
+
+#[derive(Debug, Clone, Default)]
+pub(super) struct FuncRequests {
+    /// Whether we have found a usage of redirection.
+    found_redirection: bool,
+    /// Whether we have found a usage of sed command.
+    found_sed: bool,
+    /// Whether we have found a usage of define_cfg/define_env
+    found_define: bool,
+    /// Whether we have found a usage of pkg_config
+    found_pkg_config: bool,
+    /// Whether we have found a usage of AC_CHECK_HEADER/AC_CHECK_HEADERS
+    found_check_header: bool,
+    /// Whether we have found a usage of AC_CHECK_LIB/AC_SEARCH_LIBS
+    found_check_library: bool,
+    /// Whether we have found a usage of AC_CHECK_DECL/AC_CHECK_DECLS
+    found_check_decl: bool,
+    /// Whether we have found a usage of AC_CHECK_FUNC/AC_CHECK_FUNCS
+    found_check_func: bool,
+    /// Whether we have found a usage of AC_COMPILE_IFELSE/AC_TRY_COMPILE
+    found_check_compile: bool,
+    /// Whether we have found a usage of AC_LINK_IFELSE/AC_TRY_LINK
+    found_check_link: bool,
+}
+
+impl FuncRequests {
+    pub fn merge(&mut self, other: Self) {
+        self.found_redirection |= other.found_redirection;
+        self.found_sed |= other.found_sed;
+        self.found_redirection |= other.found_redirection;
+        self.found_sed |= other.found_sed;
+        self.found_define |= other.found_define;
+        self.found_pkg_config |= other.found_pkg_config;
+        self.found_check_header |= other.found_check_header;
+        self.found_check_library |= other.found_check_library;
+        self.found_check_decl |= other.found_check_decl;
+        self.found_check_func |= other.found_check_func;
+        self.found_check_compile |= other.found_check_compile;
+        self.found_check_link |= other.found_check_link;
+    }
+}
 
 pub(crate) struct TranslatingPrinter<'a> {
     /// Contains all stateful information
@@ -72,26 +114,8 @@ pub(crate) struct TranslatingPrinter<'a> {
     called_macros: RefCell<Vec<String>>,
     /// Simple translations available for inlining
     inlined_translations: Option<&'a HashMap<ChunkId, InlinedTranslationOutput>>,
-    /// Whether we have found a usage of redirection.
-    found_redirection: Cell<bool>,
-    /// Whether we have found a usage of sed command.
-    found_sed: Cell<bool>,
-    /// Whether we have found a usage of define_cfg/define_env
-    found_define: Cell<bool>,
-    /// Whether we have found a usage of pkg_config
-    found_pkg_config: Cell<bool>,
-    /// Whether we have found a usage of AC_CHECK_HEADER/AC_CHECK_HEADERS
-    found_check_header: Cell<bool>,
-    /// Whether we have found a usage of AC_CHECK_LIB/AC_SEARCH_LIBS
-    found_check_library: Cell<bool>,
-    /// Whether we have found a usage of AC_CHECK_DECL/AC_CHECK_DECLS
-    found_check_decl: Cell<bool>,
-    /// Whether we have found a usage of AC_CHECK_FUNC/AC_CHECK_FUNCS
-    found_check_func: Cell<bool>,
-    /// Whether we have found a usage of AC_COMPILE_IFELSE/AC_TRY_COMPILE
-    found_check_compile: Cell<bool>,
-    /// Whether we have found a usage of AC_LINK_IFELSE/AC_TRY_LINK
-    found_check_link: Cell<bool>,
+    /// keys for required funcs
+    func_requests: RefCell<FuncRequests>,
     /// Heredoc placeholders: (placeholder_format, original_format)
     heredoc_placeholders: RefCell<Vec<(String, String)>>,
     /// Counter for generating unique heredoc placeholder IDs
@@ -114,7 +138,7 @@ impl<'a> TranslatingPrinter<'a> {
         full_rust_mode: bool,
     ) -> Self {
         let mut dict_accesses = HashMap::new();
-        for dict in analyzer.dicts.as_ref().unwrap() {
+        for dict in analyzer.dicts() {
             for (loc, access) in dict.accesses.iter() {
                 dict_accesses.insert(
                     loc.clone(),
@@ -143,16 +167,7 @@ impl<'a> TranslatingPrinter<'a> {
             cargo_features: RefCell::new(Vec::new()),
             called_macros: RefCell::new(Vec::new()),
             inlined_translations,
-            found_redirection: Cell::new(false),
-            found_sed: Cell::new(false),
-            found_define: Cell::new(false),
-            found_pkg_config: Cell::new(false),
-            found_check_header: Cell::new(false),
-            found_check_library: Cell::new(false),
-            found_check_decl: Cell::new(false),
-            found_check_func: Cell::new(false),
-            found_check_compile: Cell::new(false),
-            found_check_link: Cell::new(false),
+            func_requests: RefCell::new(FuncRequests::default()),
             heredoc_placeholders: RefCell::new(Vec::new()),
             heredoc_counter: Cell::new(0),
         }
@@ -179,6 +194,10 @@ impl<'a> TranslatingPrinter<'a> {
 
     pub fn get_required_snippets(&self) -> Vec<String> {
         self.required_snippets.borrow().clone()
+    }
+
+    pub fn get_func_requests(&self) -> FuncRequests {
+        self.func_requests.borrow().clone()
     }
 
     pub fn get_max_num_consecutive_slashes(&self) -> Option<usize> {
@@ -229,7 +248,7 @@ impl<'a> TranslatingPrinter<'a> {
 
     pub fn get_banned_patterns(&self) -> Vec<(String, String)> {
         let mut ret = Vec::new();
-        if self.found_sed.get() {
+        if self.func_requests.borrow().found_sed {
             // regex syntax b/w sed (bre/ere) and rust (re2) are not compatible.
             // Especially when we allow LLMs to use multi-line mode: (?m), they often fail to
             // correctly migrate regex patterns.
@@ -248,45 +267,46 @@ impl<'a> TranslatingPrinter<'a> {
         ret
     }
 
-    pub fn get_rust_funcs_required_for_chunk(&self) -> Vec<&str> {
+    pub fn get_rust_funcs_required_for_chunk(&self) -> Vec<String> {
         let mut ret = Vec::new();
+        let requests = self.func_requests.borrow();
         // module imports
-        if self.found_sed.get() {
+        if requests.found_sed {
             ret.push("module_regex");
         }
-        if self.found_pkg_config.get() {
+        if requests.found_pkg_config {
             ret.push("module_pkg_config");
         }
         // function definitions
-        if self.found_redirection.get() {
+        if requests.found_redirection {
             ret.push("write_file");
         }
-        if self.found_define.get() {
+        if requests.found_define {
             ret.push("define_cfg");
             ret.push("define_env");
         }
-        if self.found_pkg_config.get() {
+        if requests.found_pkg_config {
             ret.push("pkg_config");
         }
-        if self.found_check_header.get() {
+        if requests.found_check_header {
             ret.push("check_header");
         }
-        if self.found_check_library.get() {
+        if requests.found_check_library {
             ret.push("check_library");
         }
-        if self.found_check_decl.get() {
+        if requests.found_check_decl {
             ret.push("check_decl");
         }
-        if self.found_check_func.get() {
+        if requests.found_check_func {
             ret.push("check_func");
         }
-        if self.found_check_compile.get() {
+        if requests.found_check_compile {
             ret.push("check_compile");
         }
-        if self.found_check_link.get() {
+        if requests.found_check_link {
             ret.push("check_link");
         }
-        ret
+        ret.into_iter().map(|s| s.to_owned()).collect()
     }
 
     pub fn get_embedded_chunks(&self) -> HashMap<ChunkId, String> {
@@ -302,6 +322,19 @@ impl<'a> TranslatingPrinter<'a> {
 
     pub fn get_tab_width() -> usize {
         Self::TAB_WIDTH
+    }
+
+    fn propagate_inlined_evidence(&self, evidence: Option<InlineEvidence>) {
+        if let Some(e) = evidence {
+            self.required_snippets
+                .borrow_mut()
+                .extend(e.required_snippets);
+            self.func_requests.borrow_mut().merge(e.func_requests);
+            self.cargo_features.borrow_mut().extend(e.features);
+            self.heredoc_placeholders
+                .borrow_mut()
+                .extend(e.placeholders);
+        }
     }
 }
 
@@ -334,11 +367,13 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
                         let inlined_code = inlined_translation
                             .inline_rust_code
                             .iter()
+                            .filter(|line| !line.is_empty())
                             .map(|line| {
                                 format!("{tab}{}", self.enclose_by_rust_tags(line.clone(), false))
                             })
                             .collect::<Vec<_>>()
                             .join("\n");
+                        self.propagate_inlined_evidence(inlined_translation.evidence.clone());
                         return format!("{}", inlined_code);
                     } else {
                         // function call for LLM-translated chunks
@@ -469,7 +504,7 @@ impl<'a> TranslatingPrinter<'a> {
                 let key = keys.first().unwrap();
                 let is_reference = self
                     .get_current_chunk_id()
-                    .and_then(|cid| self.analyzer.chunk_skeletons.as_ref().unwrap().get(&cid))
+                    .and_then(|cid| self.analyzer.chunk_skeletons().get(&cid))
                     .is_some_and(|sk| {
                         sk.args.contains_key(key)
                             || sk.pass_through_args.contains_key(key)
@@ -941,18 +976,18 @@ impl<'a> TranslatingPrinter<'a> {
             match &policy.mig_type {
                 CCMigrationType::Cfg => {
                     let key = policy.key.as_ref().unwrap();
-                    self.found_define.replace(true);
+                    self.func_requests.borrow_mut().found_define = true;
                     format!("define_cfg({:?}, {:?})", key, value)
                 }
                 CCMigrationType::Env => {
                     let key = policy.key.as_ref().unwrap();
-                    self.found_define.replace(true);
+                    self.func_requests.borrow_mut().found_define = true;
                     format!("define_env({:?}, {:?})", key, value.unwrap_or_default())
                 }
                 _ => return "".into(),
             }
         } else {
-            self.found_define.replace(true);
+            self.func_requests.borrow_mut().found_define = true;
             format!("define_cfg({:?}, {:?})", key, value)
         };
         self.require_snippet(define_call.clone());
@@ -998,7 +1033,7 @@ impl<'a> TranslatingPrinter<'a> {
                 Some(f) => format!("Some({f})"),
                 None => "None".into(),
             };
-            self.found_define.replace(true);
+            self.func_requests.borrow_mut().found_define = true;
             let define_call = format!("define_cfg({}, {})", format_key, format_value);
             self.require_snippet(define_call.clone());
             define_call
@@ -1013,11 +1048,11 @@ impl<'a> TranslatingPrinter<'a> {
                             Some(f) => format!("Some({f})"),
                             None => "None".into(),
                         };
-                        self.found_define.replace(true);
+                        self.func_requests.borrow_mut().found_define = true;
                         format!("define_cfg({:?}, {})", key_fstr, format_value)
                     }
                     CCMigrationType::Env => {
-                        self.found_define.replace(true);
+                        self.func_requests.borrow_mut().found_define = true;
                         format!(
                             "define_env({:?}, {})",
                             key_fstr,
@@ -1031,7 +1066,7 @@ impl<'a> TranslatingPrinter<'a> {
                     Some(f) => format!("Some({f})"),
                     None => "None".into(),
                 };
-                self.found_define.replace(true);
+                self.func_requests.borrow_mut().found_define = true;
                 format!("define_cfg({:?}, {})", key_fstr, format_value)
             };
             self.require_snippet(define_call.clone());
@@ -1048,7 +1083,7 @@ impl<'a> TranslatingPrinter<'a> {
         includes: &str,
         defines: &HashMap<&str, String>,
     ) -> String {
-        self.found_check_header.replace(true);
+        self.func_requests.borrow_mut().found_check_header = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         let mut ret = String::new();
         for header in headers {
@@ -1099,7 +1134,7 @@ impl<'a> TranslatingPrinter<'a> {
         try_std: bool,
         defines: &HashMap<&str, String>,
     ) -> String {
-        self.found_check_library.replace(true);
+        self.func_requests.borrow_mut().found_check_library = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
 
@@ -1108,7 +1143,11 @@ impl<'a> TranslatingPrinter<'a> {
             "check_library(cc, \"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
             func, libs, other_libs, try_std
         );
-        self.require_snippet(func_call.clone());
+
+        // For `check_library` call, recording is stopped
+        // because we observed that the argument: `other_libs` can have a broken syntax. (e.g ["$var"])
+        // self.require_snippet(func_call.clone());
+
         let check_library =
             self.enclose_by_rust_tags(format!("let Ok(opt) = {}", func_call), false);
         let append_libs = self.enclose_by_rust_tags("opt.map(|lib| LIBS.push(l))".into(), false);
@@ -1153,7 +1192,7 @@ impl<'a> TranslatingPrinter<'a> {
         includes: &str,
         defines: &HashMap<&str, String>,
     ) -> String {
-        self.found_check_decl.replace(true);
+        self.func_requests.borrow_mut().found_check_decl = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         let mut ret = String::new();
         for symbol in symbols {
@@ -1204,7 +1243,7 @@ impl<'a> TranslatingPrinter<'a> {
         action_if_not_found: Option<&Vec<NodeId>>,
         defines: &HashMap<&str, String>,
     ) -> String {
-        self.found_check_func.replace(true);
+        self.func_requests.borrow_mut().found_check_func = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         let mut ret = String::new();
         for function in functions {
@@ -1299,7 +1338,7 @@ impl<'a> TranslatingPrinter<'a> {
         action_if_true: Option<&Vec<NodeId>>,
         action_if_false: Option<&Vec<NodeId>>,
     ) -> String {
-        self.found_check_compile.replace(true);
+        self.func_requests.borrow_mut().found_check_compile = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
 
         let code_expr = self.format_program_code(code);
@@ -1333,7 +1372,7 @@ impl<'a> TranslatingPrinter<'a> {
         action_if_true: Option<&Vec<NodeId>>,
         action_if_false: Option<&Vec<NodeId>>,
     ) -> String {
-        self.found_check_link.replace(true);
+        self.func_requests.borrow_mut().found_check_link = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
 
         let code_expr = self.format_program_code(code);
@@ -1379,7 +1418,7 @@ impl<'a> TranslatingPrinter<'a> {
 
         for (name, min_version) in &info.packages {
             if let Some(sys_info) = pkg_config.get_system_package_info(name) {
-                self.found_pkg_config.replace(true);
+                self.func_requests.borrow_mut().found_pkg_config = true;
                 let min_version_str = match min_version {
                     None => "None".into(),
                     Some(VoL::Var(var)) => format!("Some(&{})", var),
@@ -1748,7 +1787,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                 .and_then(as_literal)
                 .is_some_and(|cmd| cmd == "sed")
             {
-                self.found_sed.replace(true);
+                self.func_requests.borrow_mut().found_sed = true;
             }
         }
         self.cmd_to_string(words, indent_level)
@@ -1761,7 +1800,7 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
         indent_level: usize,
     ) -> String {
         if !redirects.is_empty() {
-            self.found_redirection.replace(true);
+            self.func_requests.borrow_mut().found_redirection = true;
         }
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
         if redirects.len() == 2 {
@@ -1813,9 +1852,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
         let node_id = self.node_cursor.get().unwrap();
         if let Some(effects) = self
             .analyzer
-            .side_effects_of_frozen_macros
-            .as_ref()
-            .unwrap()
+            .side_effects_of_frozen_macros()
             .get(&node_id)
         {
             return effects
@@ -1853,7 +1890,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                             CCMigrationType::Cfg => {
                                 let key = policy.key.as_ref().unwrap();
                                 self.require_snippet(key.into());
-                                self.found_define.replace(true);
+                                self.func_requests.borrow_mut().found_define = true;
                                 // not sure about the value, so let's leave the function call unfinished.
                                 // despite this kind of broken syntax, LLMs will complete it (wow).
                                 required_defines.insert(key, format!("define_cfg({:?},", key));
@@ -1861,7 +1898,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                             CCMigrationType::Env => {
                                 let key = policy.key.as_ref().unwrap();
                                 self.require_snippet(key.into());
-                                self.found_define.replace(true);
+                                self.func_requests.borrow_mut().found_define = true;
                                 // not sure about the value, so let's leave the function call unfinished.
                                 required_defines.insert(key, format!("define_env({:?},", key,));
                             }

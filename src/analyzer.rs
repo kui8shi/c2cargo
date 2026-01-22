@@ -575,6 +575,10 @@ impl NodeInfo {
     pub fn is_chunk_top_node(&self) -> bool {
         self.is_chunk_top.unwrap_or_default()
     }
+
+    pub fn is_end_node(&self) -> bool {
+        self.pre_body_nodes.is_empty() && self.branches.is_empty()
+    }
 }
 
 /// Configuration options for the analyzer
@@ -893,30 +897,142 @@ impl Analyzer {
         None
     }
 
+    fn definitions(&self) -> &VariableMap {
+        self.var_definitions
+            .as_ref()
+            .expect("var_definitions not yet initialized; review calling order")
+    }
+
+    fn propagated_definitions(&self) -> &VariableMap {
+        self.var_propagated_definitions
+            .as_ref()
+            .expect("var_propagated_definitions not yet initialized; review calling order")
+    }
+
+    fn usages(&self) -> &VariableMap {
+        self.var_usages
+            .as_ref()
+            .expect("var_usages not yet initialized; review calling order")
+    }
+
+    fn indirect_usages(&self) -> &VariableMap {
+        self.var_indirect_usages
+            .as_ref()
+            .expect("var_indirect_usages not yet initialized; review calling order")
+    }
+
+    fn subst_vars(&self) -> &HashSet<String> {
+        self.subst_vars
+            .as_ref()
+            .expect("subst_vars not yet initialized; review calling order")
+    }
+
+    fn macro_calls(&self) -> &HashMap<String, Vec<(NodeId, M4Macro)>> {
+        self.macro_calls
+            .as_ref()
+            .expect("macro_calls not yet initialized; review calling order")
+    }
+
+    fn var_scopes(&self) -> &HashMap<String, Vec<Scope>> {
+        self.var_scopes
+            .as_ref()
+            .expect("var_scopes not yet initialized; review calling order")
+    }
+
+    fn var_scopes_mut(&mut self) -> &mut HashMap<String, Vec<Scope>> {
+        self.var_scopes
+            .as_mut()
+            .expect("var_scopes not yet initialized; review calling order")
+    }
+
+    fn chunk_skeletons(&self) -> &HashMap<ChunkId, FunctionSkeleton> {
+        self.chunk_skeletons
+            .as_ref()
+            .expect("chunk_skeletons not yet initialized; review calling order")
+    }
+
+    fn chunk_skeletons_mut(&mut self) -> &mut HashMap<ChunkId, FunctionSkeleton> {
+        self.chunk_skeletons
+            .as_mut()
+            .expect("chunk_skeletons not yet initialized; review calling order")
+    }
+
+    fn dicts(&self) -> &Vec<DictionaryInstance> {
+        self.dicts
+            .as_ref()
+            .expect("dicts not yet initialized; review calling order")
+    }
+
+    fn input_vars(&self) -> &HashSet<String> {
+        self.input_vars
+            .as_ref()
+            .expect("input_vars not yet initialized; review calling order")
+    }
+
+    fn env_vars(&self) -> &HashSet<String> {
+        self.env_vars
+            .as_ref()
+            .expect("env_vars not yet initialized; review calling order")
+    }
+
+    fn inferred_types(&self) -> &HashMap<String, DataType> {
+        self.inferred_types
+            .as_ref()
+            .expect("inferred_types not yet initialized; review calling order")
+    }
+
+    fn cpp_defs(&self) -> &HashSet<String> {
+        self.cpp_defs
+            .as_ref()
+            .expect("cpp_defs not yet initialized; review calling order")
+    }
+
+    fn cpp_defs_mut(&mut self) -> &mut HashSet<String> {
+        self.cpp_defs
+            .as_mut()
+            .expect("cpp_defs not yet initialized; review calling order")
+    }
+
+    fn definitions_mut(&mut self) -> &mut VariableMap {
+        self.var_definitions
+            .as_mut()
+            .expect("var_definitions not yet initialized; review calling order")
+    }
+
+    fn indirect_usages_mut(&mut self) -> &mut VariableMap {
+        self.var_indirect_usages
+            .as_mut()
+            .expect("var_indirect_usages not yet initialized; review calling order")
+    }
+
+    fn build_option_info_mut(&mut self) -> &mut BuildOptionInfo {
+        self.build_option_info
+            .as_mut()
+            .expect("build_option_info not yet initialized; review calling order")
+    }
+
+    fn eval_assigns_mut(&mut self) -> &mut HashMap<Identifier, Vec<(Option<ValueExpr>, Location)>> {
+        self.eval_assigns
+            .as_mut()
+            .expect("eval_assigns not yet initialized; review calling order")
+    }
+
     pub(crate) fn get_definition(&self, var_name: &str) -> Option<&Vec<Location>> {
-        self.var_definitions.as_ref().unwrap().get(var_name)
+        self.definitions().get(var_name)
     }
 
     pub(crate) fn has_definition(&self, var_name: &str) -> bool {
-        self.var_definitions
-            .as_ref()
-            .unwrap()
-            .contains_key(var_name)
+        self.definitions().contains_key(var_name)
     }
 
     pub(crate) fn has_definition_before(&self, var_name: &str, loc: &Location) -> bool {
-        self.var_definitions
-            .as_ref()
-            .unwrap()
+        self.definitions()
             .get(var_name)
             .is_some_and(|def_locs| def_locs.iter().any(|def_loc| def_loc < loc))
     }
 
     pub(crate) fn get_propagated_definition(&self, var_name: &str) -> Option<&Vec<Location>> {
-        self.var_propagated_definitions
-            .as_ref()
-            .unwrap()
-            .get(var_name)
+        self.propagated_definitions().get(var_name)
     }
 
     pub(crate) fn as_propagated_definition(
@@ -937,41 +1053,33 @@ impl Analyzer {
     }
 
     pub(crate) fn has_propagated_definition(&self, var_name: &str) -> bool {
-        self.var_propagated_definitions
-            .as_ref()
-            .unwrap()
-            .contains_key(var_name)
+        self.propagated_definitions().contains_key(var_name)
     }
 
     pub(crate) fn get_usage(&self, var_name: &str) -> Option<&Vec<Location>> {
-        self.var_usages.as_ref().unwrap().get(var_name)
+        self.usages().get(var_name)
     }
 
     pub(crate) fn has_usage(&self, var_name: &str) -> bool {
-        self.var_usages.as_ref().unwrap().contains_key(var_name)
+        self.usages().contains_key(var_name)
     }
 
     pub(crate) fn has_usage_before(&self, var_name: &str, loc: &Location) -> bool {
-        self.var_usages
-            .as_ref()
-            .unwrap()
+        self.usages()
             .get(var_name)
             .is_some_and(|use_locs| use_locs.iter().any(|use_loc| use_loc < loc))
     }
 
     pub(crate) fn get_indirect_usage(&self, var_name: &str) -> Option<&Vec<Location>> {
-        self.var_indirect_usages.as_ref().unwrap().get(var_name)
+        self.indirect_usages().get(var_name)
     }
 
     pub(crate) fn has_indirect_usage(&self, var_name: &str) -> bool {
-        self.var_indirect_usages
-            .as_ref()
-            .unwrap()
-            .contains_key(var_name)
+        self.indirect_usages().contains_key(var_name)
     }
 
     pub(crate) fn is_substituted(&self, var_name: &str) -> bool {
-        self.subst_vars.as_ref().unwrap().contains(var_name)
+        self.subst_vars().contains(var_name)
     }
 
     /// Get command that defines a variable before, with consideration for the condition
@@ -1493,12 +1601,16 @@ impl Analyzer {
 
     /// Get a reference to the record collector
     pub(crate) fn record_collector(&self) -> &RecordCollector {
-        self.record_collector.as_ref().unwrap()
+        self.record_collector
+            .as_ref()
+            .expect("record_collector not yet initialized; review calling order")
     }
 
     /// Get a mutable reference to the record collector
     pub(crate) fn record_collector_mut(&mut self) -> &mut RecordCollector {
-        self.record_collector.as_mut().unwrap()
+        self.record_collector
+            .as_mut()
+            .expect("record_collector not yet initialized; review calling order")
     }
 
     /// Get project info for record

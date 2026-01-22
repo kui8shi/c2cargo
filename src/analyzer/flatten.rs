@@ -74,6 +74,12 @@ impl<'a> Flattener<'a> {
         }
     }
 
+    /// checks if the node has no children
+    fn is_end_node(&self, node_id: NodeId) -> bool {
+        let info = &self.get_node(node_id).unwrap().info;
+        info.pre_body_nodes.is_empty() && info.branches.is_empty()
+    }
+
     /// Splits a block into sub-blocks based on marked nodes
     /// Returns a vector of (block, is_marked) tuples
     fn split_block_by_marks(
@@ -392,17 +398,19 @@ impl<'a> AstVisitor for Flattener<'a> {
                 }
                 self.last_range_start = Some(start);
             }
-            // Step 1 & 2: Mark nodes containing break/continue commands (scope-aware)
+            // Mark nodes containing break/continue commands (scope-aware), or end nodes
             let marked_nodes = body
                 .iter()
-                .filter(|&&node_id| self.has_loop_interruption_in_descendants(node_id))
+                .filter(|&&node_id| {
+                    self.has_loop_interruption_in_descendants(node_id) || self.is_end_node(node_id)
+                })
                 .cloned()
                 .collect();
 
-            // Step 3: Split blocks based on marked nodes
+            // Split blocks based on marked nodes
             let split_blocks = self.split_block_by_marks(body, &marked_nodes);
 
-            // Step 4: Check sizes and flatten only eligible blocks
+            // Check sizes and flatten only eligible blocks
             let mut new_body = Vec::new();
             let gaps = Vec::new();
 
