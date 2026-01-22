@@ -38,7 +38,7 @@ pub(crate) struct Scope {
     pub readers: Vec<ChunkId>,
     /// Record relationships between chunks to appear
     pub post_order: Vec<ChunkId>,
-    /// Inferred type for this specific scope.
+    /// Inferred type for this specific variable scope.
     /// Set after scope splitting for variables with multiple scopes.
     pub inferred_type: Option<DataType>,
 }
@@ -695,7 +695,7 @@ impl Analyzer {
             }
         }
 
-        self.get_inferred_type(var_name)
+        self.get_data_type(var_name)
     }
 
     fn add_chunkwise_scope(&mut self, var: &str, mut scope: Scope) {

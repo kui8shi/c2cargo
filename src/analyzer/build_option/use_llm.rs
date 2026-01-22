@@ -45,6 +45,7 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
 
         let mut errors = Vec::new();
 
+        println!("Output: {:?}", self);
         // Candidates (input "values")
         let candidates: HashSet<String> = values.iter().cloned().collect();
 
@@ -92,11 +93,17 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
         // }
 
         // 2b) binary representatives must contain yes and no.
-        if reps_set.len() <= 2 && !(reps_set.contains("yes") && reps_set.contains("no")) {
-            errors.push(format!(
+        if reps_set.len() <= 2 {
+            if !(reps_set.contains("yes") && reps_set.contains("no")) {
+                errors.push(format!(
                     r#"Binary representatives must contain yes and no. They must not hold any other values: {:?}"#,
                     reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
                 ))
+            } else if self.enabled_by_default.is_none() {
+                errors.push(format!(
+                    r#"Binary option must be disabled or enabled by default. `enable_by_default` must not hold null."#,
+                ))
+            }
         }
 
         // 2c) non binary build option must select default value from representatives
@@ -106,7 +113,9 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
                 .as_ref()
                 .is_none_or(|v| !self.representatives.contains(&v))
         {
-            errors.push(format!(r#"Non binary build option must have default value"#));
+            errors.push(format!(
+                r#"Non binary build option must have default value"#
+            ));
         }
 
         // 3) aliases must partition the non-representatives:

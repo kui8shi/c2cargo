@@ -7,6 +7,8 @@ use autotools_parser::m4_macro::M4Argument;
 use bincode::{Decode, Encode};
 use regex::Regex;
 
+use crate::analyzer::{as_literal, as_shell, as_single};
+
 use super::{
     location::Location, AcWord, AcWordFragment, Analyzer, Arithmetic, AstVisitor, ExecId, M4Macro,
     MayM4, Node, NodeId, Parameter, ShellCommand, VariableMap, Word, WordFragment,
@@ -416,10 +418,12 @@ impl<'a> AstVisitor for VariableAnalyzer<'a> {
         }
         for arg in m4_macro.args.iter() {
             if let M4Argument::Program(prog) = arg {
-                let var_re = Regex::new(r#"\$\{?(?<var>[a-zA-Z0-9_]+)\}?"#).unwrap();
-                for cap in var_re.captures_iter(prog) {
-                    let appeared_shell_var = cap.name("var").unwrap().as_str();
-                    self.record_variable_usage(appeared_shell_var);
+                if let Some(prog_as_lit) = as_single(prog).and_then(as_shell).and_then(as_literal) {
+                    let var_re = Regex::new(r#"\$\{?(?<var>[a-zA-Z0-9_]+)\}?"#).unwrap();
+                    for cap in var_re.captures_iter(prog_as_lit) {
+                        let appeared_shell_var = cap.name("var").unwrap().as_str();
+                        self.record_variable_usage(appeared_shell_var);
+                    }
                 }
             }
         }

@@ -600,15 +600,17 @@ impl Analyzer {
     }
 
     fn infer_dictionary_value_type(&self, access: &DictionaryAccessRecipe) -> DataType {
-        if let Some(raw_name) = &access.raw_name {
-            if let Some(ty) = self.get_type_inference_result(raw_name) {
-                return ty.clone();
+        if self.options.type_inference {
+            if let Some(raw_name) = &access.raw_name {
+                if let Some(ty) = self.get_inferred_type(raw_name) {
+                    return ty.clone();
+                }
             }
-        }
 
-        if let Some(assigned_to) = &access.assigned_to {
-            if let Some(ty) = self.get_type_inference_result(assigned_to) {
-                return ty.clone();
+            if let Some(assigned_to) = &access.assigned_to {
+                if let Some(ty) = self.get_inferred_type(assigned_to) {
+                    return ty.clone();
+                }
             }
         }
 

@@ -170,6 +170,8 @@ pub(super) struct LLMBasedTranslationEvidence {
     pub depending_func_defs: String,
     /// Heredoc placeholders: (placeholder_format, original_format)
     pub heredoc_placeholders: Vec<(String, String)>,
+    /// banned pattern and the reason message.
+    pub banned: Vec<(String, String)>,
 }
 
 pub(super) fn get_rust_check_dir() -> &'static Path {
@@ -200,10 +202,18 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
                 err.push(err_msg);
             }
         }
+
         // no-op check
         match detect_no_op_patterns(&self.rust_func_body, &evidence.snippets) {
             Ok(_) => (),
             Err(e) => err.extend(e),
+        }
+
+        // banned pattern check
+        for (banned, reason) in evidence.banned.iter() {
+            if self.rust_func_body.contains(banned) {
+                err.push(format!("Banned pattern detected: {}. {}", banned, reason));
+            }
         }
 
         // Restore heredoc placeholders before compile check
@@ -213,26 +223,25 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
         // compile check
         {
             let llm_translation = {
-                let mut s = self.rust_func_body.trim();
+                let s = &mut self.rust_func_body;
 
                 // stirip header if translation output includes it
                 let header_snippet = evidence.body_footer.trim();
                 if s.starts_with(header_snippet) {
-                    s = s.strip_prefix(header_snippet).unwrap();
+                    *s = s.strip_prefix(header_snippet).unwrap().to_owned();
                 }
 
                 // stirip footer if translation output includes it
                 let footer_snippet = evidence.body_footer.trim();
                 if s.ends_with(footer_snippet) {
-                    s = s.strip_suffix(&footer_snippet).unwrap();
+                    *s = s.strip_suffix(&footer_snippet).unwrap().to_owned();
                 }
 
-                s
+                s.as_str()
             };
             let preamble = format!(
                 "{}\nfn main() {{}}\n{}\n",
-                evidence.predefinition,
-                evidence.depending_func_defs,
+                evidence.predefinition, evidence.depending_func_defs,
             );
             let rust_func = format!(
                 "fn {}{} {{{}\n{}\n{}}}",
@@ -242,6 +251,7 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
                 llm_translation,
                 evidence.body_footer
             );
+            println!("===== Chunk Id: {} =====", evidence.id);
             println!("{rust_func}");
             let check_dir = get_rust_check_dir();
             let src_dir = check_dir.join("src");
@@ -314,6 +324,7 @@ pkg-config = "*"
 
             // Also check stderr for non-JSON errors
             if !stderr.is_empty() {
+                dbg!(&stderr);
                 for line in stderr.lines() {
                     if line.contains("error") {
                         has_errors = true;
@@ -407,36 +418,37 @@ Input format:
 
 ### Translation Principles
 
-1. **Behavioral Fidelity (Highest Priority)**
+1. Behavioral Fidelity (Highest Priority)
    - Every logical branch, condition, and side effect in the shell script must appear in the Rust code.
    - Always prefer reproducing *behavior* over using all variables syntactically.
    - If a variable is not semantically used in the original logic, do not force dummy references.
 
-2. **Control Flow**
+2. Control Flow
    - Convert `if`, `case`, `for` faithfully to Rust equivalents (`if`, `match`, `for`).
    - Maintain nesting and order of operations exactly.
 
-3. **Variables**
+3. Variables
    - Map shell variables to appropriate Rust types (`String`, `bool`, `Vec<String>`, `PathBuf`).
    - Local Flexibility: For variables strictly internal to the function (not arguments or return values), you are free to rename them and retype them (e.g., converting a "yes" string flag to a Rust `bool`, or renaming variables for clarity).
    - Interface Strictness: Variables that are part of the function arguments or the final return tuple must match the skeleton's definition exactly.
-   - Use `Option<T>` freely: Shell patterns like `${var:+set}`, `${var:-default}`, and `${var:?error}` indicate awareness of the "undefined" state (distinct from an empty string). Translate these using `Option<String>` or `Option<T>` appropriately. An undefined variable is `None`, while an empty string is `Some(String::new())`.
 
-4. **Command Execution**
+4. Command Execution
    - Translate shell commands into `std::process::Command` calls.
    - Capture outputs, exit statuses, and stderr as necessary.
    - Simulate redirection (`>`, `2>&1`) via I/O handling.
+   - When simulating `sed` command, use `regex` crate. When regexing files, avoid multi-line mode and process line-by-line as `sed` does.
+   - When translating execution of locally generated executables, specify the paths explicitly (e.g. './conftest') to avoid failing at resolution.
 
-5. **Filesystem Effects**
+5. Filesystem Effects
    - Map file writes/appends to calls of `write_file`.
    - Handle `cat >`, `echo >>`, and file deletions accurately (`write_file`, `remove_file` etc.).
    - For file reading with uncertain or possibly non-UTF8 contents, prefer `std::fs::read(&path).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())` over `read_to_string()` to avoid unnecessary panic on encoding errors.
    - Preserve temporary file lifecycle (`conftest.*` creation and cleanup).
 
-6. **Embedded Rust Snippets**
+6. Embedded Rust Snippets
    - Tokens enclosed in `<rust>...</rust>` are *verbatim Rust expressions* and must appear unquoted.
 
-7. **Output Requirements**
+7. Output Requirements
    - Output exactly one minified JSON object:
      - "id": same as input
      - "rust_func_name": concise imperative name (no meta words like “translate” or “chunk”)
@@ -447,27 +459,10 @@ Input format:
    - The code must compile when inserted into the skeleton.
    - No placeholders or dummy `if cfg!(...) {}` branches.
 
-8. **Validation**
+8. Validation
    - All file writes, command invocations from the shell must have explicit Rust equivalents.
    - Never invent or skip logic to satisfy formatting rules.
    - Never try to emit a fake or meaningless marker or placeholder just for the parity.
-
-### Example
-
-Shell:
-```
-if <rust>cfg!(target_os = "windows")</rust> && <rust>cfg!(target_env = "gnu")</rs>; then
-echo "include_mpn('x86_64/dos64.m4')" >> ${gmp_tmpconfigm4i}
-fi
-```
-
-Rust:
-```
-if cfg!(target_os = "windows") && cfg!(target_env = "gnu") {
-let mut f = OpenOptions::new().create(true).append(true).open(&gmp_tmpconfigm4i)?;
-writeln!(f, "include_mpn('x86_64/dos64.m4')")?;
-}
-```
 
 ---
 

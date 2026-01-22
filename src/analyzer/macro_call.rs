@@ -232,6 +232,7 @@ impl Analyzer {
                                 path
                             };
                             if src.exists() {
+                                dbg!(&dst, &src);
                                 self.project_info.config_files.push((dst, src));
                             }
                         }
@@ -343,13 +344,15 @@ impl Analyzer {
                 .into_iter()
                 .flatten()
             {
-                let template = macro_call.get_arg_as_program(1).unwrap();
-                let undef_re = Regex::new(r"^#undef\s+(?<key>[A-Z0-9_]+)").unwrap();
-                for cap in undef_re.captures_iter(&template) {
-                    let key = cap.name("key").unwrap().as_str().to_string();
-                    cpp_defs.insert(key);
+                let prog = macro_call.get_arg_as_program(1).unwrap();
+                if let Some(template) = as_single(&prog).and_then(as_shell).and_then(as_literal) {
+                    let undef_re = Regex::new(r"^#undef\s+(?<key>[A-Z0-9_]+)").unwrap();
+                    for cap in undef_re.captures_iter(&template) {
+                        let key = cap.name("key").unwrap().as_str().to_string();
+                        cpp_defs.insert(key);
+                    }
+                    remove_nodes.insert(id);
                 }
-                remove_nodes.insert(id);
             }
         }
 

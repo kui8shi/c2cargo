@@ -178,7 +178,7 @@ impl<U> AutoconfPool<U> {
                 .collect::<Vec<String>>()
                 .join(if words.len() < 10 { " " } else { &newline })
                 .to_string(),
-            Program(prog) => format!("[{}]", prog.replace("\n", &newline)),
+            Program(prog) => self.display_word(prog, false),
             Commands(cmds) => {
                 if !cmds.is_empty() {
                     format!(

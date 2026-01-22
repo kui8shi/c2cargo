@@ -682,7 +682,7 @@ fn enumerate_literal(arg_vars: &HashSet<&str>, guard: &Guard) -> Vec<String> {
 
 fn normalize(values: Vec<String>) -> (Vec<String>, bool) {
     const MAX_NUM: usize = 10;
-    if values.iter().all(|value| value.parse::<usize>().is_ok()) {
+    if !values.is_empty() && values.iter().all(|value| value.parse::<usize>().is_ok()) {
         let mut nums: Vec<usize> = values
             .into_iter()
             .map(|value| value.parse::<usize>().unwrap())

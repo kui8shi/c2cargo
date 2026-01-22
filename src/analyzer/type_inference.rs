@@ -8,7 +8,9 @@ use crate::analyzer::{
 
 use super::{AcWord, Analyzer, AstVisitor, MayM4, Node, NodeId, Parameter, PatternBodyPair, Word};
 use autotools_parser::ast::{
-    condition::{Condition, Operator}, minimal::WordFragment, Arithmetic, Redirect
+    condition::{Condition, Operator},
+    minimal::WordFragment,
+    Arithmetic, Redirect,
 };
 
 #[allow(dead_code)]
@@ -106,7 +108,7 @@ pub(super) struct TypeInferrer<'a> {
 }
 
 impl Analyzer {
-    pub(crate) fn get_type_inference_result(&self, var_name: &str) -> Option<&DataType> {
+    pub(crate) fn get_inferred_type(&self, var_name: &str) -> Option<&DataType> {
         self.inferred_types
             .as_ref()
             .map(|types| types.get(var_name))
@@ -120,10 +122,10 @@ impl Analyzer {
         self.convert_guards_for_numeric_boolean();
     }
 
-    pub(crate) fn get_inferred_type(&self, name: &str) -> DataType {
+    pub(crate) fn get_data_type(&self, name: &str) -> DataType {
         if self.options.type_inference {
             if let Some(inferred) = self
-                .get_type_inference_result(name)
+                .get_inferred_type(name)
                 .map(|data_type| data_type.clone())
             {
                 inferred
@@ -143,7 +145,7 @@ impl Analyzer {
         if let Some(ty) = &scope.inferred_type {
             return ty.clone();
         }
-        self.get_inferred_type(name)
+        self.get_data_type(name)
     }
 
     fn convert_guards_for_numeric_boolean(&mut self) {

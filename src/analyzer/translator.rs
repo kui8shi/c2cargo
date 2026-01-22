@@ -1,4 +1,5 @@
 use itertools::Itertools;
+use rust_format::{Formatter, RustFmt};
 use std::{
     collections::{HashMap, HashSet},
     hash::{DefaultHasher, Hash, Hasher},
@@ -171,7 +172,7 @@ impl Analyzer {
     fn translate_inlined_assignment(&self, var_name: &str, word: &AcWord) -> Option<String> {
         use autotools_parser::ast::minimal::Word;
 
-        let data_type = self.get_inferred_type(var_name);
+        let data_type = self.get_data_type(var_name);
 
         match &word.0 {
             Word::Single(MayM4::Shell(fragment)) => {
@@ -331,6 +332,14 @@ impl Analyzer {
                 "\n[required_snippets]:\n{}",
                 printer.get_required_snippets().join("\n")
             );
+            println!(
+                "\n[banned_patterns]:\n{}",
+                printer
+                    .get_banned_patterns()
+                    .into_iter()
+                    .map(|(s, _)| s)
+                    .join("\n")
+            );
             println!("==============");
         }
     }
@@ -345,7 +354,7 @@ impl Analyzer {
             .iter()
             .sorted()
             .map(|name| {
-                let data_type = self.get_inferred_type(name);
+                let data_type = self.get_data_type(name);
                 let expression = match &data_type {
                     DataType::Boolean => format!("option_env!(\"{}\").is_some()", &name),
                     DataType::Integer => {
@@ -406,7 +415,7 @@ impl Analyzer {
             .into_iter()
             .sorted()
             .map(|name| {
-                let data_type = self.get_inferred_type(name);
+                let data_type = self.get_data_type(name);
                 let mutability = if self.get_scopes(name.as_str()).is_some_and(|scopes| {
                     scopes.first().is_some_and(|scope| {
                         !scope.writers.is_empty() || !scope.overwriters.is_empty()
@@ -431,12 +440,7 @@ impl Analyzer {
                 )
             }))
             .join("\n");
-        let (translated, translation_cache_used) = self.translate_chunks().await;
-
-        // Mark if translation cache was used
-        if translation_cache_used {
-            self.record_collector_mut().set_translation_cache_used();
-        }
+        let translated = self.translate_chunks().await;
 
         // Record each chunk translation
         for (chunk_id, (_, meta)) in translated.iter() {
@@ -492,12 +496,16 @@ impl Analyzer {
                 .map(|(var, policy)| match &policy.mig_type {
                     CCMigrationType::Cfg => format!(
                         "{tab}if {} {{\n{tab}{tab}define_cfg({:?}, None);\n{tab}}}",
-                        var,
+                        match self.get_data_type(var) {
+                            DataType::Boolean => var.to_owned(),
+                            DataType::Literal => format!("{var} == \"yes\""),
+                            _ => todo!(),
+                        },
                         policy.key.as_ref().unwrap()
                     ),
                     CCMigrationType::Env => {
                         let expression =
-                            printer::display_var_as_rust_str(var, &self.get_inferred_type(var));
+                            printer::display_var_as_rust_str(var, &self.get_data_type(var));
                         format!(
                             "{tab}define_env({:?}, {});",
                             policy.key.as_ref().unwrap(),
@@ -553,7 +561,7 @@ impl Analyzer {
             // Output subst variables
             if let Some(subst_vars) = &self.subst_vars {
                 for var_name in subst_vars.iter().sorted() {
-                    let data_type = self.get_inferred_type(var_name);
+                    let data_type = self.get_data_type(var_name);
                     let var_output = match data_type {
                         DataType::List(ty) if *ty == DataType::Literal => {
                             format!("{}.join(\" \")", var_name)
@@ -587,7 +595,11 @@ impl Analyzer {
             if cflags_var_names.is_empty() {
                 cflags_var_names.push("CFLAGS".into());
             }
-            get_bindgen_callsite(&tab, &cflags_var_names)
+            let names = cflags_var_names
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>();
+            self.get_bindgen_callsite(&tab, &names)
         } else {
             Default::default()
         };
@@ -627,15 +639,13 @@ impl Analyzer {
     }
 
     /// Translate chunks using inlined translation or LLMs
-    /// Returns (translations, cache_used) where cache_used is true if translation cache was hit
+    /// Returns translations
     async fn translate_chunks(
-        &self,
-    ) -> (
-        HashMap<ChunkId, (Option<ChunkTranslationOutput>, ChunkTranslationMeta)>,
-        bool,
-    ) {
+        &mut self,
+    ) -> 
+        HashMap<ChunkId, (Option<ChunkTranslationOutput>, ChunkTranslationMeta)>
+    {
         let mut results = HashMap::new();
-        let mut cache_used = false;
         let mut user = LLMUser::new();
         let mut inputs = Vec::new();
         let mut depending_funcs = HashMap::new();
@@ -686,7 +696,7 @@ impl Analyzer {
 
         let llm_translations = if let Some(cached) = self.load_translation_cache() {
             // For cached translations, we don't have the original metadata
-            cache_used = true;
+            self.record_collector_mut().set_translation_cache_used();
             for (chunk_id, _) in cached.iter() {
                 llm_chunk_ids.push(*chunk_id);
                 let chunk_size = self
@@ -831,6 +841,7 @@ impl Analyzer {
                     body_footer,
                     depending_func_defs,
                     heredoc_placeholders: printer.get_heredoc_placeholders(),
+                    banned: printer.get_banned_patterns(),
                 };
                 inputs.push((input, evidence));
                 llm_chunk_ids.push(chunk_id);
@@ -921,7 +932,7 @@ impl Analyzer {
             results.insert(chunk_id, (output, meta));
         }
 
-        (results, cache_used)
+        results
     }
 
     fn construct_rust_func_definition(
@@ -930,6 +941,7 @@ impl Analyzer {
         func_name: &str,
         func_body: &str,
     ) -> String {
+        let footer = self.print_chunk_skeleton_body_footer(chunk_id);
         let func_def = format!(
             "fn {}{} {{\n  {}\n}}",
             func_name,
@@ -937,9 +949,8 @@ impl Analyzer {
             self.print_chunk_skeleton_body_header(chunk_id)
                 .into_iter()
                 .chain(func_body.split("\n").map(|s| s.to_owned()))
-                .chain(std::iter::once(
-                    self.print_chunk_skeleton_body_footer(chunk_id)
-                ))
+                .filter(|line| line.trim() != footer)
+                .chain(std::iter::once(footer.clone()))
                 .filter(|s| !s.is_empty())
                 .join("\n  "),
         );
@@ -1100,7 +1111,8 @@ fn main() {{
             &res.recording,
             &res.chunk_funcs.join("\n\n")
         );
-        build_rs
+        let formatted = RustFmt::default().format_str(&build_rs).unwrap_or(build_rs);
+        formatted
     }
 
     fn get_predefinition_with_recording(&self, record_path: &str) -> String {
@@ -1122,6 +1134,35 @@ fn main() {{
             + "\n"
             + &get_function_definition_bindgen()
     }
+
+    fn get_bindgen_callsite(&self, tab: &str, cflags_var_names: &[&str]) -> String {
+        format!(
+            r#"
+{tab}let mut cflags = {}.collect::<Vec<_>>();
+{tab}run_bindgen(&cflags);
+"#,
+            cflags_var_names
+                .iter()
+                .map(|var_name| {
+                    match self.get_data_type(var_name) {
+                        DataType::List(_) => format!(
+                            "{}.iter().map(|flag| flag.split_whitespace()).flatten()",
+                            var_name
+                        ),
+                        DataType::Literal => format!("{}.split_whitespace()", var_name),
+                        _ => todo!(),
+                    }
+                })
+                .fold(String::new(), |mut acc, v| {
+                    if acc.is_empty() {
+                        acc.push_str(&v);
+                    } else {
+                        acc.push_str(&format!(".chain({})", v))
+                    }
+                    acc
+                })
+        )
+    }
 }
 
 fn get_function_definition_record(record_path: &str) -> String {
@@ -1136,21 +1177,6 @@ fn record(category: &str, key: &str, value: &str) {{
   write_file(&path, &line)
 }}"#,
         record_path
-    )
-}
-
-fn get_bindgen_callsite<S: std::fmt::Display>(tab: &str, cflags_var_names: &[S]) -> String {
-    format!(
-        r#"{tab}let mut cflags = Vec::new();
-{tab}for v in [{}] {{
-{tab}{tab}cflags.extend(v.iter().map(|flag| flag.split_whitespace()).flatten());
-{tab}}}
-{tab}run_bindgen(&cflags);
-"#,
-        cflags_var_names
-            .iter()
-            .map(|var_name| format!("&{}", var_name))
-            .join(", ")
     )
 }
 

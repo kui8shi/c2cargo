@@ -28,7 +28,7 @@ use itertools::Itertools;
 use platform_support::PlatformSupport;
 use project_info::ProjectInfo;
 use record::{AnalysisParameters, RecordCollector};
-use type_inference::{DataType, TypeHint};
+use type_inference::{DataType};
 
 use flatten::Flattener;
 use location::{ExecId, Location};

@@ -261,3 +261,95 @@ pub(super) fn get_function_body_ac_init() -> &'static str {
   }
 "#
 }
+
+pub(super) fn get_function_body_am_init_automake() -> &'static str {
+    r#"  {
+    // Reference AC_INIT variables for package and version
+    let package = package_tarname.clone();
+    let version = package_version.to_string();
+
+    // Source include path
+    let am__isrc = "-I.".to_string();
+    // Platform-specific cygpath
+    let cygpath_w = if cfg!(windows) { "cygpath -w" } else { "echo" }.to_string();
+    // Directory creation
+    let mkdir_p = "mkdir -p".to_string();
+    // Archive tools
+    let amtar = "tar".to_string();
+    let am__tar = if cfg!(target_os = "linux") {
+        "tar --format=ustar -chf - \"$$tardir\"".to_string()
+    } else {
+        "tar chf - \"$$tardir\"".to_string()
+    };
+    let am__untar = "tar -xf -".to_string();
+    // Tag generators
+    let ctags = "ctags".to_string();
+    let etags = "etags".to_string();
+    let cscope = "cscope".to_string();
+    // Auxiliary variables
+    let am__rm_f_notfound = String::new();
+    let am__xargs_n = String::new();
+    // AM_MISSING_PROG tools
+    let aclocal = "aclocal".to_string();
+    let autoconf = "autoconf".to_string();
+    let automake = "automake".to_string();
+    let autoheader = "autoheader".to_string();
+    let makeinfo = "makeinfo".to_string();
+    // AM_PROG_INSTALL_SH
+    let install_sh = srcdir.join("install-sh").to_string_lossy().to_string();
+    let install_strip_program = " -c -s".to_string();
+    // AM_SET_LEADING_DOT
+    let am__leading_dot = ".".to_string();
+    // AM_SET_DEPDIR
+    let depdir = ".deps".to_string();
+    // AM_MAKE_INCLUDE
+    let am__include = "include".to_string();
+    let am__quote = String::new();
+    // AM_DEP_TRACK
+    let amdepbackslash = "\\".to_string();
+    let am__nodep = "_no".to_string();
+    // _AM_DEPENDENCIES for various compilers
+    let ccdepmode = "depmode=gcc3".to_string();
+    let cxxdepmode = "depmode=gcc3".to_string();
+    let objcdepmode = "depmode=gcc3".to_string();
+    let objcxxdepmode = "depmode=gcc3".to_string();
+  }
+"#
+}
+
+pub(super) fn get_expansion_ac_includes_default() -> &'static str {
+    r#"#include <stdio.h>
+#ifdef HAVE_SYS_TYPES_H
+# include <sys/types.h>
+#endif
+#ifdef HAVE_SYS_STAT_H
+# include <sys/stat.h>
+#endif
+#ifdef STDC_HEADERS
+# include <stdlib.h>
+# include <stddef.h>
+#else
+# ifdef HAVE_STDLIB_H
+#  include <stdlib.h>
+# endif
+#endif
+#ifdef HAVE_STRING_H
+# if !defined STDC_HEADERS && defined HAVE_MEMORY_H
+#  include <memory.h>
+# endif
+# include <string.h>
+#endif
+#ifdef HAVE_STRINGS_H
+# include <strings.h>
+#endif
+#ifdef HAVE_INTTYPES_H
+# include <inttypes.h>
+#endif
+#ifdef HAVE_STDINT_H
+# include <stdint.h>
+#endif
+#ifdef HAVE_UNISTD_H
+# include <unistd.h>
+#endif
+"#
+}

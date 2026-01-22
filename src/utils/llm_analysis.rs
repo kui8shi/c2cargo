@@ -142,7 +142,7 @@ pub(crate) trait LLMAnalysis {
 
                     match serde_json::from_str::<Self::Output>(&text) {
                         Ok(mut result) => {
-                            println!("Result (attempt={}):\n  {:?}", attempt, result);
+                            println!("Result (attempt={}):", attempt);
                             match result.validate(evidence) {
                                 Ok(()) => {
                                     println!("  Validated.");

@@ -31,6 +31,10 @@ struct Args {
     /// Chunk window size (ignored if --full-script)
     #[arg(long, default_value = "2")]
     chunk_window_size: usize,
+
+    /// Flatten threshold (ignored if --full-script)
+    #[arg(long, default_value = "200")]
+    flatten_threshold: usize,
 }
 
 #[tokio::main]
@@ -45,10 +49,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let output_dir = &args.output_dir;
-    if output_dir.exists() {
-        std::fs::remove_dir_all(output_dir)?;
+    if !output_dir.exists() {
+        std::fs::create_dir_all(output_dir)?;
     }
-    std::fs::create_dir(output_dir)?;
 
     // Construct analyzer options from CLI arguments (if any were specified)
     let options = if args.full_script || args.no_type_inference || args.chunk_window_size != 2 {
@@ -57,6 +60,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 usize::MAX
             } else {
                 args.chunk_window_size
+            },
+            flatten_threshold: if args.full_script {
+                usize::MAX
+            } else {
+                args.flatten_threshold
             },
             type_inference: !args.no_type_inference,
             ..Default::default()
