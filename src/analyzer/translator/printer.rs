@@ -271,9 +271,9 @@ impl<'a> TranslatingPrinter<'a> {
         let mut ret = Vec::new();
         let requests = self.func_requests.borrow();
         // module imports
-        if requests.found_sed {
-            ret.push("module_regex");
-        }
+        // if requests.found_sed {
+        //     ret.push("module_regex");
+        // }
         if requests.found_pkg_config {
             ret.push("module_pkg_config");
         }
@@ -374,7 +374,7 @@ impl<'a> DisplayNode for TranslatingPrinter<'a> {
                             .collect::<Vec<_>>()
                             .join("\n");
                         self.propagate_inlined_evidence(inlined_translation.evidence.clone());
-                        return format!("{}", inlined_code);
+                        return inlined_code.to_string();
                     } else {
                         // function call for LLM-translated chunks
                         let func_name = super::rust_func_placeholder_name(chunk_id);
@@ -611,14 +611,11 @@ impl<'a> TranslatingPrinter<'a> {
 
                         let chain_parts: Vec<String> = dict_iters
                             .into_iter()
-                            .chain(
-                                if non_dict_values.is_empty() {
-                                    None
-                                } else {
-                                    Some(format!("[{}]", non_dict_values.join(", ")))
-                                }
-                                .into_iter(),
-                            )
+                            .chain(if non_dict_values.is_empty() {
+                                None
+                            } else {
+                                Some(format!("[{}]", non_dict_values.join(", ")))
+                            })
                             .collect();
 
                         let extend_expr = chain_parts.join(".chain(")
@@ -729,7 +726,7 @@ impl<'a> TranslatingPrinter<'a> {
                             // fallback
                             let key = self
                                 .analyzer
-                                .query_conditional_compilation_migration_policy(&option_name)
+                                .query_conditional_compilation_migration_policy(option_name)
                                 .and_then(|policy| policy.key.as_ref())
                                 .unwrap_or(option_name);
                             may_negate(key.into(), false ^ negated)
@@ -743,7 +740,7 @@ impl<'a> TranslatingPrinter<'a> {
                             // fallback
                             let key = self
                                 .analyzer
-                                .query_conditional_compilation_migration_policy(&option_name)
+                                .query_conditional_compilation_migration_policy(option_name)
                                 .and_then(|policy| policy.key.as_ref())
                                 .unwrap_or(option_name);
                             may_negate(key.into(), true ^ negated)
@@ -757,7 +754,7 @@ impl<'a> TranslatingPrinter<'a> {
                             // fallback
                             let key = self
                                 .analyzer
-                                .query_conditional_compilation_migration_policy(&option_name)
+                                .query_conditional_compilation_migration_policy(option_name)
                                 .and_then(|policy| policy.key.as_ref())
                                 .unwrap_or(option_name);
                             may_negate(format!("{}_{}", key, lit), false ^ negated)
@@ -879,22 +876,21 @@ impl<'a> TranslatingPrinter<'a> {
                     .iter()
                     .map(|guard| self.display_guard(guard))
                     .join(" || ");
-                if self.full_rust_mode {
-                    format!("({})", guards_str)
-                } else {
-                    guards_str
-                }
+                guards_str
             }
             Guard::And(guards) => {
                 let guards_str = guards
                     .iter()
-                    .map(|guard| self.display_guard(guard))
+                    .map(|guard| {
+                        let guard_str = self.display_guard(guard);
+                        if matches!(&guard, Guard::Or(_)) {
+                            format!("({})", guard_str)
+                        } else {
+                            guard_str
+                        }
+                    })
                     .join(" && ");
-                if self.full_rust_mode {
-                    format!("({})", guards_str)
-                } else {
-                    guards_str
-                }
+                guards_str
             }
         }
     }
@@ -1020,8 +1016,8 @@ impl<'a> TranslatingPrinter<'a> {
                     .join(",")
             )),
         };
-        if vars_in_key.len() > 0 {
-            if vars_in_value.len() > 0 {
+        if !vars_in_key.is_empty() {
+            if !vars_in_value.is_empty() {
                 todo!();
             }
             let format_key = format!(
@@ -1203,10 +1199,7 @@ impl<'a> TranslatingPrinter<'a> {
 
             let define = defines
                 .iter()
-                .find_map(|(k, v)| {
-                    k.contains(reproduce_cfg_name(&symbol).as_str())
-                        .then_some(v)
-                })
+                .find_map(|(k, v)| k.contains(reproduce_cfg_name(symbol).as_str()).then_some(v))
                 .map(|def| {
                     format!(
                         "\n{tab}{tab}{}",
@@ -1253,7 +1246,7 @@ impl<'a> TranslatingPrinter<'a> {
             let define = defines
                 .iter()
                 .find_map(|(k, v)| {
-                    k.contains(reproduce_cfg_name(&function).as_str())
+                    k.contains(reproduce_cfg_name(function).as_str())
                         .then_some(v)
                 })
                 .map(|def| {
@@ -1850,11 +1843,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
     fn display_m4_macro(&self, macro_call: &M4Macro, indent_level: usize) -> String {
         let tab = " ".repeat(indent_level * Self::M4_TAB_WIDTH);
         let node_id = self.node_cursor.get().unwrap();
-        if let Some(effects) = self
-            .analyzer
-            .side_effects_of_frozen_macros()
-            .get(&node_id)
-        {
+        if let Some(effects) = self.analyzer.side_effects_of_frozen_macros().get(&node_id) {
             return effects
                 .vars
                 .iter()
@@ -1967,7 +1956,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 } else {
                     let tags = macro_call.get_arg_as_array(0).unwrap();
                     tags.iter()
-                        .flat_map(|tag| split_tag_word(tag))
+                        .flat_map(split_tag_word)
                         .map(|(dst, src)| {
                             (self.display_word(&dst, true), self.display_word(&src, true))
                         })
@@ -1979,7 +1968,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     .join("\n")
             }
             "AC_DEFINE" => {
-                let key = match macro_call.args.get(0).unwrap() {
+                let key = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
                     M4Argument::Literal(lit) => lit.to_owned(),
                     _ => unreachable!(),
@@ -1989,7 +1978,7 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 format!("{tab}{}", self.enclose_by_rust_tags(ret, false))
             }
             "AC_DEFINE_UNQUOTED" => {
-                let key = match macro_call.args.get(0).unwrap() {
+                let key = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => word,
                     M4Argument::Literal(lit) => &(lit.clone().into()),
                     _ => unreachable!(),
@@ -2004,9 +1993,9 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 format!("{tab}{}", self.enclose_by_rust_tags(ret, false))
             }
             "AC_CHECK_HEADER" => {
-                let header = match macro_call.args.get(0).unwrap() {
+                let header = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
-                    M4Argument::Literal(lit) => lit.clone().into(),
+                    M4Argument::Literal(lit) => lit.clone(),
                     _ => unreachable!(),
                 };
                 let action_if_found = macro_call.get_arg_as_cmd(1);
@@ -2045,14 +2034,14 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 )
             }
             "AC_CHECK_LIB" => {
-                let library = match macro_call.args.get(0).unwrap() {
+                let library = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
-                    M4Argument::Literal(lit) => lit.clone().into(),
+                    M4Argument::Literal(lit) => lit.clone(),
                     _ => unreachable!(),
                 };
                 let function = match macro_call.args.get(1).unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
-                    M4Argument::Literal(lit) => lit.clone().into(),
+                    M4Argument::Literal(lit) => lit.clone(),
                     _ => unreachable!(),
                 };
                 let action_if_found = macro_call.get_arg_as_cmd(2);
@@ -2075,9 +2064,9 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 )
             }
             "AC_SEARCH_LIBS" => {
-                let function = match macro_call.args.get(0).unwrap() {
+                let function = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
-                    M4Argument::Literal(lit) => lit.clone().into(),
+                    M4Argument::Literal(lit) => lit.clone(),
                     _ => unreachable!(),
                 };
                 let libraries = macro_call
@@ -2106,9 +2095,9 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 )
             }
             "AC_CHECK_DECL" => {
-                let symbol = match macro_call.args.get(0).unwrap() {
+                let symbol = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
-                    M4Argument::Literal(lit) => lit.clone().into(),
+                    M4Argument::Literal(lit) => lit.clone(),
                     _ => unreachable!(),
                 };
                 let action_if_found = macro_call.get_arg_as_cmd(1);
@@ -2147,9 +2136,9 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 )
             }
             "AC_CHECK_FUNC" => {
-                let function = match macro_call.args.get(0).unwrap() {
+                let function = match macro_call.args.first().unwrap() {
                     M4Argument::Word(word) => self.display_word(word, false),
-                    M4Argument::Literal(lit) => lit.clone().into(),
+                    M4Argument::Literal(lit) => lit.clone(),
                     _ => unreachable!(),
                 };
                 let action_if_found = macro_call.get_arg_as_cmd(1);
@@ -2340,8 +2329,8 @@ fn split_tag_word(tag: &AcWord) -> Option<(AcWord, AcWord)> {
                 .map(|frag| frag == &WordFragment::Colon)
                 .unwrap_or_default()
         }) {
-            let first = Word::Concat(words[..colon_pos].iter().cloned().collect()).into();
-            let after_words = words[colon_pos + 1..].iter().cloned().collect::<Vec<_>>();
+            let first = Word::Concat(words[..colon_pos].to_vec()).into();
+            let after_words = words[colon_pos + 1..].to_vec();
             let second = if after_words.is_empty() {
                 Word::Empty
             } else {

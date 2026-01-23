@@ -188,7 +188,7 @@ impl Analyzer {
     fn consume_notice_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
         let macro_calls = self.macro_calls();
-        for notice_macro in ["AC_PREREQ", "AC_COPYRIGHT", "AC_REVISION", "AH_TOP"] {
+        for notice_macro in ["AC_PREREQ", "AC_COPYRIGHT", "AC_REVISION", "AH_TOP", "LT_PREREQ"] {
             if let Some(v) = macro_calls.get(notice_macro) {
                 for (node_id, _) in v {
                     remove_nodes.insert(*node_id);
@@ -360,7 +360,7 @@ impl Analyzer {
                 let prog = macro_call.get_arg_as_program(1).unwrap();
                 if let Some(template) = as_single(&prog).and_then(as_shell).and_then(as_literal) {
                     let undef_re = Regex::new(r"(?m)^#undef\s+(?<key>[a-zA-Z0-9_]+)").unwrap();
-                    for cap in undef_re.captures_iter(&template) {
+                    for cap in undef_re.captures_iter(template) {
                         let key = cap.name("key").unwrap().as_str().to_string();
                         cpp_defs.insert(key);
                     }

@@ -70,7 +70,7 @@ impl Analyzer {
             .collect()
     }
 
-    fn get_project_other_paths(&self) -> HashSet<&Path> {
+    pub(crate) fn get_project_other_paths(&self) -> HashSet<&Path> {
         self.project_info
             .subst_files
             .iter()
@@ -85,13 +85,13 @@ impl Analyzer {
             .collect::<HashSet<_>>()
     }
 
-    pub(crate) fn get_project_other_contents(&self) -> Vec<&str> {
+    pub(crate) fn get_project_other_contents(&self) -> Vec<(&Path, &str)> {
         self.project_info
             .other_contents
             .as_ref()
             .unwrap()
-            .values()
-            .map(|s| s.as_str())
+            .iter()
+            .map(|(p, c)| (p.as_path(), c.as_str()))
             .collect()
     }
 }

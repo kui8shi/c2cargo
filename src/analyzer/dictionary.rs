@@ -30,7 +30,7 @@ impl DictionaryKey {
         use DictionaryKey::*;
         match self {
             Lit(lit) => format!("\"{}\"", lit),
-            Var(var) => format!("{}", var),
+            Var(var) => var.to_string(),
         }
     }
 }
@@ -237,8 +237,7 @@ fn search_dictionary_from_eval_assignment_lhs(
         let names = vec![make_dictionary_variable_name(&dict_id)];
         let assigned_value = rhs
             .as_ref()
-            .map(|rhs| make_dictionary_value(rhs, eval_loc))
-            .flatten();
+            .and_then(|rhs| make_dictionary_value(rhs, eval_loc));
 
         Some((dict_id, keys, op, names, None, assigned_value))
     } else {

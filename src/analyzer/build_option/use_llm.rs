@@ -100,9 +100,7 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
                     reps_set.iter().filter(|r| !(matches!(r.as_str(), "yes"|"no"))).collect::<Vec<_>>()
                 ))
             } else if self.enabled_by_default.is_none() {
-                errors.push(format!(
-                    r#"Binary option must be disabled or enabled by default. `enable_by_default` must not hold null."#,
-                ))
+                errors.push(r#"Binary option must be disabled or enabled by default. `enable_by_default` must not hold null."#.to_string())
             }
         }
 
@@ -111,11 +109,9 @@ impl LLMOutput<Vec<String>> for BuildOptionLLMAnalysisResult {
             && self
                 .non_boolean_default
                 .as_ref()
-                .is_none_or(|v| !self.representatives.contains(&v))
+                .is_none_or(|v| !self.representatives.contains(v))
         {
-            errors.push(format!(
-                r#"Non binary build option must have default value"#
-            ));
+            errors.push(r#"Non binary build option must have default value"#.to_string());
         }
 
         // 3) aliases must partition the non-representatives:
@@ -293,6 +289,7 @@ Extraction procedure:
   b. For each such member m, set aliases[m] to representative(state).
   c. For any alias, mapped value ∈ "representatives"
   d. For "yes" and "no", you must not map one of them to the other (e.g. "yes": "no" is prohibited).
+  e. For binary option, `enable_by_default` must not hold null.
 5. Determine enabled_by_default by the following precedence:
   a. Help text: (on)/(off) or [default=yes]/[default=no].
   b. The IF-NOT-SET default in AC_ARG_*.

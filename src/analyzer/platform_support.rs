@@ -68,7 +68,7 @@ impl PlatformSupport {
             // "target_vendor".into(),
             "host".into(),
             "host_alias".into(),
-            // "host_cpu".into(),
+            "host_cpu".into(),
             "host_os".into(),
             "host_vendor".into(),
         ]);

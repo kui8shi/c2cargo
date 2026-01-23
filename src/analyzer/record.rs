@@ -69,6 +69,7 @@ pub(crate) enum TranslationType {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Default)]
 pub(crate) struct TimingRecord {
     pub total_duration_ms: u64,
     pub parse_duration_ms: u64,
@@ -79,19 +80,6 @@ pub(crate) struct TimingRecord {
     pub type_inference_duration_ms: u64,
 }
 
-impl Default for TimingRecord {
-    fn default() -> Self {
-        Self {
-            total_duration_ms: 0,
-            parse_duration_ms: 0,
-            analysis_duration_ms: 0,
-            build_option_duration_ms: 0,
-            translation_duration_ms: 0,
-            chunk_construction_duration_ms: 0,
-            type_inference_duration_ms: 0,
-        }
-    }
-}
 
 #[derive(Debug, Default)]
 pub(crate) struct RecordCollector {
@@ -261,7 +249,7 @@ impl RecordCollector {
         let mut wtr = csv::Writer::from_path(path)?;
 
         // Write headers
-        wtr.write_record(&[
+        wtr.write_record([
             "option_name",
             "success",
             "failure_reason",
@@ -293,7 +281,7 @@ impl RecordCollector {
         let mut wtr = csv::Writer::from_path(path)?;
 
         // Write headers
-        wtr.write_record(&[
+        wtr.write_record([
             "chunk_id",
             "chunk_size",
             "translation_type",

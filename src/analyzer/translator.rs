@@ -83,11 +83,11 @@ impl ChunkTranslationMeta {
 pub(crate) struct TranslationResult {
     env_init: String,
     default_init: String,
-    main_function_body: String,
     subst_to_cpps: String,
     src_incl_conds: String,
     recording: String,
     bindgen: String,
+    main_function_body: String,
     chunk_funcs: Vec<String>,
 }
 
@@ -104,18 +104,20 @@ impl Analyzer {
             return false;
         }
 
-        if chunk.parent.is_some() && chunk.nodes.len() == 1 && chunk.io.exported.is_empty() {
-            if chunk.nodes.len() == 1 {
-                let node = self.get_node(chunk.nodes[0]).unwrap();
-                if node.info.branches.is_empty() {
+        if chunk.parent.is_some()
+            && chunk.nodes.len() == 1
+            && chunk.io.exported.is_empty()
+            && chunk.nodes.len() == 1
+        {
+            let node = self.get_node(chunk.nodes[0]).unwrap();
+            if node.info.branches.is_empty() {
+                // we should make this chunk inline
+                return true;
+            }
+            if let MayM4::Shell(ShellCommand::Brace(children)) = &node.cmd.0 {
+                if children.len() == 1 {
                     // we should make this chunk inline
                     return true;
-                }
-                if let MayM4::Shell(ShellCommand::Brace(children)) = &node.cmd.0 {
-                    if children.len() == 1 {
-                        // we should make this chunk inline
-                        return true;
-                    }
                 }
             }
         }
@@ -135,10 +137,7 @@ impl Analyzer {
     /// Translate a inlined chunk - fail fast on any complexity
     fn translate_inlined_chunk(&self, chunk_id: ChunkId) -> Option<InlinedTranslationOutput> {
         let chunk = self.chunks.get(chunk_id)?;
-        let skeleton = self
-            .chunk_skeletons()
-            .get(&chunk_id)
-            .unwrap();
+        let skeleton = self.chunk_skeletons().get(&chunk_id).unwrap();
         let mut rust_lines = Vec::new();
 
         let mut evidence = None;
@@ -330,7 +329,7 @@ impl Analyzer {
         for (i, chunk) in self.chunks.iter() {
             let last_id = *chunk.nodes.last().unwrap();
             println!(
-                "Chunk {}: parent: {:?}, nodes {:?} , exit {:?}",
+                "Chunk {}: parent: {:?}, nodes {:?} , exit {:?}, range: {:?}",
                 i,
                 chunk.parent,
                 chunk
@@ -350,6 +349,7 @@ impl Analyzer {
                     ))
                     .collect::<Vec<_>>(),
                 self.get_node(last_id).unwrap().info.exit,
+                chunk.range
             );
             println!("signature: {}", self.print_chunk_skeleton_signature(i));
             println!("header: {:?}", self.print_chunk_skeleton_body_header(i));
@@ -359,7 +359,7 @@ impl Analyzer {
                 self.print_chunk_skeleton_call_site(None, i, &format!("func{}", i))
             );
             println!("=====body=====");
-            let printer = TranslatingPrinter::new(&self, Some(&inlined_translations), false);
+            let printer = TranslatingPrinter::new(self, Some(&inlined_translations), false);
             for &id in chunk.nodes.iter() {
                 println!("{}", &printer.print_node(id));
             }
@@ -377,98 +377,14 @@ impl Analyzer {
             );
             println!("==============");
         }
+        println!("======src incl conds========");
+        println!("{}", self.construct_src_incl_conds());
     }
 
     /// Translate the scripts
     pub async fn translate(&mut self) -> TranslationResult {
         let tab = " ".repeat(TranslatingPrinter::get_tab_width());
-        let env_init = self
-            .env_vars()
-            .iter()
-            .sorted()
-            .map(|name| {
-                let data_type = self.get_data_type(name);
-                let expression = match &data_type {
-                    DataType::Boolean => format!("option_env!(\"{}\").is_some()", &name),
-                    DataType::Integer => {
-                        format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
-                    }
-                    DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => if let Some(val) = has_known_value(name) {
-                        format!("option_env!(\"{}\").unwrap_or(\"{}\").split_whitespace().map(|s| s.to_owned()).collect()", name, val)
-                    } else {
-                        format!("option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()", name)
-                    },
-                    DataType::Literal | DataType::Either(_, _) =>  if let Some(val) = has_known_value(name) {
-                        format!("option_env!(\"{}\").unwrap_or(\"{}\").to_owned()", name, val)
-                    } else {
-                        format!("option_env!(\"{}\").unwrap_or_default().to_owned()", name)
-                    },
-                    DataType::Path => format!("option_env!(\"{}\").unwrap_or(\"\").into()", &name),
-                    _ => todo!(),
-                };
-                let write_exists =
-                    self.get_scopes(name.as_str())
-                        .unwrap()
-                        .first()
-                        .is_some_and(|scope| {
-                            !scope.writers.is_empty() || !scope.overwriters.is_empty()
-                        });
-                let mutability = if write_exists { "mut " } else { "    " };
-                format!(
-                    "{tab}let {}{}: {} = {};",
-                    mutability,
-                    name,
-                    data_type.print(),
-                    expression
-                )
-            })
-            .join("\n");
 
-        let unused_subst_vars = self.subst_vars().iter().filter(|var| {
-            self.var_scopes()
-                .get(var.as_str())
-                .is_none_or(|scopes| scopes.first().is_none_or(|scope| scope.owner.is_none()))
-        });
-        let default_init = self
-            .var_scopes()
-            .iter()
-            .filter(|(_, scopes)| {
-                scopes
-                    .first()
-                    .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
-            })
-            .map(|(var_name, _)| var_name)
-            .chain(unused_subst_vars)
-            .filter(|var_name| !self.env_vars().contains(var_name.as_str()))
-            .collect::<HashSet<_>>()
-            .into_iter()
-            .sorted()
-            .map(|name| {
-                let data_type = self.get_data_type(name);
-                let mutability = if self.get_scopes(name.as_str()).is_some_and(|scopes| {
-                    scopes.first().is_some_and(|scope| {
-                        !scope.writers.is_empty() || !scope.overwriters.is_empty()
-                    })
-                }) {
-                    "mut "
-                } else {
-                    "    "
-                };
-                format!(
-                    "{tab}let {}{}: {} = Default::default();",
-                    mutability,
-                    name,
-                    data_type.print()
-                )
-            })
-            .chain(self.dicts().iter().map(|dict| {
-                let dict_type_str = self.print_dictionary_type(&dict.name);
-                format!(
-                    "{tab}let mut {}: {} = Default::default();",
-                    dict.name, dict_type_str
-                )
-            }))
-            .join("\n");
         let translated = self.translate_chunks().await;
 
         // Record each chunk translation
@@ -489,7 +405,7 @@ impl Analyzer {
             .chunks
             .iter()
             .filter(|(_, chunk)| chunk.parent.is_none())
-            .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
+            .filter(|(chunk_id, _)| translated.contains_key(chunk_id))
             .map(
                 |(chunk_id, _)| match translated.get(&chunk_id).unwrap().0.as_ref() {
                     Some(ChunkTranslationOutput::Inlined(res)) => {
@@ -515,124 +431,10 @@ impl Analyzer {
             )
             .join("\n");
 
-        let subst_to_cpps = {
-            self.conditional_compilation_map()
-                .subst_to_cpp_map
-                .iter()
-                .sorted_by_key(|(k, _)| (*k).clone())
-                .map(|(var, policy)| match &policy.mig_type {
-                    CCMigrationType::Cfg => format!(
-                        "{tab}if {} {{\n{tab}{tab}define_cfg({:?}, None);\n{tab}}}",
-                        match self.get_data_type(var) {
-                            DataType::Boolean => var.to_owned(),
-                            DataType::Literal => format!("{var} == \"yes\""),
-                            _ => todo!(),
-                        },
-                        policy.key.as_ref().unwrap()
-                    ),
-                    CCMigrationType::Env => {
-                        let expression =
-                            printer::display_var_as_rust_str(var, &self.get_data_type(var));
-                        format!(
-                            "{tab}define_env({:?}, {});",
-                            policy.key.as_ref().unwrap(),
-                            expression
-                        )
-                    }
-                    _ => unreachable!(),
-                })
-                .join("\n")
-        };
-
-        let src_incl_conds = {
-            let printer = TranslatingPrinter::new(self, None, true);
-
-            // Deduplicate by cfg_key
-            let mut src_incl_conds: std::collections::HashMap<String, _> =
-                std::collections::HashMap::new();
-
-            for conds in self
-                .conditional_compilation_map()
-                .src_incl_map
-                .values()
-            {
-                for cond in conds {
-                    src_incl_conds.entry(cond.cfg_key.clone()).or_insert(cond);
-                }
-            }
-
-            src_incl_conds
-                .values()
-                .map(|cond| {
-                    let guard = self
-                        .automake()
-                        .am_cond_to_guard
-                        .get(&cond.am_conditional_name)
-                        .unwrap();
-                    let define_cfg = format!("define_cfg({:?}, None);", cond.cfg_key);
-                    format!(
-                        "{tab}if {} {{\n{tab}{tab}{}\n{tab}}}",
-                        printer.display_guard(&guard),
-                        define_cfg
-                    )
-                })
-                .join("\n")
-        };
-
-        // Generate evaluation output section
-        let recording = {
-            let mut output = Vec::new();
-
-            // Output subst variables
-            if let Some(subst_vars) = &self.subst_vars {
-                for var_name in subst_vars.iter().sorted() {
-                    let data_type = self.get_data_type(var_name);
-                    let var_output = match data_type {
-                        DataType::List(ty) if *ty == DataType::Literal => {
-                            format!("{}.join(\" \")", var_name)
-                        }
-                        DataType::Boolean => format!("{}.to_string()", var_name),
-                        DataType::Integer => format!("{}.to_string()", var_name),
-                        DataType::Path => format!("{}.to_str().unwrap()", var_name),
-                        DataType::Optional(ty) if *ty == DataType::Literal => format!(
-                            "{}.as_ref().map(|v| v.as_str()).unwrap_or_default()",
-                            var_name
-                        ),
-                        DataType::Literal | DataType::Either(_, _) => var_name.to_string(),
-                        _ => todo!(),
-                    };
-                    output.push(format!(
-                        "{tab}record(\"subst\", \"{}\", &{});",
-                        var_name, var_output
-                    ));
-                }
-            }
-
-            output.join("\n")
-        };
-
-        let bindgen = if !self
-            .pkg_config_analyzer()
-            .pkg_check_modules_calls
-            .is_empty()
-        {
-            let mut cflags_var_names = self.project_info.cflags_var_names.clone();
-            if cflags_var_names.is_empty() {
-                cflags_var_names.push("CFLAGS".into());
-            }
-            let names = cflags_var_names
-                .iter()
-                .map(|s| s.as_str())
-                .collect::<Vec<_>>();
-            self.get_bindgen_callsite(&tab, &names)
-        } else {
-            Default::default()
-        };
-
         let chunk_funcs = self
             .chunks
             .iter()
-            .filter(|(chunk_id, _)| translated.contains_key(&chunk_id))
+            .filter(|(chunk_id, _)| translated.contains_key(chunk_id))
             .filter_map(
                 |(chunk_id, _)| match translated.get(&chunk_id).unwrap().0.as_ref() {
                     Some(ChunkTranslationOutput::Inlined(_)) => None,
@@ -652,13 +454,13 @@ impl Analyzer {
             .collect();
 
         TranslationResult {
-            env_init,
-            default_init,
+            env_init: self.construct_env_init(),
+            default_init: self.construct_default_init(),
+            subst_to_cpps: self.construct_subst_to_cpp(),
+            src_incl_conds: self.construct_src_incl_conds(),
+            recording: self.construct_recording(),
+            bindgen: self.construct_bindgen(),
             main_function_body,
-            subst_to_cpps,
-            src_incl_conds,
-            recording,
-            bindgen,
             chunk_funcs,
         }
     }
@@ -826,7 +628,7 @@ impl Analyzer {
                     .iter()
                     .filter(|(_, placeholder)| *placeholder != "inlined")
                     .map(|(dep_chunk_id, placeholder)| {
-                        self.construct_dummy_rust_func_definition(*dep_chunk_id, &placeholder)
+                        self.construct_dummy_rust_func_definition(*dep_chunk_id, placeholder)
                     })
                     .collect::<Vec<_>>()
                     .join("\n\n");
@@ -842,7 +644,7 @@ impl Analyzer {
                                 if consecutive_count > threshold {
                                     return Some(format!(
                                             "Detected excessive usage of slash characters: '{}', which must be invalid.",
-                                            std::iter::repeat('\\').take(threshold).collect::<String>()
+                                            std::iter::repeat_n('\\', threshold).collect::<String>()
                                         ));
                                 }
                             } else {
@@ -951,7 +753,7 @@ impl Analyzer {
             let chunk_size = self
                 .chunks
                 .get(chunk_id)
-                .map(|c| c.range.0.abs_diff(c.range.1))
+                .map(|c| c.range.0.abs_diff(c.range.1) + 1)
                 .unwrap_or(0);
             let output = llm_translations
                 .get(&chunk_id)
@@ -1025,6 +827,211 @@ impl Analyzer {
                 .join("\n  ")
         )
     }
+
+    fn construct_default_init(&self) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        let unused_subst_vars = self.subst_vars().iter().filter(|var| {
+            self.var_scopes()
+                .get(var.as_str())
+                .is_none_or(|scopes| scopes.first().is_none_or(|scope| scope.owner.is_none()))
+        });
+        self.var_scopes()
+            .iter()
+            .filter(|(_, scopes)| {
+                scopes
+                    .first()
+                    .is_some_and(|s| s.owner.is_none() && s.bound_by.is_none())
+            })
+            .map(|(var_name, _)| var_name)
+            .chain(unused_subst_vars)
+            .filter(|var_name| !self.env_vars().contains(var_name.as_str()))
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .sorted()
+            .map(|name| {
+                let data_type = self.get_data_type(name);
+                let mutability = if self.get_scopes(name).is_some_and(|scopes| {
+                    scopes.first().is_some_and(|scope| {
+                        !scope.writers.is_empty() || !scope.overwriters.is_empty()
+                    })
+                }) {
+                    "mut "
+                } else {
+                    "    "
+                };
+                format!(
+                    "{tab}let {}{}: {} = Default::default();",
+                    mutability,
+                    name,
+                    data_type.print()
+                )
+            })
+            .chain(self.dicts().iter().map(|dict| {
+                let dict_type_str = self.print_dictionary_type(&dict.name);
+                format!(
+                    "{tab}let mut {}: {} = Default::default();",
+                    dict.name, dict_type_str
+                )
+            }))
+            .join("\n")
+    }
+
+    fn construct_env_init(&self) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        self
+            .env_vars()
+            .iter()
+            .sorted()
+            .map(|name| {
+                let data_type = self.get_data_type(name);
+                let expression = match &data_type {
+                    DataType::Boolean => format!("option_env!(\"{}\").is_some()", &name),
+                    DataType::Integer => {
+                        format!("option_env!(\"{}\").map(|s| s.parse()).flatten().unwrap_or_default()", &name)
+                    }
+                    DataType::List(item) if matches!(item.as_ref(), DataType::Literal) => if let Some(val) = has_known_value(name) {
+                        format!("option_env!(\"{}\").unwrap_or(\"{}\").split_whitespace().map(|s| s.to_owned()).collect()", name, val)
+                    } else {
+                        format!("option_env!(\"{}\").unwrap_or_default().split_whitespace().map(|s| s.to_owned()).collect()", name)
+                    },
+                    DataType::Literal | DataType::Either(_, _) =>  if let Some(val) = has_known_value(name) {
+                        format!("option_env!(\"{}\").unwrap_or(\"{}\").to_owned()", name, val)
+                    } else {
+                        format!("option_env!(\"{}\").unwrap_or_default().to_owned()", name)
+                    },
+                    DataType::Path => format!("option_env!(\"{}\").unwrap_or(\"\").into()", &name),
+                    _ => todo!(),
+                };
+                let write_exists =
+                    self.get_scopes(name.as_str())
+                        .unwrap()
+                        .first()
+                        .is_some_and(|scope| {
+                            !scope.writers.is_empty() || !scope.overwriters.is_empty()
+                        });
+                let mutability = if write_exists { "mut " } else { "    " };
+                format!(
+                    "{tab}let {}{}: {} = {};",
+                    mutability,
+                    name,
+                    data_type.print(),
+                    expression
+                )
+            })
+            .join("\n")
+    }
+
+    fn construct_subst_to_cpp(&self) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        self.conditional_compilation_map()
+            .subst_to_cpp_map
+            .iter()
+            .sorted_by_key(|(k, _)| (*k).clone())
+            .map(|(var, policy)| match &policy.mig_type {
+                CCMigrationType::Cfg => format!(
+                    "{tab}if {} {{\n{tab}{tab}define_cfg({:?}, None);\n{tab}}}",
+                    match self.get_data_type(var) {
+                        DataType::Boolean => var.to_owned(),
+                        DataType::Literal => format!("{var} == \"yes\""),
+                        _ => todo!(),
+                    },
+                    policy.key.as_ref().unwrap()
+                ),
+                CCMigrationType::Env => {
+                    let expression =
+                        printer::display_var_as_rust_str(var, &self.get_data_type(var));
+                    format!(
+                        "{tab}define_env({:?}, {});",
+                        policy.key.as_ref().unwrap(),
+                        expression
+                    )
+                }
+                _ => unreachable!(),
+            })
+            .join("\n")
+    }
+
+    fn construct_src_incl_conds(&self) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        let printer = TranslatingPrinter::new(self, None, true);
+
+        // Deduplicate by cfg_key
+        let mut src_incl_conds: std::collections::HashMap<String, _> =
+            std::collections::HashMap::new();
+
+        for conds in self.conditional_compilation_map().src_incl_map.values() {
+            for cond in conds {
+                src_incl_conds.entry(cond.cfg_key.clone()).or_insert(cond);
+            }
+        }
+
+        src_incl_conds
+            .values()
+            .map(|cond| {
+                let guard = self
+                    .automake()
+                    .am_cond_to_guard
+                    .get(&cond.am_conditional_name)
+                    .unwrap();
+                let printed = &printer.display_guard(guard);
+                let define_cfg = format!("define_cfg({:?}, None);", cond.cfg_key);
+                format!("{tab}if {} {{\n{tab}{tab}{}\n{tab}}}", printed, define_cfg)
+            })
+            .join("\n")
+    }
+
+    fn construct_recording(&self) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+        // Generate evaluation output section
+        let mut output = Vec::new();
+        // Output subst variables
+        if let Some(subst_vars) = &self.subst_vars {
+            for var_name in subst_vars.iter().sorted() {
+                let data_type = self.get_data_type(var_name);
+                let var_output = match data_type {
+                    DataType::List(ty) if *ty == DataType::Literal => {
+                        format!("{}.join(\" \")", var_name)
+                    }
+                    DataType::Boolean => format!("if {} {{ \"1\" }} else {{ \"0\" }}", var_name),
+                    DataType::Integer => format!("{}.to_string()", var_name),
+                    DataType::Path => format!("{}.to_str().unwrap()", var_name),
+                    DataType::Optional(ty) if *ty == DataType::Literal => format!(
+                        "{}.as_ref().map(|v| v.as_str()).unwrap_or_default()",
+                        var_name
+                    ),
+                    DataType::Literal | DataType::Either(_, _) => var_name.to_string(),
+                    _ => todo!(),
+                };
+                output.push(format!(
+                    "{tab}record(\"subst\", \"{}\", &{});",
+                    var_name, var_output
+                ));
+            }
+        }
+        output.join("\n")
+    }
+
+    fn construct_bindgen(&self) -> String {
+        let tab = " ".repeat(TranslatingPrinter::get_tab_width());
+
+        if !self
+            .pkg_config_analyzer()
+            .pkg_check_modules_calls
+            .is_empty()
+        {
+            let mut cflags_var_names = self.project_info.cflags_var_names.clone();
+            if cflags_var_names.is_empty() {
+                cflags_var_names.push("CFLAGS".into());
+            }
+            let names = cflags_var_names
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>();
+            self.get_bindgen_callsite(&tab, &names)
+        } else {
+            Default::default()
+        }
+    }
 }
 
 fn rust_func_placeholder_name(chunk_id: ChunkId) -> String {
@@ -1076,7 +1083,9 @@ impl Analyzer {
         self.path.to_str().unwrap().hash(&mut hasher);
 
         // Hash all chunks content to ensure cache validity
-        for (chunk_id, chunk) in &self.chunks {
+        // for (chunk_id, chunk) in &self.chunks {
+        for chunk in &self.get_topologically_sorted_chunks() {
+            let chunk_id = chunk.chunk_id;
             chunk_id.hash(&mut hasher);
 
             // Hash the chunk's script content
@@ -1142,13 +1151,12 @@ fn main() {{
             &res.recording,
             &res.chunk_funcs.join("\n\n")
         );
-        let formatted = RustFmt::default().format_str(&build_rs).unwrap_or(build_rs);
-        formatted
+
+        RustFmt::default().format_str(&build_rs).unwrap_or(build_rs)
     }
 
     fn get_predefinition_with_recording(&self, record_path: &str) -> String {
         use_llm::get_predefinition(&[
-            "module_regex",
             "module_pkg_config",
             "write_file",
             "define_cfg_with_record",
@@ -1163,7 +1171,7 @@ fn main() {{
             "pkg_config",
         ]) + &get_function_definition_record(record_path)
             + "\n"
-            + &get_function_definition_bindgen()
+            + get_function_definition_bindgen()
     }
 
     fn get_bindgen_callsite(&self, tab: &str, cflags_var_names: &[&str]) -> String {

@@ -2,6 +2,7 @@
 use std::{collections::HashMap, path::Path};
 
 use bincode::{Decode, Encode};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -35,7 +36,7 @@ pub(super) struct LLMBasedTranslationInput {
 impl LLMBasedTranslationInput {
     pub fn new(id: usize, script: String, skeleton: String, required_funcs: &[String]) -> Self {
         let req = required_funcs
-            .into_iter()
+            .iter()
             .map(|s| s.as_str())
             .collect::<Vec<_>>();
         Self {
@@ -66,7 +67,7 @@ impl LLMBasedTranslationOutput {
 pub(super) fn get_predefinition(required_funcs: &[&str]) -> String {
     let predefinitions = HashMap::from([
         (
-            "default_modules",
+            "modules_std",
             r#"
 use std::{
     fs::{self, OpenOptions},
@@ -157,7 +158,7 @@ fn sanitize_rust_name(s: &str) -> String {
         ("check_link", get_function_definition_check_link()),
         ("pkg_config", get_function_definition_pkg_config()),
     ]);
-    ["default_modules", "execute_cmd"]
+    ["modules_std", "module_regex", "execute_cmd"]
         .iter()
         .chain(required_funcs.iter())
         .map(|key| predefinitions.get(key).unwrap())
@@ -218,8 +219,12 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
         }
 
         // banned pattern check
+        let comment_re = Regex::new(r#"/\*(?s:.*?)\*/|//.*"#).expect("Invalid regex");
         for (banned, reason) in evidence.banned.iter() {
-            if self.rust_func_body.contains(banned) {
+            if self.rust_func_body.lines().any(|line| {
+                let line_without_comment = comment_re.replace_all(&line, "");
+                line_without_comment.contains(banned)
+            }) {
                 err.push(format!("Banned pattern detected: {}. {}", banned, reason));
             }
         }
@@ -265,7 +270,7 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
             let src_dir = check_dir.join("src");
 
             // Create project directory if it doesn't exist
-            std::fs::create_dir_all(&src_dir).unwrap_or_else(|_| {});
+            std::fs::create_dir_all(&src_dir).unwrap_or(());
 
             // Create Cargo.toml if it doesn't exist
             let cargo_toml_path = check_dir.join("Cargo.toml");
@@ -358,17 +363,12 @@ fn detect_no_op_patterns(src: &str, values: &Vec<String>) -> Result<(), Vec<Stri
     let patterns = [r#"let\s+_[A-Za-z0-9_]*\s*=\s*_[A-Za-z0-9_]*"#]
         .map(|pat| pat.to_owned())
         .into_iter()
-        .chain(
-            values
-                .iter()
-                .map(|val| {
-                    [
-                        format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val)),
-                        format!(r#"format!("{{}}", {})"#, regex::escape(val)),
-                    ]
-                })
-                .flatten(),
-        );
+        .chain(values.iter().flat_map(|val| {
+            [
+                format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val)),
+                format!(r#"format!("{{}}", {})"#, regex::escape(val)),
+            ]
+        }));
     for pat in patterns {
         if let Ok(re) = regex::Regex::new(&pat) {
             for mat in re.find_iter(src) {
@@ -439,6 +439,7 @@ Input format:
    - Map shell variables to appropriate Rust types (`String`, `bool`, `Vec<String>`, `PathBuf`).
    - Local Flexibility: For variables strictly internal to the function (not arguments or return values), you are free to rename them and retype them (e.g., converting a "yes" string flag to a Rust `bool`, or renaming variables for clarity).
    - Interface Strictness: Variables that are part of the function arguments or the final return tuple must match the skeleton's definition exactly.
+   - List Values: Variables typed as Vec<String> must be initialized appropriately. For example, if we have LIST = "a b", LIST is intended to be initialized by ["a", "b"] rather than ["a b"]. (Especially, if you were to mistakenly initialize vectorized CFLAGS, every compile test will fail.)
 
 4. Command Execution
    - Translate shell commands into `std::process::Command` calls.

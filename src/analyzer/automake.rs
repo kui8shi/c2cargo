@@ -1,5 +1,3 @@
-use std::ffi::OsStr;
-use std::process::Command;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
@@ -201,7 +199,7 @@ impl Analyzer {
     }
 
     fn analyze_automake_file(&mut self, path: &Path, mut condition: Vec<AmGuard>) -> AutomakeFile {
-        let path = std::fs::canonicalize(path).expect(&format!("Unable to find {:?}", path));
+        let path = std::fs::canonicalize(path).unwrap_or_else(|_| panic!("Unable to find {:?}", path));
         let project_dir = self.project_info.project_dir.clone();
         let contents = load_automake_file(&path, &project_dir);
         let lexer = Lexer::new(contents.chars());
@@ -734,16 +732,15 @@ impl Analyzer {
                         .iter()
                         .chain(target.links.iter())
                         // .filter(|v| v.am_cond.is_empty()) // FIXME
-                        .filter(|v| v.value.extension().is_some_and(|ext| is_c_extension(ext)))
-                        .filter(|v| !am_file.built_sources.contains(&v.value))
-                        .map(|v| v.clone()),
+                        .filter(|v| v.value.extension().is_some_and(is_c_extension))
+                        .filter(|v| !am_file.built_sources.contains(&v.value)).cloned(),
                 );
             }
             built_files.extend(
                 am_file
                     .built_sources
                     .iter()
-                    .filter(|&v| v.extension().is_some_and(|ext| is_c_extension(ext)))
+                    .filter(|&v| v.extension().is_some_and(is_c_extension))
                     .cloned(),
             );
         }
@@ -760,7 +757,7 @@ impl Analyzer {
                 am_file
                     .built_sources
                     .iter()
-                    .filter(|&v| v.extension().is_some_and(|ext| is_h_extension(ext)))
+                    .filter(|&v| v.extension().is_some_and(is_h_extension))
                     .cloned()
             })
             .collect();
@@ -791,10 +788,9 @@ impl Analyzer {
                 self.automake()
                     .files
                     .values()
-                    .map(|automake_file| automake_file.include_paths.iter().map(|p| p.as_path()))
-                    .flatten(),
+                    .flat_map(|automake_file| automake_file.include_paths.iter().map(|p| p.as_path())),
             )
-            .map(|path| normalize_path(path))
+            .map(normalize_path)
             .unique()
             .collect::<Vec<_>>();
         let (internal_headers, other_headers) = get_included_headers(&c_files, &include_paths);
@@ -912,10 +908,8 @@ fn get_included_headers(
                     internal_headers.insert(path.to_owned());
                     queue.push_back(path.to_owned());
                 }
-            } else {
-                if visited.insert(header_path.to_owned()) {
-                    other_headers.insert(header_path);
-                }
+            } else if visited.insert(header_path.to_owned()) {
+                other_headers.insert(header_path);
             }
         }
     }

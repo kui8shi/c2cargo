@@ -111,8 +111,7 @@ impl Analyzer {
     pub(crate) fn get_inferred_type(&self, var_name: &str) -> Option<&DataType> {
         self.inferred_types
             .as_ref()
-            .map(|types| types.get(var_name))
-            .flatten()
+            .and_then(|types| types.get(var_name))
     }
 
     /// run type inference
@@ -125,8 +124,7 @@ impl Analyzer {
     pub(crate) fn get_data_type(&self, name: &str) -> DataType {
         if self.options.type_inference {
             if let Some(inferred) = self
-                .get_inferred_type(name)
-                .map(|data_type| data_type.clone())
+                .get_inferred_type(name).cloned()
             {
                 inferred
             } else {
@@ -310,8 +308,7 @@ impl<'a> TypeInferrer<'a> {
             {
                 let from_types = from_set
                     .iter()
-                    .map(|from| self.types.get(from.as_str()))
-                    .flatten()
+                    .filter_map(|from| self.types.get(from.as_str()))
                     .collect::<HashSet<_>>();
                 if from_types.len() == 1 {
                     let data_type = from_types.into_iter().next().unwrap();
@@ -327,8 +324,7 @@ impl<'a> TypeInferrer<'a> {
             {
                 let to_types = to_set
                     .iter()
-                    .map(|to| self.types.get(to.as_str()))
-                    .flatten()
+                    .filter_map(|to| self.types.get(to.as_str()))
                     .collect::<HashSet<_>>();
                 if to_types.len() == 1 {
                     let data_type = to_types.into_iter().next().unwrap();
@@ -525,7 +521,7 @@ impl<'a> AstVisitor for TypeInferrer<'a> {
 }
 
 pub(crate) fn is_boolean(lit: &str) -> bool {
-    matches!(lit, "yes" | "no" | "0" | "1")
+    matches!(lit, "yes" | "no" | "0" | "1" | "true" | "false" | "on" | "off")
 }
 
 pub(crate) fn is_numeric(lit: &str) -> bool {

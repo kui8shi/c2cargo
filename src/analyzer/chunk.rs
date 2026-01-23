@@ -553,7 +553,7 @@ impl Analyzer {
                         {
                             // Turns out the variable to be defined **conditionally** in the chunk.
                             current_scope.overwriters.push(cid);
-                        } else if self.is_substituted(&var) {
+                        } else if self.is_substituted(var) {
                             // the variable will be exported to the outside of configure.ac,
                             // therefore it's scope is global.
                             current_scope.writers.push(cid);
@@ -616,7 +616,7 @@ impl Analyzer {
             }
             if !current_scope.overwriters.is_empty()
                 || !current_scope.readers.is_empty()
-                || self.is_substituted(&var)
+                || self.is_substituted(var)
             {
                 if let Some(may_first_def) = current_scope.writers.pop() {
                     if current_scope

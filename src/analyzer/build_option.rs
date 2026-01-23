@@ -104,7 +104,7 @@ impl Analyzer {
 
         // remove build option declaraton nodes from targets of later analyses
         self.remove_build_option_declarations();
-        self.apply_non_empty_property_of_cargo_features();
+        self.approx_empty_property_of_build_options();
     }
 
     /// Analyze various properties of build options using LLMs
@@ -117,14 +117,14 @@ impl Analyzer {
                 self.build_option_info_mut()
                     .cargo_features
                     .replace(cached_features);
-                self.apply_non_empty_property_of_cargo_features();
+                self.approx_empty_property_of_build_options();
                 return;
             }
         }
 
         // conduct llm analysis
         let mut user = use_llm::LLMUser::new();
-        let max_retries = 3;
+        let max_retries = 5;
         let results = user
             .run_llm_analysis(
                 self.build_option_info()
@@ -179,7 +179,7 @@ impl Analyzer {
                 .unwrap()
                 .insert(output.option_name.clone(), features);
         }
-        self.apply_non_empty_property_of_cargo_features();
+        self.approx_empty_property_of_build_options();
 
         // Save to cache if enabled
         if self.options.use_build_option_cache {
@@ -589,8 +589,8 @@ impl Analyzer {
         features
     }
 
-    /// convert some conditions according to the assumption of empty properties of cargo features
-    fn apply_non_empty_property_of_cargo_features(&mut self) {
+    /// convert some conditions according to an assumption related to empty properties of build options
+    fn approx_empty_property_of_build_options(&mut self) {
         let arg_var_to_option_name = self.build_option_info().arg_var_to_option_name.clone();
         let cargo_features = self.build_option_info().cargo_features.clone();
         for (_, block) in self.blocks.iter_mut() {
@@ -719,9 +719,9 @@ fn convert_empty_argument_guards(
                     }
                 }
                 // the argument variable found to have no valid state anymore.
-                // if negated, evaluated to ⊤,
-                // else, evaluated to ⊥.
-                Err(*negated)
+                // if negated, evaluated to ⊥.
+                // else, evaluated to ⊤.
+                Err(!negated)
             }
             _ => Ok(guard.clone()),
         },

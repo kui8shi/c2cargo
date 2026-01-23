@@ -41,21 +41,21 @@ impl Analyzer {
                         }
                     }
                 }
-                Shell(Cmd(cmd_words))
-                    if node.info.parent.is_some_and(|parent| {
+                Shell(Cmd(cmd_words)) => {
+                    if node.info.parent.is_none_or(|parent| {
                         match &self.get_node(parent).unwrap().cmd.0 {
                             // we need to skip commands wrapped by these components.
                             Shell(And(_, _) | Or(_, _) | Pipe(_, _) | Redirect(_, _)) => false,
                             _ => true,
                         }
-                    }) =>
-                {
-                    let first_word = cmd_words.first().unwrap();
-                    if let Some("cat" | "echo") = as_single(first_word)
-                        .and_then(as_shell)
-                        .and_then(as_literal)
-                    {
-                        remove_nodes.insert(node_id);
+                    }) {
+                        let first_word = cmd_words.first().unwrap();
+                        if let Some("cat" | "echo") = as_single(first_word)
+                            .and_then(as_shell)
+                            .and_then(as_literal)
+                        {
+                            remove_nodes.insert(node_id);
+                        }
                     }
                 }
                 _ => (),

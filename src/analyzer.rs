@@ -1377,7 +1377,7 @@ impl Analyzer {
             toml_content.push_str("edition = \"2021\"\n");
         }
 
-        toml_content.push_str("\n");
+        toml_content.push('\n');
 
         // Add analyzed build options as Cargo features
         if let Some(build_option_info) = &self.build_option_info {
@@ -1419,18 +1419,16 @@ impl Analyzer {
                                 .feature_dependencies
                                 .get(option_name.as_str())
                                 .iter()
-                                .map(|deps| {
+                                .flat_map(|deps| {
                                     deps.iter()
-                                        .map(|dep_opt_name| {
+                                        .flat_map(|dep_opt_name| {
                                             cargo_features
                                                 .get(dep_opt_name)
                                                 .unwrap()
                                                 .iter()
                                                 .map(|feature| feature.name.as_str())
                                         })
-                                        .flatten()
                                 })
-                                .flatten()
                                 .map(|f| format!("\"{}\"", f))
                                 .join(", ");
                             toml_content.push_str(&format!(
@@ -1440,7 +1438,7 @@ impl Analyzer {
                         }
                     }
 
-                    toml_content.push_str("\n");
+                    toml_content.push('\n');
                 }
             }
         }

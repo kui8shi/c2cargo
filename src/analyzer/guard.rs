@@ -967,13 +967,10 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 {
                     pattern_guard = converted;
                     false
+                } else if self.in_condition && is_match_any {
+                    false
                 } else {
-                    if self.in_condition && is_match_any {
-                        false
-                    } else {
-                        //true
-                        !is_match_any
-                    }
+                    !is_match_any
                 }
             } else {
                 false
@@ -988,6 +985,10 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 }
                 removing_arm_indexes.push(arm_index);
             } else if self.in_condition {
+                // This case is super rare.
+                // we've encountered a case statement in the midst of visiting conditions.
+                // in another words, this case command's return value is being used as a condition,
+                // just like `test` command.
                 if arm.body.len() > 1 {
                     todo!("multiple commands found in an arm of case statement that is used as a condition");
                 }
@@ -996,11 +997,13 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 let arm_guard = if is_match_any {
                     cmd_guard
                 } else {
+                    // merge an arm's condition and (hopefully) a test command into a conjunctive norm.
                     Guard::And(vec![pattern_guard, cmd_guard])
                 };
                 let case_as_guard = if let Some(guard) = self.node_as_guard.take() {
                     match guard {
                         Guard::Or(mut v) => {
+                            // accumulate case arms as disjunctive (logical Or) conditions
                             v.push(arm_guard);
                             Guard::Or(v)
                         }
@@ -1030,11 +1033,9 @@ impl<'a> AstVisitor for GuardAnalyzer<'a> {
                 _ => unreachable!(),
             }
         }
-        if self.in_condition {
-            if self.node_as_guard.is_none() {
-                self.node_as_guard
-                    .replace(Guard::confirmed(Atom::Tautology));
-            }
+        if self.in_condition && self.node_as_guard.is_none() {
+            self.node_as_guard
+                .replace(Guard::confirmed(Atom::Tautology));
         }
         self.guard_stack = saved_stack;
     }

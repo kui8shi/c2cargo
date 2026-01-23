@@ -1,4 +1,5 @@
 use super::Analyzer;
+use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -118,11 +119,18 @@ impl Analyzer {
                     }
                 }
             } else {
-                let contents = self
-                    .get_project_source_contents()
-                    .into_iter()
-                    .chain(self.get_project_other_contents().into_iter())
-                    .collect::<Vec<_>>();
+                let contents =
+                    self.get_project_source_contents()
+                        .into_iter()
+                        .chain(self.get_project_other_contents().into_iter().filter_map(
+                            |(p, c)| {
+                                p.file_name()?
+                                    .to_string_lossy()
+                                    .ends_with(".h.in")
+                                    .then_some(c)
+                            },
+                        ))
+                        .collect::<Vec<_>>();
                 if detect_value_usage(&symbol_may_prefixed, &contents) {
                     CCMigraionPolicy {
                         mig_type: CCMigrationType::Env,
@@ -167,7 +175,7 @@ impl Analyzer {
         }
         let mut src_incl_map = HashMap::new();
         for file in self.project_info.c_files.iter() {
-            if file.am_cond.len() > 0 {
+            if !file.am_cond.is_empty() {
                 let conditionals = file
                     .am_cond
                     .iter()
@@ -318,15 +326,12 @@ fn parse_ac_subst_header(
         }
 
         if let Some((symbol_name, may_subst_value)) = create_entry(cap) {
-            match may_subst_value {
-                Some(subst_value) => {
-                    if detect_value_usage(&symbol_name, source_contents) {
-                        results.push(ACSubstVarToCPPSymbol::Subst(subst_value, symbol_name));
-                    } else if source_contents.iter().any(|src| src.contains(&symbol_name)) {
-                        results.push(ACSubstVarToCPPSymbol::Condition(subst_value, symbol_name));
-                    }
+            if let Some(subst_value) = may_subst_value {
+                if detect_value_usage(&symbol_name, source_contents) {
+                    results.push(ACSubstVarToCPPSymbol::Subst(subst_value, symbol_name));
+                } else if source_contents.iter().any(|src| src.contains(&symbol_name)) {
+                    results.push(ACSubstVarToCPPSymbol::Condition(subst_value, symbol_name));
                 }
-                _ => (),
             }
         }
     }

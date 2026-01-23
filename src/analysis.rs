@@ -79,8 +79,7 @@ pub(crate) async fn analysis(
     // Export record data
     let target_name = analyzer
         .get_project_metadata()
-        .map(|meta| meta.name.as_ref().map(|s| s.as_str()))
-        .flatten()
+        .and_then(|meta| meta.name.as_deref())
         .unwrap_or("unknown");
     let project_name = format!("{}-rs", target_name);
     let record_dir = output_dir.join("record");

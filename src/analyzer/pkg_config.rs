@@ -68,7 +68,7 @@ impl SystemPackageManager for AptPackageManager {
         // check if the package is installed
         let output = Command::new("dpkg")
             .arg("-s")
-            .arg(&package_name)
+            .arg(package_name)
             .output()
             .map_err(|e| {
                 PkgConfigError::SystemPackageManagerError(format!("dpkg command failed: {}", e))
@@ -106,7 +106,7 @@ impl SystemPackageManager for AptPackageManager {
                 // apt-file output format: "package: /path/to/file"
                 let path_part = line.split(':').nth(1)?.trim();
                 let path = PathBuf::from(path_part);
-                if path.extension().map_or(false, |ext| is_h_extension(ext)) {
+                if path.extension().is_some_and(is_h_extension) {
                     Some(path)
                 } else {
                     None
@@ -236,7 +236,7 @@ impl UnixCompilerIncludeProvider {
 impl SystemIncludePathProvider for UnixCompilerIncludeProvider {
     fn get_default_include_paths(&self) -> Result<Vec<PathBuf>, PkgConfigError> {
         let output = Command::new(&self.compiler)
-            .args(&["-E", "-v", "-"])
+            .args(["-E", "-v", "-"])
             .arg("/dev/null")
             .output()
             .map_err(|e| {
@@ -478,7 +478,7 @@ impl PkgConfigAnalyzer {
                     format!(
                         "USE_PKG_{}",
                         self.system_package_manager
-                            .sanitize_package_name(&system_package_name)
+                            .sanitize_package_name(system_package_name)
                     )
                 },
                 headers: Default::default(),
@@ -488,7 +488,7 @@ impl PkgConfigAnalyzer {
         // Get headers from system package
         let headers = self
             .system_package_manager
-            .get_package_headers(&system_package_name)?;
+            .get_package_headers(system_package_name)?;
 
         // Get include paths from pkg-config
         let include_paths = self.get_pc_library(pc_name).unwrap().include_paths;
