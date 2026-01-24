@@ -3,9 +3,9 @@ use std::{
     collections::HashMap,
 };
 
-/// Placeholder format for heredoc content.
-/// The format is "__HEREDOC_<index>__" followed by " {}" for each variable.
-const HEREDOC_PLACEHOLDER_PREFIX: &str = "__HEREDOC_";
+/// Placeholder format for code content (heredocs, C code in check_* functions, etc.).
+/// The format is "__CODE_<index>__" followed by " {}" for each variable.
+const CODE_PLACEHOLDER_PREFIX: &str = "__CODE_";
 
 use super::InlinedTranslationOutput;
 use crate::analyzer::{
@@ -60,6 +60,10 @@ pub(super) struct FuncRequests {
     found_check_compile: bool,
     /// Whether we have found a usage of AC_LINK_IFELSE/AC_TRY_LINK
     found_check_link: bool,
+    /// Whether we have found a usage of AC_CHECK_TYPE/AC_CHECK_TYPES
+    found_check_type: bool,
+    /// Whether we have found a usage of AC_CHECK_SIZEOF
+    found_check_sizeof: bool,
 }
 
 impl FuncRequests {
@@ -76,6 +80,8 @@ impl FuncRequests {
         self.found_check_func |= other.found_check_func;
         self.found_check_compile |= other.found_check_compile;
         self.found_check_link |= other.found_check_link;
+        self.found_check_type |= other.found_check_type;
+        self.found_check_sizeof |= other.found_check_sizeof;
     }
 }
 
@@ -116,10 +122,11 @@ pub(crate) struct TranslatingPrinter<'a> {
     inlined_translations: Option<&'a HashMap<ChunkId, InlinedTranslationOutput>>,
     /// keys for required funcs
     func_requests: RefCell<FuncRequests>,
-    /// Heredoc placeholders: (placeholder_format, original_format)
-    heredoc_placeholders: RefCell<Vec<(String, String)>>,
-    /// Counter for generating unique heredoc placeholder IDs
-    heredoc_counter: Cell<usize>,
+    /// Code placeholders: (placeholder_format, original_format)
+    /// Used for heredocs, C code in check_* functions, etc.
+    code_placeholders: RefCell<Vec<(String, String)>>,
+    /// Counter for generating unique code placeholder IDs
+    code_counter: Cell<usize>,
 }
 
 impl<'a> std::fmt::Debug for TranslatingPrinter<'a> {
@@ -168,8 +175,8 @@ impl<'a> TranslatingPrinter<'a> {
             called_macros: RefCell::new(Vec::new()),
             inlined_translations,
             func_requests: RefCell::new(FuncRequests::default()),
-            heredoc_placeholders: RefCell::new(Vec::new()),
-            heredoc_counter: Cell::new(0),
+            code_placeholders: RefCell::new(Vec::new()),
+            code_counter: Cell::new(0),
         }
     }
 
@@ -213,25 +220,29 @@ impl<'a> TranslatingPrinter<'a> {
             .collect()
     }
 
-    /// Create a heredoc placeholder and store the mapping.
-    /// Returns the placeholder format string (e.g., "__HEREDOC_0__" or "__HEREDOC_0__ {} {}").
-    fn create_heredoc_placeholder(&self, original_format: String, num_vars: usize) -> String {
-        let index = self.heredoc_counter.get();
-        self.heredoc_counter.set(index + 1);
+    /// Create a code placeholder and store the mapping.
+    /// Returns the placeholder format string (e.g., "__CODE_0__" or "__CODE_0__ {} {}").
+    fn create_code_placeholder(&self, original_format: String, num_vars: usize) -> String {
+        if original_format.is_empty() {
+            // if it's empty, just let it be.
+            return original_format;
+        }
+        let index = self.code_counter.get();
+        self.code_counter.set(index + 1);
         let placeholder_suffix = " {}".repeat(num_vars);
         let placeholder_format = format!(
             "{}{}__{}",
-            HEREDOC_PLACEHOLDER_PREFIX, index, placeholder_suffix
+            CODE_PLACEHOLDER_PREFIX, index, placeholder_suffix
         );
-        self.heredoc_placeholders
+        self.code_placeholders
             .borrow_mut()
             .push((placeholder_format.clone(), original_format));
         placeholder_format
     }
 
-    /// Get the collected heredoc placeholders: (placeholder_format, original_format)
-    pub fn get_heredoc_placeholders(&self) -> Vec<(String, String)> {
-        self.heredoc_placeholders.borrow().clone()
+    /// Get the collected code placeholders: (placeholder_format, original_format)
+    pub fn get_code_placeholders(&self) -> Vec<(String, String)> {
+        self.code_placeholders.borrow().clone()
     }
 
     fn enclose_by_rust_tags(&self, fragment: String, require: bool) -> String {
@@ -306,6 +317,12 @@ impl<'a> TranslatingPrinter<'a> {
         if requests.found_check_link {
             ret.push("check_link");
         }
+        if requests.found_check_type {
+            ret.push("check_type");
+        }
+        if requests.found_check_sizeof {
+            ret.push("check_sizeof");
+        }
         ret.into_iter().map(|s| s.to_owned()).collect()
     }
 
@@ -331,7 +348,7 @@ impl<'a> TranslatingPrinter<'a> {
                 .extend(e.required_snippets);
             self.func_requests.borrow_mut().merge(e.func_requests);
             self.cargo_features.borrow_mut().extend(e.features);
-            self.heredoc_placeholders
+            self.code_placeholders
                 .borrow_mut()
                 .extend(e.placeholders);
         }
@@ -1076,17 +1093,29 @@ impl<'a> TranslatingPrinter<'a> {
         headers: &[String],
         action_if_found: Option<&Vec<NodeId>>,
         action_if_not_found: Option<&Vec<NodeId>>,
-        includes: &str,
+        includes_format: &str,
+        includes_vars: &[String],
         defines: &HashMap<&str, String>,
     ) -> String {
         self.func_requests.borrow_mut().found_check_header = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+
+        // Create placeholder for includes
+        let placeholder =
+            self.create_code_placeholder(includes_format.to_string(), includes_vars.len());
+        self.require_snippet(placeholder.clone());
+        let includes_expr = if includes_vars.is_empty() {
+            format!("\"{}\"", placeholder)
+        } else {
+            format!("&format!(\"{}\", {})", placeholder, includes_vars.join(", "))
+        };
+
         let mut ret = String::new();
         for header in headers {
             let check_header = self.enclose_by_rust_tags(
                 format!(
-                    "check_header(cc, \"{}\", {:?}, &CPPFLAGS)",
-                    header, includes
+                    "check_header(cc, \"{}\", {}, &CPPFLAGS)",
+                    header, includes_expr
                 ),
                 false,
             );
@@ -1185,15 +1214,27 @@ impl<'a> TranslatingPrinter<'a> {
         symbols: &[String],
         action_if_found: Option<&Vec<NodeId>>,
         action_if_not_found: Option<&Vec<NodeId>>,
-        includes: &str,
+        includes_format: &str,
+        includes_vars: &[String],
         defines: &HashMap<&str, String>,
     ) -> String {
         self.func_requests.borrow_mut().found_check_decl = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+
+        // Create placeholder for includes
+        let placeholder =
+            self.create_code_placeholder(includes_format.to_string(), includes_vars.len());
+        self.require_snippet(placeholder.clone());
+        let includes_expr = if includes_vars.is_empty() {
+            format!("\"{}\"", placeholder)
+        } else {
+            format!("&format!(\"{}\", {})", placeholder, includes_vars.join(", "))
+        };
+
         let mut ret = String::new();
         for symbol in symbols {
             let check_decl = self.enclose_by_rust_tags(
-                format!("check_decl(cc, \"{}\", {:?}, &CPPFLAGS)", symbol, includes),
+                format!("check_decl(cc, \"{}\", {}, &CPPFLAGS)", symbol, includes_expr),
                 false,
             );
 
@@ -1277,64 +1318,145 @@ impl<'a> TranslatingPrinter<'a> {
         ret
     }
 
-    /// Format a program string for use in check_compile/check_link calls.
-    /// Handles shell variable substitution by generating format!() when needed.
-    fn format_program_code(&self, prog: &str) -> String {
-        // Regex to match $VAR or ${VAR} patterns
-        let re = regex::Regex::new(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?").unwrap();
+    fn display_ac_check_types(
+        &self,
+        indent_level: usize,
+        types: &[String],
+        action_if_found: Option<&Vec<NodeId>>,
+        action_if_not_found: Option<&Vec<NodeId>>,
+        includes_format: &str,
+        includes_vars: &[String],
+        defines: &HashMap<&str, String>,
+    ) -> String {
+        self.func_requests.borrow_mut().found_check_type = true;
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
 
-        let mut vars = Vec::new();
-        let format_str = re.replace_all(prog, |caps: &regex::Captures| {
-            let var_name = caps.get(1).unwrap().as_str();
-            vars.push(var_name.to_string());
-            "{}" // format! placeholder
-        });
-
-        if vars.is_empty() {
-            // No shell variables: use simple string literal
-            format!("{:?}", prog)
+        // Create placeholder for includes
+        let placeholder =
+            self.create_code_placeholder(includes_format.to_string(), includes_vars.len());
+        self.require_snippet(placeholder.clone());
+        let includes_expr = if includes_vars.is_empty() {
+            format!("\"{}\"", placeholder)
         } else {
-            // Has shell variables: use format!() macro
-            // Escape for Rust string, then escape braces except placeholders
-            let escaped = Self::escape_rust_string(&format_str);
-            // Escape { and } to {{ and }} except for our {} placeholders
-            let mut result = String::new();
-            let mut chars = escaped.chars().peekable();
-            while let Some(c) = chars.next() {
-                match c {
-                    '{' => {
-                        if chars.peek() == Some(&'}') {
-                            // This is a {} placeholder, keep it
-                            result.push('{');
-                            result.push('}');
-                            chars.next();
-                        } else {
-                            // Escape lone {
-                            result.push_str("{{");
-                        }
-                    }
-                    '}' => {
-                        // Escape lone }
-                        result.push_str("}}");
-                    }
-                    _ => result.push(c),
-                }
-            }
-            format!("&format!(\"{}\", {})", result, vars.join(", "))
+            format!("&format!(\"{}\", {})", placeholder, includes_vars.join(", "))
+        };
+
+        let mut ret = String::new();
+        for type_name in types {
+            let check_type = self.enclose_by_rust_tags(
+                format!(
+                    "check_type(cc, \"{}\", {}, &CPPFLAGS)",
+                    type_name, includes_expr
+                ),
+                false,
+            );
+
+            let define = defines
+                .iter()
+                .find_map(|(k, v)| k.contains(reproduce_cfg_name(type_name).as_str()).then_some(v))
+                .map(|def| {
+                    format!(
+                        "\n{tab}{tab}{}",
+                        self.enclose_by_rust_tags(def.to_owned(), true)
+                    )
+                })
+                .unwrap_or_default();
+
+            let action_if_found = action_if_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+
+            let action_if_not_found = action_if_not_found
+                .map(|cmds| self.display_body(cmds, indent_level + 1))
+                .unwrap_or_default();
+
+            ret.push_str(&format!(
+                "{tab}if {check_type} {{{define}\n{action_if_found}{tab}}}{}",
+                if action_if_not_found.is_empty() {
+                    Default::default()
+                } else {
+                    format!(" else {{\n{action_if_not_found}{tab}}}")
+                },
+            ));
         }
+        ret
+    }
+
+    fn display_ac_check_sizeof(
+        &self,
+        indent_level: usize,
+        type_name: &str,
+        includes_format: &str,
+        includes_vars: &[String],
+        defines: &HashMap<&str, String>,
+    ) -> String {
+        self.func_requests.borrow_mut().found_check_sizeof = true;
+        self.func_requests.borrow_mut().found_define = true;
+        let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
+        let tab_1 = " ".repeat((indent_level + 1) * Self::TAB_WIDTH);
+
+        // Create placeholder for includes
+        let placeholder =
+            self.create_code_placeholder(includes_format.to_string(), includes_vars.len());
+        self.require_snippet(placeholder.clone());
+        let includes_expr = if includes_vars.is_empty() {
+            format!("\"{}\"", placeholder)
+        } else {
+            format!("&format!(\"{}\", {})", placeholder, includes_vars.join(", "))
+        };
+
+        let check_sizeof = self.enclose_by_rust_tags(
+            format!(
+                "check_sizeof(cc, \"{}\", {}, &CPPFLAGS)",
+                type_name, includes_expr
+            ),
+            false,
+        );
+
+        // Generate the define key (e.g., "int *" -> "SIZEOF_INT_P")
+        let sizeof_key = format!("SIZEOF_{}", sanitize_c_name(type_name));
+
+        // Check if there's a custom define from macro effects
+        let define_call = defines
+            .iter()
+            .find_map(|(k, v)| k.contains(reproduce_cfg_name(type_name).as_str()).then_some(v.clone()))
+            .unwrap_or_else(|| format!("define_cfg({:?}, Some(&size.to_string()))", sizeof_key));
+
+        self.require_snippet(define_call.clone());
+
+        let define_rust = self.enclose_by_rust_tags(define_call, true);
+        let define_zero = self.enclose_by_rust_tags(
+            format!("define_cfg({:?}, Some(\"0\"))", sizeof_key),
+            false,
+        );
+
+        format!(
+            "{tab}if let Some(size) = {} {{\n{tab_1}{}\n{tab}}} else {{\n{tab_1}{}\n{tab}}}",
+            check_sizeof, define_rust, define_zero
+        )
     }
 
     fn display_ac_compile_check(
         &self,
         indent_level: usize,
-        code: &str,
+        code_format: &str,
+        code_vars: &[String],
         action_if_true: Option<&Vec<NodeId>>,
         action_if_false: Option<&Vec<NodeId>>,
     ) -> String {
         self.func_requests.borrow_mut().found_check_compile = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
 
-        let code_expr = self.format_program_code(code);
+        // Create placeholder and store mapping for LLM substitution
+        let placeholder = self.create_code_placeholder(code_format.to_string(), code_vars.len());
+        self.require_snippet(placeholder.clone());
+
+        let code_expr = if code_vars.is_empty() {
+            format!("\"{}\"", placeholder)
+        } else {
+            format!("&format!(\"{}\", {})", placeholder, code_vars.join(", "))
+        };
+
         let check_compile = self.enclose_by_rust_tags(
             format!("check_compile(&CC, &CFLAGS, &CPPFLAGS, {})", code_expr),
             false,
@@ -1361,14 +1483,24 @@ impl<'a> TranslatingPrinter<'a> {
     fn display_ac_link_check(
         &self,
         indent_level: usize,
-        code: &str,
+        code_format: &str,
+        code_vars: &[String],
         action_if_true: Option<&Vec<NodeId>>,
         action_if_false: Option<&Vec<NodeId>>,
     ) -> String {
         self.func_requests.borrow_mut().found_check_link = true;
         let tab = " ".repeat(indent_level * Self::TAB_WIDTH);
 
-        let code_expr = self.format_program_code(code);
+        // Create placeholder and store mapping for LLM substitution
+        let placeholder = self.create_code_placeholder(code_format.to_string(), code_vars.len());
+        self.require_snippet(placeholder.clone());
+
+        let code_expr = if code_vars.is_empty() {
+            format!("\"{}\"", placeholder)
+        } else {
+            format!("&format!(\"{}\", {})", placeholder, code_vars.join(", "))
+        };
+
         let check_link = self.enclose_by_rust_tags(
             format!("check_link(&CC, &CFLAGS, &LDFLAGS, &LIBS, {})", code_expr),
             false,
@@ -1805,10 +1937,10 @@ impl<'a> NodePool<AcWord> for TranslatingPrinter<'a> {
                         let path = format!("Path::new(\"{}\")", filename);
                         self.require_snippet(path.clone());
 
-                        // Use heredoc placeholder system for LLM-friendly output
+                        // Use code placeholder system for LLM-friendly output
                         let (format_string, vars) = self.take_format_string_and_vars(heredoc);
                         let placeholder =
-                            self.create_heredoc_placeholder(format_string, vars.len());
+                            self.create_code_placeholder(format_string, vars.len());
                         self.require_snippet(placeholder.clone());
 
                         // Build the content string using the placeholder
@@ -2000,15 +2132,17 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 };
                 let action_if_found = macro_call.get_arg_as_cmd(1);
                 let action_if_not_found = macro_call.get_arg_as_cmd(2);
-                let includes = self
-                    .display_macro_arg_program(macro_call, 3)
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(3)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
                 self.display_ac_check_headers(
                     indent_level,
                     &[header],
                     action_if_found.as_ref(),
                     action_if_not_found.as_ref(),
-                    &includes,
+                    &includes_format,
+                    &includes_vars,
                     &required_defines,
                 )
             }
@@ -2021,15 +2155,17 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     .collect::<Vec<_>>();
                 let action_if_found = macro_call.get_arg_as_cmd(1);
                 let action_if_not_found = macro_call.get_arg_as_cmd(2);
-                let includes = self
-                    .display_macro_arg_program(macro_call, 3)
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(3)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
                 self.display_ac_check_headers(
                     indent_level,
                     &headers,
                     action_if_found.as_ref(),
                     action_if_not_found.as_ref(),
-                    &includes,
+                    &includes_format,
+                    &includes_vars,
                     &required_defines,
                 )
             }
@@ -2102,15 +2238,17 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                 };
                 let action_if_found = macro_call.get_arg_as_cmd(1);
                 let action_if_not_found = macro_call.get_arg_as_cmd(2);
-                let includes = self
-                    .display_macro_arg_program(macro_call, 3)
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(3)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
                 self.display_ac_check_decls(
                     indent_level,
                     &[symbol],
                     action_if_found.as_ref(),
                     action_if_not_found.as_ref(),
-                    &includes,
+                    &includes_format,
+                    &includes_vars,
                     &required_defines,
                 )
             }
@@ -2123,15 +2261,17 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     .collect::<Vec<_>>();
                 let action_if_found = macro_call.get_arg_as_cmd(1);
                 let action_if_not_found = macro_call.get_arg_as_cmd(2);
-                let includes = self
-                    .display_macro_arg_program(macro_call, 3)
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(3)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
                 self.display_ac_check_decls(
                     indent_level,
                     &symbols,
                     action_if_found.as_ref(),
                     action_if_not_found.as_ref(),
-                    &includes,
+                    &includes_format,
+                    &includes_vars,
                     &required_defines,
                 )
             }
@@ -2168,67 +2308,144 @@ impl<'a> DisplayM4 for TranslatingPrinter<'a> {
                     &required_defines,
                 )
             }
+            "AC_CHECK_TYPE" => {
+                let type_name = match macro_call.args.first().unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone(),
+                    _ => unreachable!(),
+                };
+                let action_if_found = macro_call.get_arg_as_cmd(1);
+                let action_if_not_found = macro_call.get_arg_as_cmd(2);
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(3)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
+                    .unwrap_or_default();
+                self.display_ac_check_types(
+                    indent_level,
+                    &[type_name],
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &includes_format,
+                    &includes_vars,
+                    &required_defines,
+                )
+            }
+            "AC_CHECK_TYPES" => {
+                let types = macro_call
+                    .get_arg_as_array(0)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|word| self.display_word(&word, false))
+                    .collect::<Vec<_>>();
+                let action_if_found = macro_call.get_arg_as_cmd(1);
+                let action_if_not_found = macro_call.get_arg_as_cmd(2);
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(3)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
+                    .unwrap_or_default();
+                self.display_ac_check_types(
+                    indent_level,
+                    &types,
+                    action_if_found.as_ref(),
+                    action_if_not_found.as_ref(),
+                    &includes_format,
+                    &includes_vars,
+                    &required_defines,
+                )
+            }
+            "AC_CHECK_SIZEOF" => {
+                let type_name = match macro_call.args.first().unwrap() {
+                    M4Argument::Word(word) => self.display_word(word, false),
+                    M4Argument::Literal(lit) => lit.clone(),
+                    _ => unreachable!(),
+                };
+                let (includes_format, includes_vars) = macro_call
+                    .get_arg_as_program(2)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
+                    .unwrap_or_default();
+                self.display_ac_check_sizeof(
+                    indent_level,
+                    &type_name,
+                    &includes_format,
+                    &includes_vars,
+                    &required_defines,
+                )
+            }
             "PKG_CHECK_MODULES" => self.display_pkg_check_modules(node_id, indent_level),
             "AC_COMPILE_IFELSE" => {
                 // AC_COMPILE_IFELSE([input], [action-if-true], [action-if-false])
-                let code = self
-                    .display_macro_arg_program(macro_call, 0)
+                let (code_format, code_vars) = macro_call
+                    .get_arg_as_program(0)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
                 let action_if_true = macro_call.get_arg_as_cmd(1);
                 let action_if_false = macro_call.get_arg_as_cmd(2);
                 self.display_ac_compile_check(
                     indent_level,
-                    &code,
+                    &code_format,
+                    &code_vars,
                     action_if_true.as_ref(),
                     action_if_false.as_ref(),
                 )
             }
             "AC_TRY_COMPILE" => {
                 // AC_TRY_COMPILE([includes], [function-body], [action-if-true], [action-if-false])
-                let includes = self
-                    .display_macro_arg_program(macro_call, 0)
+                let (includes_fmt, includes_vars) = macro_call
+                    .get_arg_as_program(0)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
-                let body = self
-                    .display_macro_arg_program(macro_call, 1)
+                let (body_fmt, body_vars) = macro_call
+                    .get_arg_as_program(1)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
-                let code = format!("{}\nint main() {{ {} return 0; }}", includes, body);
+                let code_format = format!("{includes_fmt}\\nint main() {{{{ {body_fmt} return 0; }}}}");
+                let mut code_vars = includes_vars;
+                code_vars.extend(body_vars);
                 let action_if_true = macro_call.get_arg_as_cmd(2);
                 let action_if_false = macro_call.get_arg_as_cmd(3);
                 self.display_ac_compile_check(
                     indent_level,
-                    &code,
+                    &code_format,
+                    &code_vars,
                     action_if_true.as_ref(),
                     action_if_false.as_ref(),
                 )
             }
             "AC_LINK_IFELSE" => {
                 // AC_LINK_IFELSE([input], [action-if-true], [action-if-false])
-                let code = self
-                    .display_macro_arg_program(macro_call, 0)
+                let (code_format, code_vars) = macro_call
+                    .get_arg_as_program(0)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
                 let action_if_true = macro_call.get_arg_as_cmd(1);
                 let action_if_false = macro_call.get_arg_as_cmd(2);
                 self.display_ac_link_check(
                     indent_level,
-                    &code,
+                    &code_format,
+                    &code_vars,
                     action_if_true.as_ref(),
                     action_if_false.as_ref(),
                 )
             }
             "AC_TRY_LINK" => {
                 // AC_TRY_LINK([includes], [function-body], [action-if-true], [action-if-false])
-                let includes = self
-                    .display_macro_arg_program(macro_call, 0)
+                let (includes_fmt, includes_vars) = macro_call
+                    .get_arg_as_program(0)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
-                let body = self
-                    .display_macro_arg_program(macro_call, 1)
+                let (body_fmt, body_vars) = macro_call
+                    .get_arg_as_program(1)
+                    .map(|prog| self.take_format_string_and_vars(&prog))
                     .unwrap_or_default();
-                let code = format!("{}\nint main() {{ {} return 0; }}", includes, body);
+                let code_format = format!("{}\\nint main() {{{{ {} return 0; }}}}", includes_fmt, body_fmt);
+                let mut code_vars = includes_vars;
+                code_vars.extend(body_vars);
                 let action_if_true = macro_call.get_arg_as_cmd(2);
                 let action_if_false = macro_call.get_arg_as_cmd(3);
                 self.display_ac_link_check(
                     indent_level,
-                    &code,
+                    &code_format,
+                    &code_vars,
                     action_if_true.as_ref(),
                     action_if_false.as_ref(),
                 )

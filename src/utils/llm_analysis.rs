@@ -103,6 +103,9 @@ pub(crate) trait LLMAnalysis {
         evidence: &Self::Evidence,
         max_retries: usize,
     ) -> Result<LLMResultWithMeta<Self::Output>, String> {
+        if max_retries <= 0 {
+            return Err(format!("Validation failed after 0 attempts:\n",));
+        }
         const RETRY_DELAY_MS: u64 = 5000;
 
         let api_key = std::env::var("OPENAI_API_KEY").unwrap_or("sk-TESTKEY".into());

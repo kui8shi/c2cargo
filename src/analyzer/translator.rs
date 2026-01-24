@@ -171,7 +171,7 @@ impl Analyzer {
                 e.required_snippets.extend(printer.get_required_snippets());
                 e.func_requests.merge(printer.get_func_requests());
                 e.features.extend(printer.get_cargo_features());
-                e.placeholders.extend(printer.get_heredoc_placeholders());
+                e.placeholders.extend(printer.get_code_placeholders());
 
                 rust_lines.push(printed);
             }
@@ -673,7 +673,7 @@ impl Analyzer {
                     body_header,
                     body_footer,
                     depending_func_defs,
-                    heredoc_placeholders: printer.get_heredoc_placeholders(),
+                    code_placeholders: printer.get_code_placeholders(),
                     banned: printer.get_banned_patterns(),
                 };
                 inputs.push((input, evidence));
@@ -706,7 +706,6 @@ impl Analyzer {
                             retry_count: result.retry_count,
                         },
                     );
-                    // Heredoc placeholder restoration is handled in validate()
                     res.insert(chunk_id, result.output);
                 }
 
@@ -1168,6 +1167,8 @@ fn main() {{
             "check_compile",
             "check_func",
             "check_link",
+            "check_type",
+            "check_sizeof",
             "pkg_config",
         ]) + &get_function_definition_record(record_path)
             + "\n"

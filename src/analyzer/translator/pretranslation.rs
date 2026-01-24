@@ -11,22 +11,7 @@ fn check_header(cc: &str, header: &str, prelude: &str, cppflags: &[String]) -> b
     for flag in cppflags {
         cmd.arg(flag);
     }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Ok(mut child) = cmd.spawn() {
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-            stdin
-                .write_all(test_prog.as_bytes())
-                .expect("failed to write to cc stdin");
-        }
-        let status = child.wait().expect("failed to wait on cc header check");
-        status.success()
-    } else {
-        false
-    }
+    execute_cmd(&mut cmd, Some(&test_prog)).is_some()
 }"#
 }
 
@@ -57,22 +42,7 @@ fn check_library(
         for flag in ldflags {
             cmd.arg(flag);
         }
-        cmd.stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        if let Ok(mut child) = cmd.spawn() {
-            {
-                use std::io::Write;
-                let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-                stdin
-                    .write_all(test_prog.as_bytes())
-                    .expect("failed to write to cc stdin");
-            }
-            let status = child.wait().expect("failed to wait on cc link test");
-            status.success()
-        } else {
-            false
-        }
+        execute_cmd(&mut cmd, Some(&test_prog)).is_some()
     };
 
     if try_std {
@@ -109,22 +79,7 @@ fn check_decl(cc: &str, symbol: &str, prelude: &str, cppflags: &[String]) -> boo
     for flag in cppflags {
         cmd.arg(flag);
     }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Ok(mut child) = cmd.spawn() {
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-            stdin
-                .write_all(test_prog.as_bytes())
-                .expect("failed to write to cc stdin");
-        }
-        let status = child.wait().expect("failed to wait on cc declaration check");
-        status.success()
-    } else {
-        false
-    }
+    execute_cmd(&mut cmd, Some(&test_prog)).is_some()
 }"#
 }
 
@@ -141,22 +96,7 @@ fn check_func(cc: &str, function_name: &str, ldflags: &[String]) -> bool {
     for flag in ldflags {
         cmd.arg(flag);
     }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Ok(mut child) = cmd.spawn() {
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-            stdin
-                .write_all(test_prog.as_bytes())
-                .expect("failed to write to cc stdin");
-        }
-        let status = child.wait().expect("failed to wait on cc func check");
-        status.success()
-    } else {
-        false
-    }
+    execute_cmd(&mut cmd, Some(&test_prog)).is_some()
 }"#
 }
 
@@ -171,22 +111,7 @@ fn check_compile(cc: &str, cflags: &[String], cppflags: &[String], code: &str) -
     for flag in cppflags {
         cmd.arg(flag);
     }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Ok(mut child) = cmd.spawn() {
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-            stdin
-                .write_all(code.as_bytes())
-                .expect("failed to write to cc stdin");
-        }
-        let status = child.wait().expect("failed to wait on cc compile check");
-        status.success()
-    } else {
-        false
-    }
+    execute_cmd(&mut cmd, Some(code)).is_some()
 }"#
 }
 
@@ -204,22 +129,70 @@ fn check_link(cc: &str, cflags: &[String], ldflags: &[String], libs: &[String], 
     for lib in libs {
         cmd.arg(lib);
     }
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    if let Ok(mut child) = cmd.spawn() {
-        {
-            use std::io::Write;
-            let mut stdin = child.stdin.take().expect("failed to open stdin for cc");
-            stdin
-                .write_all(code.as_bytes())
-                .expect("failed to write to cc stdin");
-        }
-        let status = child.wait().expect("failed to wait on cc link check");
-        status.success()
-    } else {
-        false
+    execute_cmd(&mut cmd, Some(code)).is_some()
+}"#
+}
+
+pub(super) fn get_function_definition_check_type() -> &'static str {
+    r#"
+fn check_type(cc: &str, type_name: &str, prelude: &str, cppflags: &[String]) -> bool {
+    let test_prog = format!(
+        "{}\nint main() {{ if (sizeof ({})) return 0; return 0; }}",
+        prelude, type_name
+    );
+
+    let mut cmd = std::process::Command::new(cc);
+    cmd.args(&["-c", "-x", "c", "-", "-o", "/dev/null"]);
+    for flag in cppflags {
+        cmd.arg(flag);
     }
+    execute_cmd(&mut cmd, Some(&test_prog)).is_some()
+}"#
+}
+
+pub(super) fn get_function_definition_check_sizeof() -> &'static str {
+    r#"
+fn check_sizeof(cc: &str, type_name: &str, prelude: &str, cppflags: &[String]) -> Option<usize> {
+    // Test if sizeof(type) <= value compiles successfully
+    let test_le = |value: usize| -> bool {
+        let test_prog = format!(
+            "{}\nint main() {{ static int test_array[1 - 2 * !(sizeof ({}) <= {})]; return test_array[0]; }}",
+            prelude, type_name, value
+        );
+        let mut cmd = std::process::Command::new(cc);
+        cmd.args(&["-c", "-x", "c", "-", "-o", "/dev/null"]);
+        for flag in cppflags {
+            cmd.arg(flag);
+        }
+        execute_cmd(&mut cmd, Some(&test_prog)).is_some()
+    };
+
+    // First, find upper bound by exponential search (1, 3, 7, 15, 31, ...)
+    let mut ac_mid: usize = 0;
+    let ac_hi = loop {
+        if test_le(ac_mid) {
+            break ac_mid;
+        }
+        let ac_lo = ac_mid + 1;
+        if ac_lo <= ac_mid {
+            // Overflow, give up
+            return None;
+        }
+        ac_mid = 2 * ac_mid + 1;
+    };
+
+    // Binary search between 0 and ac_hi
+    let mut lo: usize = 0;
+    let mut hi = ac_hi;
+    while lo != hi {
+        let mid = (hi - lo) / 2 + lo;
+        if test_le(mid) {
+            hi = mid;
+        } else {
+            lo = mid + 1;
+        }
+    }
+    Some(lo)
 }"#
 }
 

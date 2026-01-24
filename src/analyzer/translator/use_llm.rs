@@ -18,7 +18,8 @@ use crate::{
 use super::pretranslation::{
     get_function_definition_check_compile, get_function_definition_check_func,
     get_function_definition_check_header, get_function_definition_check_library,
-    get_function_definition_check_link,
+    get_function_definition_check_link, get_function_definition_check_sizeof,
+    get_function_definition_check_type,
 };
 
 use itertools::Itertools;
@@ -56,7 +57,7 @@ pub(super) struct LLMBasedTranslationOutput {
 }
 
 impl LLMBasedTranslationOutput {
-    /// Restore heredoc placeholders in the function body with their original content.
+    /// Restore code placeholders in the function body with their original content.
     pub fn restore_placeholders(&mut self, mappings: &[(String, String)]) {
         for (placeholder_fmt, original_fmt) in mappings {
             self.rust_func_body = self.rust_func_body.replace(placeholder_fmt, original_fmt);
@@ -156,6 +157,8 @@ fn sanitize_rust_name(s: &str) -> String {
         ("check_func", get_function_definition_check_func()),
         ("check_compile", get_function_definition_check_compile()),
         ("check_link", get_function_definition_check_link()),
+        ("check_type", get_function_definition_check_type()),
+        ("check_sizeof", get_function_definition_check_sizeof()),
         ("pkg_config", get_function_definition_pkg_config()),
     ]);
     ["modules_std", "module_regex", "execute_cmd"]
@@ -177,8 +180,9 @@ pub(super) struct LLMBasedTranslationEvidence {
     pub body_header: String,
     pub body_footer: String,
     pub depending_func_defs: String,
-    /// Heredoc placeholders: (placeholder_format, original_format)
-    pub heredoc_placeholders: Vec<(String, String)>,
+    /// Code placeholders: (placeholder_format, original_format)
+    /// Used for heredocs, C code in check_* functions, etc.
+    pub code_placeholders: Vec<(String, String)>,
     /// banned pattern and the reason message.
     pub banned: Vec<(String, String)>,
 }
@@ -231,9 +235,9 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
             }
         }
 
-        // Restore heredoc placeholders before compile check
+        // Restore code placeholders before compile check
         // This ensures the actual content is validated during compilation
-        self.restore_placeholders(&evidence.heredoc_placeholders);
+        self.restore_placeholders(&evidence.code_placeholders);
 
         // compile check
         {
@@ -364,15 +368,12 @@ pkg-config = "*"
 
 fn detect_no_op_patterns(src: &str, values: &Vec<String>) -> Result<(), Vec<String>> {
     let mut err = Vec::new();
-    let patterns = [r#"let\s+_[A-Za-z0-9_]*\s*=\s*_[A-Za-z0-9_]*"#]
-        .map(|pat| pat.to_owned())
-        .into_iter()
-        .chain(values.iter().flat_map(|val| {
-            [
-                format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val)),
-                format!(r#"format!("{{}}", {})"#, regex::escape(val)),
-            ]
-        }));
+    let patterns = values.iter().flat_map(|val| {
+        [
+            format!(r"let\s+_[A-Za-z0-9_]*\s*=\s*_?{}", regex::escape(val)),
+            format!(r#"format!("{{}}", {})"#, regex::escape(val)),
+        ]
+    });
     for pat in patterns {
         if let Ok(re) = regex::Regex::new(&pat) {
             for mat in re.find_iter(src) {

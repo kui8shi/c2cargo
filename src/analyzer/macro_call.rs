@@ -435,6 +435,14 @@ impl Analyzer {
                 .map(|s| s.to_owned())
         };
 
+        let sanitize_version = |input: &str| -> Option<String> {
+            let re = Regex::new(
+                r"(?i)^[^0-9]*(([0-9]+)(\.[0-9]+)?(\.[0-9]+)?(?:-[0-9a-z.-]+)?(?:\+[0-9a-z.-]+)?)",
+            )
+            .unwrap();
+            re.captures(input).map(|cap| cap[1].to_string())
+        };
+
         if let Some(v) = macro_calls.get("AC_INIT") {
             for (_, macro_call) in v {
                 // AC_INIT([package-name], [version], [bug-report], [tarname], [url])
@@ -457,7 +465,7 @@ impl Analyzer {
                     .as_ref()
                     .and_then(word_as_literal))
                 {
-                    metadata.version = Some(version);
+                    metadata.version = sanitize_version(version.as_str());
                 }
                 if let Some(bug_report) = macro_call.get_arg_as_literal(2) {
                     metadata.bug_report = Some(bug_report);
