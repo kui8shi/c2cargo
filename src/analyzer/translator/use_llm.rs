@@ -195,16 +195,18 @@ impl LLMOutput<LLMBasedTranslationEvidence> for LLMBasedTranslationOutput {
         if self.id != evidence.id {
             err.push(format!("Correct Id: '{}'", evidence.id));
         }
-        for snippet in evidence.snippets.iter() {
-            if snippet.is_empty() {
-                continue;
-            }
-            if !self.rust_func_body.contains(snippet) {
-                err.push(format!(
-                    "The translated output must contains a snippet '{}' exactly.",
-                    snippet
-                ));
-            }
+        let missing_snippets = evidence
+            .snippets
+            .iter()
+            .filter(|s| !s.is_empty())
+            .filter(|s| !self.rust_func_body.contains(s.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing_snippets.is_empty() {
+            err.push(format!(
+                "The translated output must contains snippets: {} exactly.",
+                missing_snippets.join(", ")
+            ));
         }
         for func in &evidence.extra_validation_funcs {
             if let Some(err_msg) = func(&self.rust_func_body) {
@@ -291,6 +293,8 @@ pkg-config = "*"
                     evidence
                         .features
                         .iter()
+                        .sorted()
+                        .dedup()
                         .map(|f| format!("{} = []", f))
                         .join("\n")
                 );

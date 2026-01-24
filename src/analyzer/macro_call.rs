@@ -4,7 +4,10 @@ use std::{
 };
 
 use autotools_parser::{
-    ast::{node::AcCommand, MayM4},
+    ast::{
+        node::{AcCommand, AcWord},
+        MayM4,
+    },
     m4_macro::{M4Argument, Var, VarAttrs, CPP, MACROS},
 };
 use regex::Regex;
@@ -188,7 +191,13 @@ impl Analyzer {
     fn consume_notice_macros(&mut self) {
         let mut remove_nodes = HashSet::new();
         let macro_calls = self.macro_calls();
-        for notice_macro in ["AC_PREREQ", "AC_COPYRIGHT", "AC_REVISION", "AH_TOP", "LT_PREREQ"] {
+        for notice_macro in [
+            "AC_PREREQ",
+            "AC_COPYRIGHT",
+            "AC_REVISION",
+            "AH_TOP",
+            "LT_PREREQ",
+        ] {
             if let Some(v) = macro_calls.get(notice_macro) {
                 for (node_id, _) in v {
                     remove_nodes.insert(*node_id);
@@ -419,6 +428,13 @@ impl Analyzer {
 
         let mut metadata = super::ProjectMetadata::default();
 
+        let word_as_literal = |word: &AcWord| -> Option<String> {
+            as_single(word)
+                .and_then(as_shell)
+                .and_then(as_literal)
+                .map(|s| s.to_owned())
+        };
+
         if let Some(v) = macro_calls.get("AC_INIT") {
             for (_, macro_call) in v {
                 // AC_INIT([package-name], [version], [bug-report], [tarname], [url])
@@ -436,7 +452,11 @@ impl Analyzer {
                         .to_lowercase();
                     metadata.name = Some(rust_name);
                 }
-                if let Some(version) = macro_call.get_arg_as_literal(1) {
+                if let Some(version) = macro_call.get_arg_as_literal(1).or(macro_call
+                    .get_arg_as_word(1)
+                    .as_ref()
+                    .and_then(word_as_literal))
+                {
                     metadata.version = Some(version);
                 }
                 if let Some(bug_report) = macro_call.get_arg_as_literal(2) {
@@ -445,7 +465,11 @@ impl Analyzer {
                 if let Some(tarname) = macro_call.get_arg_as_literal(3) {
                     metadata.tarname = Some(tarname);
                 }
-                if let Some(url) = macro_call.get_arg_as_literal(4) {
+                if let Some(url) = macro_call.get_arg_as_literal(4).or(macro_call
+                    .get_arg_as_word(4)
+                    .as_ref()
+                    .and_then(word_as_literal))
+                {
                     metadata.url = Some(url);
                 }
             }
