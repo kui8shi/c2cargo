@@ -23,6 +23,7 @@ fn check_library(
     search_libs: &[&str],
     other_libs: &[&str],
     ldflags: &[String],
+    libs: &[String],
     try_std: bool,
 ) -> Result<Option<String>, ()> {
     let test_prog = format!(
@@ -30,10 +31,10 @@ fn check_library(
         function_name
     );
 
-    let try_link = |libs: &[&str]| -> bool {
+    let try_link = |search_libs: &[&str]| -> bool {
         let mut cmd = std::process::Command::new(cc);
         cmd.args(&["-x", "c", "-", "-o", "/dev/null"]);
-        for lib in libs {
+        for lib in search_libs {
             cmd.arg(format!("-l{}", lib));
         }
         for lib in other_libs {
@@ -41,6 +42,9 @@ fn check_library(
         }
         for flag in ldflags {
             cmd.arg(flag);
+        }
+        for lib in libs {
+            cmd.arg(lib);
         }
         execute_cmd(&mut cmd, Some(&test_prog)).is_some()
     };
@@ -85,7 +89,7 @@ fn check_decl(cc: &str, symbol: &str, prelude: &str, cppflags: &[String]) -> boo
 
 pub(super) fn get_function_definition_check_func() -> &'static str {
     r#"
-fn check_func(cc: &str, function_name: &str, ldflags: &[String]) -> bool {
+fn check_func(cc: &str, function_name: &str, ldflags: &[String], libs: &[String]) -> bool {
     let test_prog = format!(
         "char {0} (void); int main (void) {{ return {0} (); }}",
         function_name
@@ -95,6 +99,9 @@ fn check_func(cc: &str, function_name: &str, ldflags: &[String]) -> bool {
     cmd.args(&["-x", "c", "-", "-o", "/dev/null"]);
     for flag in ldflags {
         cmd.arg(flag);
+    }
+    for lib in libs {
+        cmd.arg(lib);
     }
     execute_cmd(&mut cmd, Some(&test_prog)).is_some()
 }"#

@@ -989,20 +989,20 @@ impl Analyzer {
                 let data_type = self.get_data_type(var_name);
                 let var_output = match data_type {
                     DataType::List(ty) if *ty == DataType::Literal => {
-                        format!("{}.join(\" \")", var_name)
+                        format!("&{}.join(\" \")", var_name)
                     }
                     DataType::Boolean => format!("if {} {{ \"1\" }} else {{ \"0\" }}", var_name),
-                    DataType::Integer => format!("{}.to_string()", var_name),
+                    DataType::Integer => format!("&{}.to_string()", var_name),
                     DataType::Path => format!("{}.to_str().unwrap()", var_name),
                     DataType::Optional(ty) if *ty == DataType::Literal => format!(
                         "{}.as_ref().map(|v| v.as_str()).unwrap_or_default()",
                         var_name
                     ),
-                    DataType::Literal | DataType::Either(_, _) => var_name.to_string(),
+                    DataType::Literal | DataType::Either(_, _) => format!("&{var_name}"),
                     _ => todo!(),
                 };
                 output.push(format!(
-                    "{tab}record(\"subst\", \"{}\", &{});",
+                    "{tab}record(\"subst\", \"{}\", {});",
                     var_name, var_output
                 ));
             }

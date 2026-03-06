@@ -194,7 +194,7 @@ impl<'a> TranslatingPrinter<'a> {
     pub fn require_snippet(&self, frag: String) {
         // won't check too long fragments
         let mut v = self.required_snippets.borrow_mut();
-        if !v.contains(&frag) {
+        if !frag.is_empty() && !v.contains(&frag) {
             v.push(frag);
         }
     }
@@ -1165,7 +1165,7 @@ impl<'a> TranslatingPrinter<'a> {
 
         let mut ret = String::new();
         let func_call = format!(
-            "check_library(cc, \"{}\", &{:?}, &{:?}, &LDFLAGS, {:?})",
+            "check_library(cc, \"{}\", &{:?}, &{:?}, &LDFLAGS, &LIBS, {:?})",
             func, libs, other_libs, try_std
         );
 
@@ -1282,7 +1282,7 @@ impl<'a> TranslatingPrinter<'a> {
         let mut ret = String::new();
         for function in functions {
             let check_func = self
-                .enclose_by_rust_tags(format!("check_func(cc, \"{}\", &LDFLAGS)", function), false);
+                .enclose_by_rust_tags(format!("check_func(cc, \"{}\", &LDFLAGS, &LIBS)", function), false);
 
             let define = defines
                 .iter()
