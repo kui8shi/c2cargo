@@ -1,4 +1,6 @@
 //! Structs & Methods for Value Set Analysis
+mod word_macro_eval;
+
 use crate::utils::enumerate::enumerate_combinations;
 
 use super::{
@@ -584,6 +586,15 @@ impl Analyzer {
         let mut values = Vec::new();
         use MayM4::*;
         match word {
+            Macro(macro_call) => {
+                if let Some(resolved) =
+                    word_macro_eval::eval_word_macro(self, macro_call, loc, internal_field_separator)
+                {
+                    values.extend(resolved);
+                } else {
+                    todo!("word macro {:?} at {:?}", macro_call, loc)
+                }
+            }
             Shell(WordFragment::Literal(lit)) => {
                 values.extend(
                     self.split_literal_with_internal_field_separator(lit, internal_field_separator)
@@ -632,7 +643,7 @@ impl Analyzer {
                         {
                             emit_word(&mut current_word, &mut values);
                         }
-                        _ => todo!("{:?}", f),
+                        _ => todo!("double_quoted fragment {:?} at {:?}", f, loc),
                     }
                 }
 
@@ -663,7 +674,7 @@ impl Analyzer {
                             .collect(),
                     ));
                 }
-                _ => todo!(),
+                _ => todo!("subst {:?} at {:?}", subst, loc),
             },
             Shell(w) => {
                 let lit = self.pool.shell_word_to_string(w);
@@ -672,7 +683,6 @@ impl Analyzer {
                     values.push(ValueExpr::Lit(lit));
                 }
             }
-            _ => todo!(),
         }
         values
     }
