@@ -14,6 +14,7 @@ use std::{
 pub(crate) type ChunkId = usize;
 
 #[derive(Clone, Debug, Default)]
+#[allow(dead_code)]
 pub(crate) struct ChunkTree {
     id: ChunkId,
     parent: Option<ChunkId>,
@@ -43,23 +44,6 @@ pub(crate) struct Scope {
     pub inferred_type: Option<DataType>,
 }
 
-impl Scope {
-    fn is_global(&self) -> bool {
-        self.parent.is_none() && self.owner.is_none() && self.bound_by.is_none()
-    }
-
-    fn is_empty(&self) -> bool {
-        self.parent.is_none() && self.readers.is_empty() && self.has_no_writers()
-    }
-
-    fn has_no_writers(&self) -> bool {
-        self.owner.is_none()
-            && self.bound_by.is_none()
-            && self.writers.is_empty()
-            && self.overwriters.is_empty()
-    }
-}
-
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Chunk {
     pub nodes: Vec<NodeId>,
@@ -77,6 +61,7 @@ pub(crate) struct ChunkIO {
     pub exported: HashMap<String, Vec<Location>>,
     pub bound: HashSet<String>,
     pub dictionaries: HashMap<String, HashMap<Location, DictionaryAccess>>,
+    #[allow(dead_code)]
     pub arg_vars: HashMap<String, Vec<Location>>,
 }
 

@@ -22,6 +22,7 @@ mod macros_list;
 #[derive(Debug, Default, Clone)]
 pub(super) struct FixedMacroSideEffect {
     /// name of the macro
+    #[allow(dead_code)]
     pub macro_name: String,
     /// shell variables
     pub vars: HashMap<String, (VarAttrs, String)>,

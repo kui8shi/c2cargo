@@ -143,6 +143,7 @@ impl SystemPackageManager for AptPackageManager {
 /// Error types for pkg-config operations
 #[derive(Debug)]
 pub(super) enum PkgConfigError {
+    #[allow(dead_code)]
     PkgConfigCommandError(String),
     SystemPackageManagerError(String),
     SystemPackageNotFound(String),

@@ -1,5 +1,4 @@
 use super::Analyzer;
-use itertools::Itertools;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::{

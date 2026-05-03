@@ -576,9 +576,6 @@ impl NodeInfo {
         self.is_chunk_top.unwrap_or_default()
     }
 
-    pub fn is_end_node(&self) -> bool {
-        self.pre_body_nodes.is_empty() && self.branches.is_empty()
-    }
 }
 
 /// Configuration options for the analyzer

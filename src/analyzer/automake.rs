@@ -147,30 +147,6 @@ fn as_literal(word: &WordFragment<AmWord>) -> Option<&str> {
     }
 }
 
-fn as_am(word: &AmWordFragment) -> Option<&AmVar> {
-    if let MayAm::Automake(am) = &word {
-        Some(am)
-    } else {
-        None
-    }
-}
-
-fn as_am_var(am: &AmVar) -> Option<&Vec<AmIdent>> {
-    if let AmVar::Param(MakeParameter::Var(var)) = &am {
-        Some(var)
-    } else {
-        None
-    }
-}
-
-fn as_template(am: &AmVar) -> Option<&str> {
-    if let AmVar::Template(var) = &am {
-        Some(var)
-    } else {
-        None
-    }
-}
-
 impl Analyzer {
     pub(super) fn automake(&self) -> &AutomakeAnalyzer {
         self.automake
@@ -656,7 +632,6 @@ impl Analyzer {
                 // an automake identifier is assumed not to have any make parameters (e.g. $(var)) embedded.
                 _ => Default::default(),
             },
-            _ => Default::default(),
         };
         match &ident.0 {
             Word::Empty => Vec::new(),

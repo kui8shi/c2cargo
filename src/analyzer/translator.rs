@@ -34,7 +34,6 @@ mod use_llm;
 
 #[derive(Debug, Clone, Default)]
 struct InlinedTranslationOutput {
-    pub id: ChunkId,
     pub inline_rust_code: Vec<String>,
     pub evidence: Option<InlineEvidence>,
 }
@@ -182,7 +181,6 @@ impl Analyzer {
         }
 
         Some(InlinedTranslationOutput {
-            id: chunk_id,
             inline_rust_code: rust_lines,
             evidence,
         })
@@ -571,7 +569,6 @@ impl Analyzer {
                 if script.trim().is_empty() {
                     // empty chunk
                     let inlined_output = InlinedTranslationOutput {
-                        id: chunk_id,
                         inline_rust_code: Vec::new(),
                         evidence: None,
                     };

@@ -118,40 +118,9 @@ impl RecordCollector {
         self.stage_start = Some(Instant::now());
     }
 
-    pub(crate) fn end_stage_parse(&mut self) {
-        if let Some(start) = self.stage_start.take() {
-            self.record_data.timing.parse_duration_ms = start.elapsed().as_millis() as u64;
-        }
-    }
-
-    pub(crate) fn end_stage_analysis(&mut self) {
-        if let Some(start) = self.stage_start.take() {
-            self.record_data.timing.analysis_duration_ms = start.elapsed().as_millis() as u64;
-        }
-    }
-
-    pub(crate) fn end_stage_build_option(&mut self) {
-        if let Some(start) = self.stage_start.take() {
-            self.record_data.timing.build_option_duration_ms = start.elapsed().as_millis() as u64;
-        }
-    }
-
     pub(crate) fn end_stage_translation(&mut self) {
         if let Some(start) = self.stage_start.take() {
             self.record_data.timing.translation_duration_ms = start.elapsed().as_millis() as u64;
-        }
-    }
-
-    pub(crate) fn end_stage_chunk_construction(&mut self) {
-        if let Some(start) = self.stage_start.take() {
-            self.record_data.timing.chunk_construction_duration_ms =
-                start.elapsed().as_millis() as u64;
-        }
-    }
-
-    pub(crate) fn end_stage_type_inference(&mut self) {
-        if let Some(start) = self.stage_start.take() {
-            self.record_data.timing.type_inference_duration_ms = start.elapsed().as_millis() as u64;
         }
     }
 
